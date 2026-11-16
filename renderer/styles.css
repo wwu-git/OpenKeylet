@@ -1562,3 +1562,10 @@ html.platform-macos .nav-item small { line-height: 7px; }
 .vault-management-row strong { font-size:13px; }
 .vault-management-row small { color:var(--muted); font-size:11px; }
 .vault-filters #trash-open { flex-shrink:0; height:34px; }
+
+.key-source-menu { position: relative; }
+.key-source-menu > summary { display: flex; align-items: center; height: 100%; padding: 0 8px; cursor: pointer; list-style: none; }
+.key-source-menu > summary::-webkit-details-marker { display: none; }
+.key-source-options { position: absolute; z-index: 10; inset-inline-end: 0; min-width: max-content; background: var(--chassis); border: 1px solid var(--muted); border-radius: 6px; padding: 4px; }
+.key-source-options > button { display: block; width: 100%; padding: 6px 10px; border: 0; background: transparent; color: inherit; text-align: start; font: inherit; cursor: pointer; }
+.key-source-options > button:is(:hover, :focus-visible) { background: var(--field); }

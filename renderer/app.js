@@ -214,7 +214,9 @@ const api = {
   registerAgents: (clientIds) => invoke('agent_mcp_register', { clientIds }),
   repairAgent: (clientId) => invoke('agent_mcp_repair', { clientId }),
   removeAgent: (clientId) => invoke('agent_mcp_remove', { clientId }),
-  chooseKey: () => invoke('choose_private_key'),
+  stageKey: (source, passphrase) => invoke('stage_private_key', { source, passphrase }),
+  discardKey: (id) => invoke('discard_private_key', { id }),
+  copyPublicKey: (pendingId, itemId) => invoke('copy_ssh_public_key', { pendingId, itemId }),
   quickPair: (port) => invoke('quick_pair_browser', { port }),
   resetPair: () => invoke('reset_browser_pairing'),
   extensionFolder: () => invoke('open_browser_extension_folder'),
@@ -1127,7 +1129,8 @@ function syncModuleDraft() {
       configured: row.dataset.configured === 'true',
       existing: row.dataset.existing === 'true',
       privateKeyName: row.dataset.privateKeyName || '',
-      pending: row.dataset.pending === 'true',
+      pending: row.dataset.pending || '',
+      fingerprint: row.dataset.keyFingerprint || '',
       agentVisible: $('[data-module-agent-visible]', row)?.getAttribute('aria-pressed') === 'true',
     };
   });
@@ -1155,8 +1158,22 @@ function renderModules() {
     let actions = '';
     if (module.kind === 'privateKey') {
       const keyState = module.pending ? module.privateKeyName : module.configured ? (module.privateKeyName || 'IMPORTED KEY') : localized('尚未导入', 'NOT IMPORTED');
-      control = `<div class="module-key-control"><span>${escapeHtml(keyState)}</span><button type="button" class="copy-secret-button" data-choose-module-key>SELECT</button></div>${module.secretValue ? `<div class="secret-input-control module-secret-control multiline module-key-secret"><textarea class="input textarea secret-masked" data-secret-value readonly>${escapeHtml(module.secretValue)}</textarea></div>` : '<input type="hidden" data-secret-value value="" />'}`;
-      const keyActionsDisabled = !module.secretValue;
+      const sources = [
+        ['generate', localized('生成新密钥', 'Generate new key')],
+        ['file', localized('导入密钥文件', 'Import key file')],
+        ['clipboard', localized('从剪贴板粘贴密钥', 'Paste key from clipboard')],
+      ];
+      const keyTitle = module.fingerprint ? `${keyState} · ${module.fingerprint}` : keyState;
+      control = `<div class="module-key-control"><span title="${escapeHtml(keyTitle)}">${escapeHtml(keyTitle)}</span><details class="key-source-menu"><summary class="copy-secret-button">${localized('添加私钥', 'Add private key')}</summary><div class="key-source-options">${sources.map(([source, label]) => `<button type="button" data-stage-key="${source}">${label}</button>`).join('')}</div></details></div>`;
+      if (module.pending || (module.configured && editorExistingItem?.id)) {
+        control += `<button class="small-button" type="button" data-copy-public-key>${localized('复制公钥', 'Copy public key')}</button>`;
+      }
+      if (module.secretValue && !module.pending) {
+        control += `<div class="secret-input-control module-secret-control multiline module-key-secret"><textarea class="input textarea secret-masked" data-secret-value readonly>${escapeHtml(module.secretValue)}</textarea></div>`;
+      } else {
+        control += `<input type="hidden" data-secret-value value="${escapeHtml(module.secretValue || '')}" />`;
+      }
+      const keyActionsDisabled = !module.secretValue || Boolean(module.pending);
       actions = `${secretActionButton('reveal', true, keyActionsDisabled)}${secretActionButton('copy', true, keyActionsDisabled)}`;
     } else if (definition.secret) {
       const placeholder = module.kind === 'totp' ? localized('Base32 设置密钥', 'BASE32 SETUP KEY') : localized('输入秘密值', 'ENTER SECRET VALUE');
@@ -1173,7 +1190,7 @@ function renderModules() {
     }
     const removeLabel = localized('删除模块', 'Remove module');
     const reorderLabel = localized('拖动调整顺序，或聚焦后按上/下方向键', 'Drag to reorder, or focus and use the Up/Down arrow keys');
-    return `<div class="module-row" data-module-index="${index}" data-kind="${escapeHtml(module.kind)}" data-name="${escapeHtml(module.name || '')}" data-existing="${Boolean(module.existing)}" data-configured="${Boolean(module.configured)}" data-private-key-name="${escapeHtml(module.privateKeyName || '')}" data-pending="${Boolean(module.pending)}"><button type="button" class="module-drag-handle" data-module-drag-handle aria-label="${reorderLabel}" title="${reorderLabel}" aria-keyshortcuts="ArrowUp ArrowDown"><svg viewBox="0 0 12 20" aria-hidden="true"><path d="M4 5h.01M8 5h.01M4 10h.01M8 10h.01M4 15h.01M8 15h.01"/></svg></button><button type="button" class="module-agent-toggle" data-module-agent-visible aria-pressed="${agentVisible}" aria-label="${agentVisibilityLabel}" title="${agentVisibilityLabel}"><i aria-hidden="true"></i></button><div class="module-identity">${customName}</div><div class="module-control">${control}</div><div class="module-actions ${actions ? 'full' : 'single'}">${actions}<button type="button" class="remove-module module-action-icon" data-remove-module aria-label="${removeLabel}" title="${removeLabel}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5.5h14M7.5 5.5V3.25h5v2.25M5.25 5.5l.75 11h8l.75-11M8.25 8.5v5M11.75 8.5v5"/></svg></button></div></div>`;
+    return `<div class="module-row" data-module-index="${index}" data-kind="${escapeHtml(module.kind)}" data-name="${escapeHtml(module.name || '')}" data-existing="${Boolean(module.existing)}" data-configured="${Boolean(module.configured)}" data-private-key-name="${escapeHtml(module.privateKeyName || '')}" data-pending="${escapeHtml(module.pending || '')}" data-key-fingerprint="${escapeHtml(module.fingerprint || '')}"><button type="button" class="module-drag-handle" data-module-drag-handle aria-label="${reorderLabel}" title="${reorderLabel}" aria-keyshortcuts="ArrowUp ArrowDown"><svg viewBox="0 0 12 20" aria-hidden="true"><path d="M4 5h.01M8 5h.01M4 10h.01M8 10h.01M4 15h.01M8 15h.01"/></svg></button><button type="button" class="module-agent-toggle" data-module-agent-visible aria-pressed="${agentVisible}" aria-label="${agentVisibilityLabel}" title="${agentVisibilityLabel}"><i aria-hidden="true"></i></button><div class="module-identity">${customName}</div><div class="module-control">${control}</div><div class="module-actions ${actions ? 'full' : 'single'}">${actions}<button type="button" class="remove-module module-action-icon" data-remove-module aria-label="${removeLabel}" title="${removeLabel}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5.5h14M7.5 5.5V3.25h5v2.25M5.25 5.5l.75 11h8l.75-11M8.25 8.5v5M11.75 8.5v5"/></svg></button></div></div>`;
   }).join('');
   syncModuleDraft();
 }
@@ -1236,7 +1253,7 @@ function addModule(kind, options = {}) {
     configured: false,
     existing: false,
     privateKeyName: '',
-    pending: false,
+    pending: '',
     agentVisible: defaultModuleAgentVisible(kind),
     ...options,
   });
@@ -1258,7 +1275,7 @@ function applyTemplate(template) {
     blank: [],
   };
   value('#connection-type', template === 'blank' ? 'custom' : template);
-  currentModules = (presets[template] || []).map((kind) => ({ kind, name: kind, value: kind === 'port' ? '22' : '', secretValue: '', configured: false, existing: false, privateKeyName: '', pending: false, agentVisible: defaultModuleAgentVisible(kind) }));
+  currentModules = (presets[template] || []).map((kind) => ({ kind, name: kind, value: kind === 'port' ? '22' : '', secretValue: '', configured: false, existing: false, privateKeyName: '', pending: '', agentVisible: defaultModuleAgentVisible(kind) }));
   $('#template-picker').classList.add('hidden');
   renderModules();
 }
@@ -1357,7 +1374,7 @@ async function openEditor(item = null, draft = null) {
     currentModules = (source?.modules || []).map((module) => {
       const secretName = module.kind === 'customSecret' ? module.name : module.kind;
       const privateKeyName = draft?.input?.secrets?.privateKeyName || item?.privateKeyName || '';
-      return { ...module, secretValue: ownerValues[secretName] || '', configured: Boolean(module.configured || ownerValues[secretName]), existing: Boolean(item), privateKeyName: module.kind === 'privateKey' ? privateKeyName : '', pending: false, agentVisible: typeof module.agentVisible === 'boolean' ? module.agentVisible : defaultModuleAgentVisible(module.kind) };
+      return { ...module, secretValue: ownerValues[secretName] || '', configured: Boolean(module.configured || ownerValues[secretName]), existing: Boolean(item), privateKeyName: module.kind === 'privateKey' ? privateKeyName : '', pending: '', agentVisible: typeof module.agentVisible === 'boolean' ? module.agentVisible : defaultModuleAgentVisible(module.kind) };
     });
     renderModules();
     editorReturnFocus = launcher;
@@ -1383,6 +1400,9 @@ async function openEditor(item = null, draft = null) {
 }
 
 function closeEditor() {
+  for (const { pending } of currentModules) {
+    if (pending) void api.discardKey(pending).catch(() => {});
+  }
   editorFoldAnimation?.cancel();
   editorFoldAnimation = null;
   $('#connection-modal').classList.remove('is-folding');
@@ -1429,7 +1449,7 @@ function collectModules(validate = true) {
     else if (name === 'privateKey') secrets.privateKey = fieldValue;
     else if (name) secrets.namedSecrets[name] = fieldValue;
   }
-  return { modules, secrets, privateKeyImportPath: currentModules.some((module) => module.kind === 'privateKey' && module.pending) ? 'pending' : '' };
+  return { modules, secrets, privateKeyImportPath: currentModules.find((module) => module.kind === 'privateKey' && module.pending)?.pending || '' };
 }
 
 function serializeItem(validate = true) {
@@ -1480,6 +1500,7 @@ function closeEditorWithDraft() {
 async function saveDraftAndCloseEditor() {
   try {
     const input = serializeItem(false);
+    input.privateKeyImportPath = '';
     const changed = JSON.stringify(input) !== editorInitialSnapshot;
     if (!editorHasDraftContent() && !editorExistingItem) {
       if (currentDraftId) await api.deleteDraft(currentDraftId);
@@ -1838,18 +1859,40 @@ document.addEventListener('click', async (event) => {
   }
   const toggleAgentVisible = event.target.closest('[data-module-agent-visible]');
   if (toggleAgentVisible) setModuleAgentVisibility(toggleAgentVisible, toggleAgentVisible.getAttribute('aria-pressed') !== 'true');
-  const chooseModuleKey = event.target.closest('[data-choose-module-key]');
-  if (chooseModuleKey) {
+  const stageKey = event.target.closest('[data-stage-key]');
+  if (stageKey) {
+    const row = stageKey.closest('.module-row');
+    const menu = stageKey.closest('details');
+    const buttons = $$('[data-stage-key]', menu);
+    buttons.forEach(button => { button.disabled = true; });
     try {
-      const name = await api.chooseKey();
-      if (name) {
-        syncModuleDraft();
-        const index = Number(chooseModuleKey.closest('.module-row').dataset.moduleIndex);
-        currentModules[index].pending = true;
-        currentModules[index].configured = true;
-        currentModules[index].privateKeyName = name;
-        renderModules();
+      syncModuleDraft();
+      const passphrase = currentModules.find(module => module.kind === 'passphrase')?.secretValue || null;
+      const preview = await api.stageKey(stageKey.dataset.stageKey, passphrase);
+      if (!preview) return;
+      if (!row.isConnected || $('#connection-modal').classList.contains('hidden')) {
+        await api.discardKey(preview.id);
+        return;
       }
+      syncModuleDraft();
+      const index = Number(row.dataset.moduleIndex);
+      Object.assign(currentModules[index], {
+        pending: preview.id, configured: true, privateKeyName: preview.name, fingerprint: preview.fingerprint,
+      });
+      renderModules();
+      const keyMenu = $$('.module-row', $('#module-list'))[index]?.querySelector('summary');
+      keyMenu?.focus();
+    } catch (error) { toast(cleanError(error), 'error'); }
+    finally {
+      menu.open = false;
+      buttons.forEach(button => { button.disabled = false; });
+    }
+  }
+  const copyPublicKey = event.target.closest('[data-copy-public-key]');
+  if (copyPublicKey) {
+    try {
+      await api.copyPublicKey(copyPublicKey.closest('.module-row').dataset.pending || null, editorExistingItem?.id || null);
+      toast(localized('已复制公钥', 'Public key copied'));
     } catch (error) { toast(cleanError(error), 'error'); }
   }
   const removeModuleButton = event.target.closest('[data-remove-module]');
@@ -1868,6 +1911,7 @@ document.addEventListener('click', async (event) => {
     })) return;
     if (!row.isConnected || $('#connection-modal').classList.contains('hidden')) return;
     if (removed?.existing && moduleSecretName(removed)) removedSecretFields.add(moduleSecretName(removed));
+    if (removed.pending) void api.discardKey(removed.pending).catch(() => {});
     currentModules.splice(index, 1);
     renderModules();
     const remainingRows = $$('.module-row', $('#module-list'));

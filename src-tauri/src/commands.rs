@@ -36,7 +36,7 @@ pub struct AppRuntime {
     vault: Vault,
     executable: String,
     browser: BrowserBridge,
-    pending_private_key: Mutex<Option<PathBuf>>,
+    pending_private_key: Mutex<Option<PendingPrivateKey>>,
     pending_import: Mutex<Option<PendingImport>>,
     owner_session: Mutex<OwnerSession>,
     github_backup: Mutex<GithubBackup>,
@@ -152,6 +152,7 @@ async fn owner_unlock(
 async fn owner_lock(runtime: State<'_, AppRuntime>) -> Result<OwnerLockState, String> {
     runtime.owner_session.lock().await.unlocked = false;
     *runtime.pending_import.lock().await = None;
+    runtime.pending_private_key.lock().await.take();
     owner_lock_state(&runtime).await
 }
 
@@ -182,19 +183,6 @@ async fn save_editor_draft(
 ) -> Result<OwnerEditorDraft, String> {
     require_owner_unlocked(&runtime).await?;
     keep_owner_unlocked(&runtime).await;
-    if input.private_key_import_path == "pending" {
-        let path = runtime
-            .pending_private_key
-            .lock()
-            .await
-            .take()
-            .ok_or_else(|| "Please select the SSH private key again".to_owned())?;
-        input.secrets.private_key = Some(std::fs::read_to_string(&path).map_err(command_error)?);
-        input.secrets.private_key_name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(str::to_owned);
-    }
     input.private_key_import_path.clear();
     runtime
         .vault
@@ -227,21 +215,28 @@ async fn save_connection(
     expected_updated_at: Option<String>,
 ) -> Result<PublicConnection, String> {
     require_owner_unlocked(&runtime).await?;
-    if input.private_key_import_path == "pending" {
-        let selected = runtime
-            .pending_private_key
-            .lock()
-            .await
-            .take()
-            .ok_or_else(|| "Please select the SSH private key again".to_owned())?;
-        input.private_key_import_path = selected.to_string_lossy().into_owned();
+    let mut pending = runtime.pending_private_key.lock().await;
+    let staged = !input.private_key_import_path.is_empty();
+    let private_key = if staged {
+        let key = pending
+            .as_ref()
+            .filter(|key| key.id.to_string() == input.private_key_import_path)
+            .ok_or_else(|| "Please add the SSH private key again".to_owned())?;
+        decode_private_key(&key.text, input.secrets.passphrase.as_deref())
+            .map_err(command_error)?;
+        Some((key.text.as_str(), key.name.as_str()))
     } else {
-        input.private_key_import_path.clear();
-    }
+        None
+    };
+    input.private_key_import_path.clear();
     let connection = runtime
         .vault
-        .save_connection_checked(input, expected_updated_at.as_deref())
+        .save_connection_with_private_key(input, expected_updated_at.as_deref(), private_key)
         .map_err(command_error)?;
+    if staged {
+        pending.take();
+    }
+    drop(pending);
     emit_changed(&app);
     Ok(connection)
 }
@@ -502,28 +497,141 @@ async fn agent_mcp_remove(
     Ok(runtime.agent_registry.remove(&client_id).await)
 }
 
+struct PendingPrivateKey {
+    id: Uuid,
+    name: String,
+    text: zeroize::Zeroizing<String>,
+    public_key: String,
+    fingerprint: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PrivateKeyPreview {
+    id: Uuid,
+    name: String,
+    fingerprint: String,
+}
+
+fn decode_private_key(text: &str, passphrase: Option<&str>) -> Result<russh::keys::PrivateKey> {
+    russh::keys::decode_secret_key(text.trim(), passphrase.filter(|value| !value.is_empty()))
+        .map_err(|_| anyhow::anyhow!("Invalid SSH private key or incorrect key passphrase"))
+}
+
+impl PendingPrivateKey {
+    fn parse(name: String, text: String, passphrase: Option<&str>) -> Result<Self> {
+        let text = zeroize::Zeroizing::new(text);
+        let key = decode_private_key(&text, passphrase)?;
+        Ok(Self {
+            id: Uuid::new_v4(),
+            name,
+            text,
+            public_key: key.public_key().to_openssh()?,
+            fingerprint: key
+                .fingerprint(russh::keys::ssh_key::HashAlg::Sha256)
+                .to_string(),
+        })
+    }
+
+    fn generate() -> Result<Self> {
+        use russh::keys::ssh_key::{LineEnding, private::Ed25519Keypair};
+        let mut seed = zeroize::Zeroizing::new([0_u8; 32]);
+        getrandom::fill(&mut *seed)
+            .map_err(|error| anyhow::anyhow!("Could not generate SSH key: {error}"))?;
+        let key = russh::keys::PrivateKey::from(Ed25519Keypair::from_seed(&seed));
+        Self::parse(
+            "Ed25519".into(),
+            key.to_openssh(LineEnding::LF)?.to_string(),
+            None,
+        )
+    }
+}
+
 #[tauri::command]
-async fn choose_private_key(
+async fn stage_private_key(
     app: AppHandle,
     runtime: State<'_, AppRuntime>,
-) -> Result<Option<String>, String> {
+    source: String,
+    passphrase: Option<String>,
+) -> Result<Option<PrivateKeyPreview>, String> {
     require_owner_unlocked(&runtime).await?;
-    let selected = app
-        .dialog()
-        .file()
-        .add_filter("SSH private key", &["pem", "key", "ppk", "txt"])
-        .blocking_pick_file();
-    let Some(path) = selected else {
-        return Ok(None);
+    let passphrase = zeroize::Zeroizing::new(passphrase);
+    let pending = match source.as_str() {
+        "generate" => PendingPrivateKey::generate(),
+        "file" => {
+            let selected = app.dialog().file().blocking_pick_file();
+            let Some(path) = selected else {
+                return Ok(None);
+            };
+            let path = path.into_path().map_err(command_error)?;
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("SSH key");
+            let text = std::fs::read_to_string(&path).map_err(command_error)?;
+            PendingPrivateKey::parse(name.to_owned(), text, passphrase.as_deref())
+        }
+        "clipboard" => {
+            let text = app.clipboard().read_text().map_err(command_error)?;
+            PendingPrivateKey::parse("Clipboard".into(), text, passphrase.as_deref())
+        }
+        _ => return Err("Unknown SSH key source".into()),
+    }
+    .map_err(command_error)?;
+    require_owner_unlocked(&runtime).await?;
+    let preview = PrivateKeyPreview {
+        id: pending.id,
+        name: pending.name.clone(),
+        fingerprint: pending.fingerprint.clone(),
     };
-    let path = path.into_path().map_err(command_error)?;
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("SSH KEY")
-        .to_owned();
-    *runtime.pending_private_key.lock().await = Some(path);
-    Ok(Some(name))
+    *runtime.pending_private_key.lock().await = Some(pending);
+    Ok(Some(preview))
+}
+
+#[tauri::command]
+async fn discard_private_key(runtime: State<'_, AppRuntime>, id: Uuid) -> Result<(), String> {
+    let mut pending = runtime.pending_private_key.lock().await;
+    if pending.as_ref().is_some_and(|key| key.id == id) {
+        pending.take();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn copy_ssh_public_key(
+    app: AppHandle,
+    runtime: State<'_, AppRuntime>,
+    pending_id: Option<Uuid>,
+    item_id: Option<Uuid>,
+) -> Result<(), String> {
+    require_owner_unlocked(&runtime).await?;
+    let public_key = if let Some(id) = pending_id {
+        runtime
+            .pending_private_key
+            .lock()
+            .await
+            .as_ref()
+            .filter(|key| key.id == id)
+            .map(|key| key.public_key.clone())
+            .ok_or_else(|| "Please add the SSH private key again".to_owned())?
+    } else {
+        let id =
+            item_id.ok_or_else(|| "Save the SSH key before copying its public key".to_owned())?;
+        let item = runtime.vault.get_connection(id).map_err(command_error)?;
+        let text = item
+            .secrets
+            .private_key
+            .as_deref()
+            .ok_or_else(|| "No SSH private key in this item".to_owned())?;
+        decode_private_key(text, item.secrets.passphrase.as_deref())
+            .map_err(command_error)?
+            .public_key()
+            .to_openssh()
+            .map_err(command_error)?
+    };
+    app.clipboard()
+        .write_text(public_key)
+        .map_err(command_error)
 }
 
 #[tauri::command]
@@ -1174,7 +1282,9 @@ pub fn run_gui() -> Result<()> {
             agent_mcp_register,
             agent_mcp_repair,
             agent_mcp_remove,
-            choose_private_key,
+            stage_private_key,
+            discard_private_key,
+            copy_ssh_public_key,
             quick_pair_browser,
             reset_browser_pairing,
             open_browser_extension_folder,
@@ -1228,5 +1338,74 @@ mod tests {
         assert!(should_hide_on_close("tray", true));
         assert!(!should_hide_on_close("tray", false));
         assert!(!should_hide_on_close("exit", true));
+    }
+}
+
+#[cfg(test)]
+mod ssh_key_tests {
+    use super::*;
+
+    #[test]
+    fn generated_key_round_trips_and_has_an_ed25519_public_key() {
+        let key = PendingPrivateKey::generate().unwrap();
+        let imported =
+            PendingPrivateKey::parse("imported".into(), key.text.to_string(), None).unwrap();
+        assert!(key.public_key.starts_with("ssh-ed25519 "));
+        assert_eq!(imported.public_key, key.public_key);
+        assert_eq!(imported.fingerprint, key.fingerprint);
+    }
+
+    #[test]
+    fn malformed_private_keys_are_rejected() {
+        assert!(
+            PendingPrivateKey::parse("invalid".into(), "not a private key".into(), None).is_err()
+        );
+    }
+
+    #[test]
+    fn replacing_a_key_requires_a_successful_item_save() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = Vault::open(directory.path().join("vault")).unwrap();
+        let mut input: ConnectionInput = serde_json::from_value(serde_json::json!({
+            "name": "Test SSH",
+            "itemType": "ssh",
+            "modules": [{"kind": "privateKey", "agentVisible": false}]
+        }))
+        .unwrap();
+        let first = PendingPrivateKey::generate().unwrap();
+        let saved = vault
+            .save_connection_with_private_key(input.clone(), None, Some((&first.text, &first.name)))
+            .unwrap();
+
+        input.id = Some(saved.id);
+        let replacement = PendingPrivateKey::generate().unwrap();
+        assert!(
+            vault
+                .save_connection_with_private_key(
+                    input.clone(),
+                    Some("stale"),
+                    Some((&replacement.text, &replacement.name))
+                )
+                .is_err()
+        );
+        let stored = vault.get_connection(saved.id).unwrap();
+        assert_eq!(
+            stored.secrets.private_key.as_deref(),
+            Some(first.text.as_str())
+        );
+        assert!(!stored.stored.modules[0].agent_visible());
+
+        vault
+            .save_connection_with_private_key(
+                input,
+                Some(&saved.updated_at),
+                Some((&replacement.text, &replacement.name)),
+            )
+            .unwrap();
+        let stored = vault.get_connection(saved.id).unwrap();
+        assert_eq!(
+            stored.secrets.private_key.as_deref(),
+            Some(replacement.text.as_str())
+        );
     }
 }

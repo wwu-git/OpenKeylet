@@ -385,8 +385,17 @@ impl Vault {
 
     pub fn save_connection_checked(
         &self,
+        input: ConnectionInput,
+        expected_updated_at: Option<&str>,
+    ) -> Result<PublicConnection> {
+        self.save_connection_with_private_key(input, expected_updated_at, None)
+    }
+
+    pub(crate) fn save_connection_with_private_key(
+        &self,
         mut input: ConnectionInput,
         expected_updated_at: Option<&str>,
+        private_key: Option<(&str, &str)>,
     ) -> Result<PublicConnection> {
         self.update_document_with_result(|document| {
             let existing_index = input.id.and_then(|id| {
@@ -480,7 +489,18 @@ impl Vault {
                 .as_ref()
                 .map(|v| v.private_key_name.clone())
                 .unwrap_or_default();
-            if !input.private_key_import_path.trim().is_empty() {
+            if let Some((key, name)) = private_key {
+                if !input
+                    .modules
+                    .iter()
+                    .any(|module| module.kind == "privateKey")
+                {
+                    bail!("Add an SSH private key module before saving a key");
+                }
+                secrets.private_key = Some(key.to_owned());
+                secrets.private_key_name = Some(name.to_owned());
+                imported_key_name = name.to_owned();
+            } else if !input.private_key_import_path.trim().is_empty() {
                 let path = PathBuf::from(input.private_key_import_path.trim());
                 secrets.private_key = Some(
                     fs::read_to_string(&path).context("SSH private key must be in text format")?,

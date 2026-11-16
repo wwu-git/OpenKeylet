@@ -66,6 +66,14 @@ try {
       if (command === 'update_settings') { fixture.settingsWrites.push(args.patch); Object.assign(state.settings, args.patch); return state.settings; }
       if (command === 'owner_secret_view') return { fields: [{ name: 'password', value: 'synthetic-password' }] };
       if (command === 'generate_password') return 'Aa1!'.repeat(32).slice(0, args.options.length);
+      if (command === 'stage_private_key') {
+        (fixture.keySources ??= []).push(args.source);
+        if (args.source === 'file') return null;
+        if (args.source === 'clipboard') throw Error('Invalid test key');
+        return { id: 'staged-key', name: 'Ed25519', fingerprint: 'SHA256:test' };
+      }
+      if (command === 'copy_ssh_public_key') { fixture.publicKeyCopy = args; return; }
+      if (command === 'discard_private_key') { fixture.discardedKey = args.id; return; }
       if (command === 'save_editor_draft') {
         if (fixture.failDraft) throw Error('Synthetic draft failure');
         const draft = { id: args.draftId || `draft-${args.input.id || 'new'}`, input: structuredClone(args.input) };
@@ -97,6 +105,37 @@ try {
   const row = id => page.locator(`.connection-card[data-item-id="${id}"]`);
   const toggle = id => row(id).locator('.item-disclosure');
   const editor = page.locator('#connection-modal');
+  if (process.argv.includes('--ssh-keys')) {
+    await toggle('beta').click();
+    await page.locator('#add-module-button').click();
+    await page.locator('[data-add-module="privateKey"]').click();
+    const keyRow = page.locator('[data-kind="privateKey"]');
+    const keySource = async (name) => {
+      await keyRow.locator('summary').click();
+      await keyRow.locator(`[data-stage-key="${name}"]`).click();
+    };
+    await keySource('generate');
+    await page.waitForFunction(() => document.querySelector('[data-kind="privateKey"]').dataset.pending === 'staged-key');
+    await keyRow.locator('[data-copy-public-key]').click();
+    assert.equal(await page.evaluate(() => fixture.publicKeyCopy.pendingId), 'staged-key');
+    await keySource('file');
+    await keySource('clipboard');
+    assert.equal(await keyRow.getAttribute('data-pending'), 'staged-key', 'Cancelled or invalid import retains a valid candidate');
+    assert.deepEqual(await page.evaluate(() => fixture.keySources), ['generate', 'file', 'clipboard']);
+    await page.locator('#connection-name').press('Escape');
+    await editor.waitFor({ state: 'hidden' });
+    await page.waitForFunction(() => fixture.discardedKey === 'staged-key');
+    assert.equal(await page.evaluate(() => fixture.drafts[0].input.privateKeyImportPath), '');
+    assert.equal(await page.evaluate(() => fixture.saved.some(item => item.privateKeyImportPath)), false);
+    await toggle('beta').click();
+    await keySource('generate');
+    await page.waitForFunction(() => document.querySelector('[data-kind="privateKey"]').dataset.pending === 'staged-key');
+    await page.locator('#save-connection-button').click();
+    await editor.waitFor({ state: 'hidden' });
+    assert.equal(await page.evaluate(() => fixture.saved.at(-1).privateKeyImportPath), 'staged-key');
+    assert.deepEqual(errors, []);
+    console.log('SSH key editor checks passed');
+  } else {
   const search = page.locator('#title-search-input');
   const fillSearch = async value => {
     if (!await search.isVisible()) await page.locator('#title-search-toggle').click();
@@ -602,4 +641,5 @@ try {
   await fs.writeFile(path.join(artifacts, 'control-geometry.json'), JSON.stringify(geometryMeasurements, null, 2));
   await fs.writeFile(path.join(artifacts, 'control-states.json'), JSON.stringify(stateMeasurements, null, 2));
   console.log(JSON.stringify({ ok: true, checks: ['shared well colours, depths and row heights in both themes', 'neutral inactive icons and glow-only hover', 'draggable theme, sound, language, navigation and add/draft controls', 'settings and module switches commit once and recover from failures', 'PIN drag preserves confirmation and cancellation', 'appearance drag preferences survive reload', 'three-page draggable filter strips with snapping and cancellation', 'animated inline expansion, collapse and reduced motion', 'flat expanded groups without nested trays', 'filter dragging preserves drafts and recovers from write failures', 'pointer and keyboard sorting with filtered slots', 'drag cancellation, edge scrolling and save failure', 'refresh and search preserve edits', 'untrapped keyboard focus', 'generator and module menu', 'save, navigation and deletion', 'new-item dialog restoration'], artifacts }, null, 2));
+  }
 } finally { await browser.close(); server.close(); }
