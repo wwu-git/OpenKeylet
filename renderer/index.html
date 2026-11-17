@@ -166,6 +166,14 @@
               <details class="manual-mcp-config"><summary>OTHER AGENT / MANUAL SETUP</summary><div class="manual-config-steps"><div><b>1</b><span>Open the target Agent’s MCP configuration</span></div><div><b>2</b><span>Copy JSON or TOML in the configured format</span></div><div><b>3</b><span>Paste, save, and restart the Agent</span></div></div><div class="endpoint-box"><span>STDIO / LOCAL</span><code id="mcp-endpoint">openkeylet mcp stdio</code></div><div class="button-row manual-copy-actions"><div class="command-well"><button class="button secondary" data-copy-format="stdio-json">COPY JSON</button></div><div class="command-well"><button class="button quiet" data-copy-format="stdio-toml">COPY TOML</button></div></div></details>
             </section>
 
+            <section class="content-panel settings-card" data-module="MCP / WRITE" id="agent-write-panel">
+              <div class="settings-heading"><div><h2 id="agent-write-title">Vault write permissions</h2><p id="agent-write-description"></p></div></div>
+              <div class="desktop-option"><span><strong id="agent-write-label">Allow Agent to create and edit items</strong><small id="agent-write-status" aria-live="polite"></small></span><label class="switch"><input type="checkbox" id="agent-write-enabled" aria-label="Allow Agent writes" /><span></span></label></div>
+              <div id="agent-write-folders" class="agent-client-list"></div>
+              <div class="agent-write-add-row"><input id="agent-write-folder" list="agent-write-folder-options" maxlength="120" aria-label="Writable folder" /><datalist id="agent-write-folder-options"></datalist><button type="button" class="button secondary" id="agent-write-add">Add folder</button></div>
+              <p id="agent-write-boundary" class="agent-write-boundary"></p>
+            </section>
+
             <section class="content-panel settings-card" data-module="APP / 03">
               <div class="settings-heading"><div><h2>Appearance, window and lock</h2><p>Adjust text size, window behavior and the local PIN lock.</p></div></div>
               <div class="desktop-options">

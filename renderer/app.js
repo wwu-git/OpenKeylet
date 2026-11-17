@@ -1019,6 +1019,7 @@ function applySettingsSearch() {
 }
 
 function renderSettings() {
+  renderAgentWriteSettings();
   githubBackup.render();
   $('#mcp-endpoint').textContent = `${state.mcp.stdioCommand} mcp stdio`;
   const mcpFault = state.mcp.status === 'error';
@@ -1612,6 +1613,52 @@ async function saveDraftAndCloseEditor() {
     toast(cleanError(error), 'error');
     return false;
   }
+}
+
+let agentWriteBusy = false;
+function renderAgentWriteSettings() {
+  const folders = state.settings.agentWriteFolders || [];
+  const enabled = Boolean(state.settings.agentWriteEnabled);
+  $('#agent-write-title').textContent = localized('保险库写入权限', 'Vault write permissions');
+  $('#agent-write-description').textContent = localized('允许修改指定文件夹内的项目内容，包括连接目标和凭据。', 'Allow changes to item content, targets and credentials in authorized folders.');
+  $('#agent-write-label').textContent = localized('允许 Agent 新增和修改项目', 'Allow Agent to create and edit items');
+  $('#agent-write-enabled').checked = enabled;
+  $('#agent-write-enabled').disabled = agentWriteBusy;
+  $('#agent-write-enabled').setAttribute('aria-label', $('#agent-write-label').textContent);
+  $('#agent-write-status').textContent = !enabled ? localized('当前禁止写入', 'Writing is disabled') : !folders.length ? localized('尚未添加可写入的文件夹', 'No writable folders added') : localized('仅允许写入以下文件夹', 'Writing is limited to these folders');
+  $('#agent-write-folder').placeholder = localized('选择已有文件夹或输入新名称', 'Select a folder or enter a new name');
+  $('#agent-write-folder').setAttribute('aria-label', localized('可写入的文件夹', 'Writable folder'));
+  $('#agent-write-folder').disabled = agentWriteBusy;
+  $('#agent-write-add').textContent = localized('＋ 添加文件夹', '+ Add folder');
+  $('#agent-write-add').disabled = agentWriteBusy;
+  $('#agent-write-folders').innerHTML = folders.map((folder, index) => `<div class="agent-client-row"><span class="agent-client-copy">${escapeHtml(folder)}</span><button type="button" class="button quiet" data-remove-write-folder="${index}" ${agentWriteBusy ? 'disabled' : ''}>${localized('移除', 'Remove')}</button></div>`).join('');
+  $('#agent-write-folder-options').innerHTML = [...new Set(state.connections.map(item => item.folder).filter(Boolean))].map(folder => `<option value="${escapeHtml(folder)}"></option>`).join('');
+  $('#agent-write-boundary').textContent = localized('对连接本机的所有 Agent 生效，不限制客户端手动操作。移动时原、目标文件夹都必须可写。Agent 不能删除项目或修改字段可见性，写入结果不返回秘密。OCI 签名配置仍需在客户端编辑。', 'Applies to all Agents on this device, not manual edits. Moves require both folders. Agents cannot delete items or change field visibility. Write results contain no secrets. Edit OCI signing settings in the desktop client.');
+}
+async function saveAgentWriteSettings(patch) {
+  if (agentWriteBusy) return;
+  agentWriteBusy = true;
+  renderAgentWriteSettings();
+  try {
+    state.settings = await api.settings(patch);
+    $('#agent-write-folder').value = '';
+    toast(localized('Agent 写入权限已保存', 'Agent write permissions saved'));
+  } catch (error) {
+    toast(cleanError(error), 'error');
+    await refresh(false);
+  } finally {
+    agentWriteBusy = false;
+    renderAgentWriteSettings();
+  }
+}
+function addAgentWriteFolder() {
+  const folder = $('#agent-write-folder').value.trim();
+  const folders = state.settings.agentWriteFolders || [];
+  if (!folder || folders.includes(folder)) {
+    toast(localized('请输入非空且不重复的文件夹名称', 'Enter a nonempty, unique folder name'), 'error');
+    return;
+  }
+  return saveAgentWriteSettings({ agentWriteFolders: [...folders, folder] });
 }
 
 async function saveBrowserSettings() {
@@ -2750,3 +2797,11 @@ async function bootstrap() {
   scanAgents();
 }
 bootstrap();
+
+$('#agent-write-enabled').addEventListener('change', () => saveAgentWriteSettings({agentWriteEnabled: $('#agent-write-enabled').checked}));
+$('#agent-write-add').addEventListener('click', addAgentWriteFolder);
+$('#agent-write-folder').addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); addAgentWriteFolder(); } });
+$('#agent-write-folders').addEventListener('click', event => {
+  const button = event.target.closest('[data-remove-write-folder]');
+  if (button) saveAgentWriteSettings({agentWriteFolders: (state.settings.agentWriteFolders || []).filter((_, index) => index !== Number(button.dataset.removeWriteFolder))});
+});

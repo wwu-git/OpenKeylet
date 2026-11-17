@@ -20,6 +20,7 @@
     "test": "cargo test --manifest-path src-tauri/Cargo.toml",
     "test:browser": "cargo build --manifest-path src-tauri/Cargo.toml --example browser_fixture && node scripts/test-browser.mjs",
     "test:personal-ui": "node scripts/test-personal-ui.mjs",
+    "test:agent-write-ui": "node scripts/test-agent-write-ui.mjs",
     "test:controls": "node scripts/test-inline-editor.mjs",
     "test:autofill": "node scripts/test-autofill.mjs",
     "test:login-capture": "cargo build --manifest-path src-tauri/Cargo.toml --example browser_fixture && node scripts/test-login-capture.mjs",

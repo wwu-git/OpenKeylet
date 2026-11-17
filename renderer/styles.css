@@ -1569,3 +1569,9 @@ html.platform-macos .nav-item small { line-height: 7px; }
 .key-source-options { position: absolute; z-index: 10; inset-inline-end: 0; min-width: max-content; background: var(--chassis); border: 1px solid var(--muted); border-radius: 6px; padding: 4px; }
 .key-source-options > button { display: block; width: 100%; padding: 6px 10px; border: 0; background: transparent; color: inherit; text-align: start; font: inherit; cursor: pointer; }
 .key-source-options > button:is(:hover, :focus-visible) { background: var(--field); }
+
+.agent-write-add-row { display: flex; gap: 12px; margin-top: 14px; flex-wrap: wrap; }
+.agent-write-add-row input { flex: 1 1 200px; min-width: 0; }
+.agent-write-add-row button { white-space: nowrap; }
+.agent-write-boundary { margin-top: 14px; line-height: 1.5; overflow-wrap: anywhere; }
+#agent-write-folders .agent-client-copy { overflow-wrap: anywhere; min-width: 0; }
