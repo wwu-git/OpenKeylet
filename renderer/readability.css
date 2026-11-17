@@ -95,3 +95,16 @@ html[lang] .modal-card .field > span {
   #connection-modal .secret-hint { display: none; }
   .module-editor-heading { flex-wrap: wrap; }
 }
+
+#connection-modal [data-kind="password"] .module-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+#connection-modal [data-kind="password"] [data-generate-password] {
+  width: auto;
+  padding-inline: 10px;
+  white-space: nowrap;
+}
