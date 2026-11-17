@@ -547,9 +547,17 @@ async fn optimistic_write_conflicts_and_remote_deletion_never_force_overwrite() 
     mock.state.lock().unwrap().bytes = None;
     assert_eq!(
         manager.upload().await.err().unwrap().to_string(),
-        "GITHUB_REMOTE_CHANGED"
+        "GITHUB_BACKUP_MISSING"
     );
     assert!(mock.state.lock().unwrap().bytes.is_none());
+    assert_eq!(
+        manager.restore().await.err().unwrap().to_string(),
+        "GITHUB_BACKUP_MISSING"
+    );
+    assert_eq!(
+        manager.upload().await.err().unwrap().to_string(),
+        "GITHUB_BACKUP_MISSING"
+    );
 }
 
 #[tokio::test]

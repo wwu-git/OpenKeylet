@@ -17,13 +17,18 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
 use chrono::Utc;
+use fs2::FileExt;
 use reqwest::{
     Client, Method, Response, StatusCode,
     header::{AUTHORIZATION, HeaderValue},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha1::{Digest, Sha1};
-use std::{fs, io::Write, time::Duration};
+use std::{
+    fs::{self, File, OpenOptions},
+    io::Write,
+    time::Duration,
+};
 use url::Url;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -181,6 +186,24 @@ impl GithubBackup {
         })
     }
 
+    fn lock_device(&self) -> Result<File> {
+        // Keep the lock file separate from the atomically replaced configuration.
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.vault.data_dir().join("github-backup.lock"))
+            .context("GITHUB_LOCAL_STATE")?;
+        if let Err(error) = FileExt::try_lock_exclusive(&file) {
+            if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() {
+                bail!("GITHUB_BUSY");
+            }
+            return Err(error).context("GITHUB_LOCAL_STATE");
+        }
+        Ok(file)
+    }
+
     pub fn status(&self) -> Result<BackupStatus> {
         Ok(self
             .load()?
@@ -211,6 +234,7 @@ impl GithubBackup {
     }
 
     pub fn disconnect(&self) -> Result<BackupStatus> {
+        let _device_lock = self.lock_device()?;
         match fs::remove_file(self.vault.data_dir().join(LOCAL_FILE)) {
             Ok(()) => (),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
@@ -220,6 +244,7 @@ impl GithubBackup {
     }
 
     pub async fn connect(&self, input: ConnectInput) -> Result<BackupStatus> {
+        let _device_lock = self.lock_device()?;
         if !input.recovery_key_saved {
             bail!("GITHUB_KEY_NOT_SAVED");
         }
@@ -307,12 +332,21 @@ impl GithubBackup {
     }
 
     pub async fn upload(&self) -> Result<BackupStatus> {
+        let _device_lock = self.lock_device()?;
         let mut config = self.connected()?;
+        self.check_repository(&config).await?;
+        let remote = self.remote_file(&config).await?;
+        if remote.is_none()
+            && (config.has_remote_backup || config.base_sha.is_some() || config.needs_restore)
+        {
+            config.needs_restore = true;
+            config.has_remote_backup = false;
+            self.save(&config)?;
+            bail!("GITHUB_BACKUP_MISSING");
+        }
         if config.needs_restore {
             bail!("GITHUB_RESTORE_REQUIRED");
         }
-        self.check_repository(&config).await?;
-        let remote = self.remote_file(&config).await?;
         if remote.as_ref().map(|file| file.sha.as_str()) != config.base_sha.as_deref() {
             config.needs_restore = true;
             config.has_remote_backup = remote.is_some();
@@ -365,6 +399,7 @@ impl GithubBackup {
     }
 
     pub async fn restore(&self) -> Result<RestoreResult> {
+        let _device_lock = self.lock_device()?;
         let mut config = self.connected()?;
         self.check_repository(&config).await?;
         let remote = self

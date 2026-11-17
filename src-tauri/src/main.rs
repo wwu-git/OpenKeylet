@@ -35,7 +35,7 @@ async fn dispatch() -> Result<()> {
         }
         #[cfg(not(feature = "gui"))]
         anyhow::bail!(
-            "This is the headless version of OpenKeylet; use the mcp stdio, config, browser, backup, or permissions subcommand"
+            "This is the headless version of OpenKeylet; use the mcp stdio, config, browser, backup, permissions, or github-backup subcommand"
         );
     }
 
@@ -59,6 +59,7 @@ async fn dispatch() -> Result<()> {
             mcp::serve_stdio(vault).await
         }
         [command, rest @ ..] if command == "permissions" => admin_cli::permissions(&vault, rest),
+        [command, rest @ ..] if command == "github-backup" => admin_cli::github_backup(vault, rest).await,
         [command, format] if command == "config" => {
             println!("{}", mcp::render_config(format)?);
             Ok(())
@@ -98,7 +99,7 @@ async fn dispatch() -> Result<()> {
             Ok(())
         }
         _ => anyhow::bail!(
-            "Usage: openkeylet [gui] | mcp stdio | config <stdio-json|stdio-toml> | browser <status|enable [port]|disable|pair [port]|reset> | backup <export|import> <file> | permissions <status|enable|disable|folder add/remove NAME> | key migrate (macOS)"
+            "Usage: openkeylet [gui] | mcp stdio | config <stdio-json|stdio-toml> | browser <status|enable [port]|disable|pair [port]|reset> | backup <export|import> <file> | permissions <status|enable|disable|folder add/remove NAME> | github-backup <status|connect|upload|restore|disconnect> | key migrate (macOS)"
         ),
     }
 }
