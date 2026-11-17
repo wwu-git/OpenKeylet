@@ -2164,7 +2164,15 @@ mod tests {
         let vault = Vault::open(directory.path().join("vault")).unwrap();
         vault
             .save_oci_connection(
-                serde_json::from_value(serde_json::json!({"name": "OCI test"})).unwrap(),
+                serde_json::from_value(serde_json::json!({
+                    "name": "OCI test",
+                    "modules": [
+                        {"kind":"customSecret", "name":"auth_token"},
+                        {"kind":"customSecret", "name":"project_note", "agentVisible":true},
+                        {"kind":"url", "value":"https://wrong.example"}
+                    ],
+                    "secrets": {"namedSecrets":{"auth_token":"hidden fixture","project_note":"visible fixture"}}
+                })).unwrap(),
                 None,
                 crate::oci::tests::config(),
                 Some(crate::oci::tests::KEY),
@@ -2177,8 +2185,16 @@ mod tests {
             })
             .unwrap();
         assert_eq!(discovered.items[0].actions, ["http_send"]);
-        assert_eq!(discovered.items[0].modules.len(), 1);
-        assert_eq!(discovered.items[0].modules[0].kind, "url");
+        let modules = &discovered.items[0].modules;
+        assert_eq!(modules.len(), 3);
+        assert!(modules.iter().any(|module| module.name == "auth_token"
+            && module.configured
+            && module.value.is_none()));
+        assert!(modules.iter().any(|module| module.name == "project_note"
+            && module.value.as_deref() == Some("visible fixture")));
+        assert!(modules.iter().any(|module| module.kind == "url"
+            && module.value.as_deref()
+                == Some("https://iaas.ap-tokyo-1.oraclecloud.com/20160918/")));
         assert!(
             server
                 .resolve_item_for_action("OCI test", Some("fill"))

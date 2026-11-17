@@ -64,6 +64,9 @@ try {
         return structuredClone(fixture.integrations);
       }
       if (command === 'update_settings') { fixture.settingsWrites.push(args.patch); Object.assign(state.settings, args.patch); return state.settings; }
+      if (command === 'owner_secret_view' && args.id === 'oci') {
+        return { fields: Object.entries(fixture.savedOci.input.secrets.namedSecrets).map(([name, value]) => ({ name, value })) };
+      }
       if (command === 'owner_secret_view') return { fields: [{ name: 'password', value: 'synthetic-password' }] };
       if (command === 'generate_password') return 'Aa1!'.repeat(32).slice(0, args.options.length);
       if (command === 'stage_private_key') {
@@ -79,7 +82,7 @@ try {
       if (command === 'discard_oci_key') { fixture.discardedOciKey = args.id; return; }
       if (command === 'save_oci_connection') {
         fixture.savedOci = structuredClone(args);
-        const saved = { ...item('oci', args.input.name, ['http']), httpAuthType: 'oci-signature', itemType: 'api' };
+        const saved = { ...item('oci', args.input.name, ['http']), httpAuthType: 'oci-signature', itemType: 'api', modules: args.input.modules };
         state.connections.push(saved);
         return saved;
       }
@@ -144,11 +147,18 @@ try {
     await page.locator('#oci-fingerprint').fill(Array(16).fill('00').join(':'));
     await page.locator('#oci-import-key').click();
     await page.waitForFunction(() => document.querySelector('#oci-key-status').textContent.includes('pending'));
+    await page.locator('#oci-add-field').click();
+    const custom = editor.locator('[data-kind="customSecret"]');
+    await custom.locator('[data-module-name]').fill('auth_token');
+    await custom.locator('[data-secret-value]').fill('synthetic OCI extra value');
+    assert.equal(await custom.locator('[data-module-agent-visible]').getAttribute('aria-pressed'), 'false');
     await page.locator('#save-connection-button').click();
     await editor.waitFor({state: 'hidden'});
     assert.equal(await page.evaluate(() => fixture.savedOci.pendingId), 'test-oci-key');
     await toggle('oci').click();
     assert.equal(await page.locator('#oci-region').inputValue(), 'ap-tokyo-1');
+    assert.equal(await custom.locator('[data-module-name]').inputValue(), 'auth_token');
+    assert.equal(await custom.locator('[data-secret-value]').inputValue(), 'synthetic OCI extra value');
     assert.match(await page.locator('#oci-key-status').innerText(), /configured/);
     assert.deepEqual(errors, []);
     console.log('OCI Compute template checks passed');

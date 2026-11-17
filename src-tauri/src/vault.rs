@@ -473,7 +473,19 @@ impl Vault {
                     }
                     credential.config = config;
                 }
-                input.modules.clear();
+                // The signer owns the URL; the editor may only add custom secret fields.
+                input.modules.retain(|module| module.kind != "url");
+                if input.modules.iter().any(|module| module.kind != "customSecret") {
+                    bail!("OCI Compute accepts only custom fields in addition to the signing configuration");
+                }
+                input.modules = normalize_modules(input.modules)?;
+                let mut custom_secrets = SecretBundle::default();
+                for module in &input.modules {
+                    if let Some(value) = input.secrets.named_secrets.get(&module.name) {
+                        custom_secrets.named_secrets.insert(module.name.clone(), value.clone());
+                    }
+                }
+                input.secrets = custom_secrets;
                 push_module(&mut input.modules, "url", "", base.as_str());
                 input.item_type = "api".to_owned();
                 input.http_auth_type = crate::oci::AUTH_MODE.to_owned();
@@ -484,7 +496,6 @@ impl Vault {
                 input.api_auth_headers.clear();
                 input.test_path.clear();
                 input.private_key_import_path.clear();
-                input.secrets = SecretBundle::default();
             } else if input.http_auth_type == crate::oci::AUTH_MODE
                 || existing
                     .as_ref()
