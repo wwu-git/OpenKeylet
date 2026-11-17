@@ -2131,16 +2131,26 @@ mod tests {
                 .await
                 .unwrap();
         });
+        let mut secrets = SecretBundle::default();
+        secrets.token = Some("synthetic-token".into());
+        let mut stored = stored(format!("http://{address}/"));
+        stored.modules.push(ItemModule {
+            kind: "apiCredential".into(),
+            ..Default::default()
+        });
         let connection = DecryptedConnection {
-            stored: stored(format!("http://{address}/")),
-            secrets: SecretBundle {
-                token: Some("synthetic-token".into()),
+            stored,
+            secrets,
+        };
+        let result = execute_api(
+            &connection,
+            ApiRequestInput {
+                method: "GET".into(),
                 ..Default::default()
             },
-        };
-        let result = execute_api(&connection, ApiRequestInput::default())
-            .await
-            .unwrap();
+        )
+        .await
+        .unwrap();
         assert_eq!(result.status, 200, "{}", result.body);
         assert!(result.body.starts_with("OpenKeylet/"));
 
@@ -2155,6 +2165,7 @@ mod tests {
             &connection,
             ApiRequestInput {
                 headers: HashMap::from([("User-Agent".into(), "CustomClient/1.0".into())]),
+                method: "GET".into(),
                 ..Default::default()
             },
         )
