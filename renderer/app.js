@@ -1045,6 +1045,15 @@ function renderSettings() {
 
 const agentLabels = { notDetected: 'NOT FOUND', available: 'READY', registered: 'CONNECTED', stale: 'NEEDS REPAIR', conflict: 'CONFLICT', error: 'ERROR' };
 function agentDetail(client) {
+  if (client.state === 'error') {
+    if (client.message === 'Configuration detected, but no callable CLI was found') {
+      return localized(
+        `检测到配置，但未找到可调用的 ${client.displayName} 命令。请安装命令行工具或检查安装路径。`,
+        `Configuration found, but the ${client.displayName} CLI is unavailable. Install the CLI or check its installation path.`,
+      );
+    }
+    return publicMessage(client.message, localized('检测失败', 'Detection failed'));
+  }
   const details = language === 'en'
     ? { notDetected: 'Not installed', available: 'Ready to connect', registered: 'Connected', stale: 'OpenKeylet setup needs repair', conflict: 'Config conflict', error: 'Detection failed' }
     : { notDetected: '未安装或未发现', available: '可连接', registered: '已连接', stale: 'OpenKeylet 连接或全局规则需要修复', conflict: '配置冲突', error: '检测失败' };
