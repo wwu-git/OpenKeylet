@@ -18,6 +18,8 @@ pub mod runtime_epoch;
 pub mod storage;
 pub mod terminal;
 pub mod vault;
+pub mod vault_write;
+mod ssh_keys;
 
 #[cfg(feature = "gui")]
 pub mod agent_registry;

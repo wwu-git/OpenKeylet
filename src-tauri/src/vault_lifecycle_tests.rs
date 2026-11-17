@@ -82,7 +82,7 @@ fn previous_vault_version_opens_without_rewriting_and_upgrades_on_save() {
     assert_eq!(reopened.trash_items().unwrap().len(), 1);
     let current: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(current["version"], 12);
+    assert_eq!(current["version"], VAULT_VERSION);
 }
 
 #[test]

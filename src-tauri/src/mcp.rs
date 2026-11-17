@@ -293,6 +293,7 @@ impl VaultMcp {
                             None
                         };
                         Ok(ItemModuleOutput {
+                            id: module.id.to_string(),
                             kind: module.kind.clone(),
                             name: module.name.clone(),
                             configured,
@@ -314,6 +315,8 @@ impl VaultMcp {
                     actions.push("http_send".to_owned());
                 }
                 Ok(ItemOutput {
+                    id: decrypted.stored.id.to_string(),
+                    revision: decrypted.stored.revision,
                     name: decrypted.stored.name,
                     modules,
                     actions,
@@ -864,6 +867,8 @@ struct ItemsSearchOutput {
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct ItemOutput {
+    id: String,
+    revision: u64,
     name: String,
     modules: Vec<ItemModuleOutput>,
     actions: Vec<String>,
@@ -872,6 +877,7 @@ struct ItemOutput {
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct ItemModuleOutput {
+    id: String,
     kind: String,
     name: String,
     configured: bool,
@@ -1297,8 +1303,40 @@ struct TerminalWriteInput {
     submit: bool,
 }
 
+// Suppress serde diagnostics that could echo malformed credential input.
+#[derive(JsonSchema)]
+#[schemars(transparent)]
+struct WriteRequest<T>(T);
+impl<'de, T: serde::de::DeserializeOwned> Deserialize<'de> for WriteRequest<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        serde_json::from_value(value).map(Self).map_err(|_|serde::de::Error::custom("Invalid write request: check field names and types; no changes saved"))
+    }
+}
+
 #[tool_router(router = tool_router)]
 impl VaultMcp {
+    #[tool(name = "vault_write_capabilities", description = "Read MCP vault write permissions, writable folders, supported fields and authentication modes. Writing is disabled by default. Does not reveal secrets or expand project query permissions.",
+        output_schema = rmcp::handler::server::tool::schema_for_type::<crate::vault_write::WriteCapabilities>(),
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false))]
+    async fn vault_write_capabilities(&self) -> CallToolResult {
+        into_tool_result(self.vault.write_capabilities().map_err(|_| "Could not read write permissions".to_owned()))
+    }
+
+    #[tool(name = "items_create", description = "Create a project in an authorized folder. Call vault_write_capabilities for fields. Requires name, itemType, folder and modules. SSH needs host, username, password/privateKey and sshAuthType; API needs url, httpAuthType and credentials. Module values are strings except integer port. customSecret stores extra named values only. New secrets are hidden. Encrypted SSH keys require passphrase in this request. No OCI creation. Returns IDs and revision only; never repeat secrets in chat.",
+        output_schema = rmcp::handler::server::tool::schema_for_type::<crate::vault_write::WriteOutput>(),
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false))]
+    async fn items_create(&self, Parameters(WriteRequest(input)): Parameters<WriteRequest<crate::vault_write::CreateInput>>) -> CallToolResult {
+        into_tool_result(self.vault.agent_create(input).map_err(|e|e.to_string()))
+    }
+
+    #[tool(name = "items_update", description = "Patch a project by id and expectedRevision. Update modules by stable id; omit id and provide kind/name/value to add. Omitted fields remain unchanged. Targets and authentication can change. Moves require both folders authorized. Cannot change visibility, delete, or change OCI signing fields/derived URL; OCI supports metadata and ordinary attached modules only. A conflict requires re-query, never replay automatically. Encrypted replacement SSH keys require passphrase; unencrypted replacements clear old passphrase. No secret values returned.",
+        output_schema = rmcp::handler::server::tool::schema_for_type::<crate::vault_write::WriteOutput>(),
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false))]
+    async fn items_update(&self, Parameters(WriteRequest(input)): Parameters<WriteRequest<crate::vault_write::UpdateInput>>) -> CallToolResult {
+        into_tool_result(self.vault.agent_update(input).map_err(|e|e.to_string()))
+    }
+
     #[tool(
         name = "items_search",
         description = "Discover or select enabled OpenKeylet projects, modules, and available actions. A query that finds one project makes it the current project for this MCP session, so later compatible actions can omit item. When the user already named a project and the intended action is clear, call that action directly instead. Query may be the project name or the user's natural-language phrase containing it. Exact case-insensitive name matches win. Only modules explicitly marked agentVisible include value.",
@@ -2008,7 +2046,7 @@ impl ServerHandler for VaultMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("openkeylet", env!("CARGO_PKG_VERSION")).with_title("OpenKeylet"))
             .with_instructions(
-            "OpenKeylet lets agents use locally saved credentials without receiving hidden plaintext. An explicit item or unique items_search result becomes the current project; later compatible actions may omit item, and a terminal keeps its own binding. When the user names a project and the action is clear, call it directly. Use items_search only for discovery, selection, inspection, or genuine ambiguity. credential_fill understands common module phrases and may infer a sole secret; omit target to use the current running OpenKeylet terminal, otherwise a connected browser or foreground control, and use submit=true to complete the login. terminal_start makes the opened PTY current, so terminal_write, terminal_read, terminal_stop, and terminal credential fills should omit sessionId unless deliberately switching among multiple terminals. Use terminal_run for one-shot local commands and PTY tools only for persistent interaction. Direct {{openkeylet:module}} placeholders work in commands, stdin, paths, terminal input, SSH, and HTTP values; OpenKeylet substitutes and redacts them locally. terminal_run.stdin and ssh_run.stdin pass scripts, JSON, or other text without shell escaping or temporary files. A password or private-key project can use SSH without saved target metadata: pass host, optional port, and username at runtime; saved values are defaults and port 22 is the fallback. Use secretEnv only when a program needs an environment variable, and HTTP secretBindings only for aliases. Never ask the user to reveal a hidden value. terminal_read.until waits without polling and has no deadline unless waitSeconds is supplied. OpenKeylet has no observation, diagnostic, restricted, or execution modes.",
+            "OpenKeylet lets agents use locally saved credentials without receiving hidden plaintext. An explicit item or unique items_search result becomes the current project; later compatible actions may omit item, and a terminal keeps its own binding. When the user names a project and the action is clear, call it directly. Use items_search only for discovery, selection, inspection, or genuine ambiguity. credential_fill understands common module phrases and may infer a sole secret; omit target to use the current running OpenKeylet terminal, otherwise a connected browser or foreground control, and use submit=true to complete the login. terminal_start makes the opened PTY current, so terminal_write, terminal_read, terminal_stop, and terminal credential fills should omit sessionId unless deliberately switching among multiple terminals. Use terminal_run for one-shot local commands and PTY tools only for persistent interaction. Direct {{openkeylet:module}} placeholders work in commands, stdin, paths, terminal input, SSH, and HTTP values; OpenKeylet substitutes and redacts them locally. terminal_run.stdin and ssh_run.stdin pass scripts, JSON, or other text without shell escaping or temporary files. A password or private-key project can use SSH without saved target metadata: pass host, optional port, and username at runtime; saved values are defaults and port 22 is the fallback. Use secretEnv only when a program needs an environment variable, and HTTP secretBindings only for aliases. Never ask the user to reveal a hidden value. terminal_read.until waits without polling and has no deadline unless waitSeconds is supplied. For vault writing, consult vault_write_capabilities, then items_create/items_update. Writing requires desktop folder authorization, uses stable project/module IDs and expectedRevision, and cannot change visibility. Never echo submitted secrets. OpenKeylet has no observation, diagnostic, restricted, or execution modes.",
         )
     }
 
@@ -2400,7 +2438,6 @@ mod tests {
             ])
         );
         for removed in [
-            "id",
             "type",
             "capabilities",
             "description",
@@ -3314,11 +3351,36 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn write_tools_round_trip_and_hide_malformed_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open(dir.path().join("vault")).unwrap();
+        vault.update_settings_patch(serde_json::from_value(serde_json::json!({"agentWriteEnabled":true,"agentWriteFolders":["Agent"]})).unwrap()).unwrap();
+        let mcp = VaultMcp::new(vault.clone());
+        let input = serde_json::from_value(serde_json::json!({"name":"MCP synthetic","itemType":"login","folder":"Agent","modules":[{"kind":"password","value":"NEVER-ECHO"}]})).unwrap();
+        let result = mcp.items_create(Parameters(WriteRequest(input))).await;
+        assert_ne!(result.is_error,Some(true));
+        assert!(!serde_json::to_string(&result).unwrap().contains("NEVER-ECHO"));
+        let found=mcp.search_items(ItemsSearchInput {query:Some("MCP synthetic".into())}).unwrap();
+        assert_eq!(found.items.len(),1);
+        assert!(!found.items[0].id.is_empty());
+        let input=serde_json::from_value(serde_json::json!({"id":found.items[0].id,"expectedRevision":found.items[0].revision,"modules":[{"id":found.items[0].modules[0].id,"value":"REPLACEMENT"}]})).unwrap();
+        let result=mcp.items_update(Parameters(WriteRequest(input))).await;
+        assert_ne!(result.is_error,Some(true));
+        assert!(!serde_json::to_string(&result).unwrap().contains("REPLACEMENT"));
+        let malformed=serde_json::from_value::<WriteRequest<crate::vault_write::CreateInput>>(serde_json::json!({"name":"x","folder":"Agent","itemType":"ssh","modules":"DO-NOT-ECHO"}));
+        let error=malformed.err().unwrap().to_string();
+        assert!(!error.contains("DO-NOT-ECHO"));
+    }
+
     #[test]
     fn tool_contracts_have_output_schemas_and_annotations() {
         let router = VaultMcp::tool_router();
         let expected = [
             ("items_search", true, false, true, false),
+            ("vault_write_capabilities", true, false, true, false),
+            ("items_create", false, false, false, false),
+            ("items_update", false, true, false, false),
             ("credential_fill", false, false, false, true),
             ("terminal_run", false, true, false, true),
             ("terminal_start", false, false, false, true),

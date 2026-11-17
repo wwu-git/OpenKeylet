@@ -23,6 +23,8 @@ pub struct OwnerPinVerifier {
 #[serde(rename_all = "camelCase")]
 #[serde(default)]
 pub struct Settings {
+    pub agent_write_enabled: bool,
+    pub agent_write_folders: Vec<String>,
     pub language: String,
     pub close_behavior: String,
     pub browser_enabled: bool,
@@ -33,6 +35,8 @@ pub struct Settings {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsPatch {
+    pub agent_write_enabled: Option<bool>,
+    pub agent_write_folders: Option<Vec<String>>,
     pub language: Option<String>,
     pub close_behavior: Option<String>,
     pub browser_enabled: Option<bool>,
@@ -42,6 +46,8 @@ pub struct SettingsPatch {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            agent_write_enabled: false,
+            agent_write_folders: Vec::new(),
             language: "en".to_owned(),
             close_behavior: "tray".to_owned(),
             browser_enabled: false,
@@ -63,6 +69,9 @@ mod settings_tests {
         .unwrap();
         assert_eq!(settings.language, "en");
         assert_eq!(settings.close_behavior, "tray");
+        let json = serde_json::to_value(settings).unwrap();
+        assert_eq!(json["agentWriteEnabled"], false);
+        assert_eq!(json["agentWriteFolders"], serde_json::json!([]));
     }
 }
 

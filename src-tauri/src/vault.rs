@@ -253,6 +253,7 @@ impl Vault {
         } else {
             "tray".to_owned()
         };
+        next.agent_write_folders = crate::vault_write::normalize_folders(next.agent_write_folders)?;
         self.update_document(|document| {
             // Pairing state is changed only by the authenticated bridge handshake.
             next.browser_paired = document.settings.browser_paired;
@@ -265,6 +266,8 @@ impl Vault {
     pub fn update_settings_patch(&self, patch: SettingsPatch) -> Result<Settings> {
         self.update_document_with_result(|document| {
             let mut next = document.settings.clone();
+            if let Some(enabled) = patch.agent_write_enabled { next.agent_write_enabled = enabled; }
+            if let Some(folders) = patch.agent_write_folders { next.agent_write_folders = crate::vault_write::normalize_folders(folders)?; }
             if let Some(language) = patch.language {
                 next.language = if language.eq_ignore_ascii_case("en") {
                     "en".to_owned()
@@ -415,12 +418,27 @@ impl Vault {
 
     fn save_connection_inner(
         &self,
-        mut input: ConnectionInput,
+        input: ConnectionInput,
         expected_updated_at: Option<&str>,
         private_key: Option<(&str, &str)>,
         oci: Option<(crate::oci::Config, Option<&str>)>,
     ) -> Result<PublicConnection> {
-        self.update_document_with_result(|document| {
+        self.update_document_with_result(|document| self.save_connection_in_document(document, input, expected_updated_at, private_key, oci, false))
+    }
+
+    pub(crate) fn decrypt_stored(&self, item: &StoredConnection) -> Result<SecretBundle> {
+        self.inner.key.decrypt(&item.encrypted_secrets)
+    }
+
+    pub(crate) fn save_connection_in_document(
+        &self,
+        document: &mut VaultDocument,
+        mut input: ConnectionInput,
+        expected_updated_at: Option<&str>,
+        private_key: Option<(&str, &str)>,
+        oci: Option<(crate::oci::Config, Option<&str>)>,
+        preserve_oci: bool,
+    ) -> Result<PublicConnection> {
             let existing_index = input.id.and_then(|id| {
                 document
                     .connections
@@ -486,10 +504,10 @@ impl Vault {
                 input.api_auth_headers.clear();
                 input.test_path.clear();
                 input.private_key_import_path.clear();
-            } else if input.http_auth_type == crate::oci::AUTH_MODE
+            } else if !preserve_oci && (input.http_auth_type == crate::oci::AUTH_MODE
                 || existing
                     .as_ref()
-                    .is_some_and(|item| item.http_auth_type == crate::oci::AUTH_MODE)
+                    .is_some_and(|item| item.http_auth_type == crate::oci::AUTH_MODE))
             {
                 bail!("Edit OCI Compute projects using the OCI signing form");
             }
@@ -603,7 +621,6 @@ impl Vault {
                 document.connections.push(stored);
             }
             Ok(public)
-        })
     }
 
     pub fn reorder_connections(&self, ids: &[Uuid], expected_order: &[Uuid]) -> Result<()> {
