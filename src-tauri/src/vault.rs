@@ -1299,12 +1299,17 @@ pub(crate) fn normalize_connection(
         ""
     }
     .to_owned();
-    let ssh_auth_type = if input.ssh_auth_type.is_empty() {
-        existing.filter(|old| !old.ssh_auth_type.is_empty()).map(|old| old.ssh_auth_type.clone()).unwrap_or(inferred_ssh_auth_type)
+    let requested_ssh_auth_type = if input.ssh_auth_type.is_empty() {
+        existing.map(|old| old.ssh_auth_type.as_str()).unwrap_or_default()
     } else {
         if !matches!(input.ssh_auth_type.as_str(), "password" | "privateKey") { bail!("Invalid SSH authentication mode"); }
-        input.ssh_auth_type.clone()
+        &input.ssh_auth_type
     };
+    // Manual edits can remove the selected credential. Preserve explicit choice only
+    // while it remains usable; MCP validates its explicit choice before this layer.
+    let ssh_auth_type = if module_secret_configured(&modules, secrets, requested_ssh_auth_type) {
+        requested_ssh_auth_type.to_owned()
+    } else { inferred_ssh_auth_type };
     let http_auth_type = input.http_auth_type.clone();
     let name = fallback_item_name(&input.name, id, &modules, secrets);
     Ok(StoredConnection {
@@ -1564,7 +1569,10 @@ fn reserved_secret_name(value: &str) -> bool {
         .any(|name| normalized_field_name(name) == normalized_field_name(value))
         || matches!(
             normalized_field_name(value).as_str(),
-            "username"
+            "host"
+                | "port"
+                | "url"
+                | "username"
                 | "password"
                 | "apicredential"
                 | "privatekey"

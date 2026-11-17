@@ -421,3 +421,166 @@ fn revoked_settings_manual_versions_and_legacy_ids() {
     assert_eq!(a[0].modules[0].id, b[0].modules[0].id);
     assert_eq!(a[0].revision, 1);
 }
+
+#[test]
+fn custom_rename_chain_uses_original_values_and_normalized_names() {
+    let (_dir, vault) = fixture();
+    allow(&vault, &["Agent"]);
+    let first=vault.agent_create(serde_json::from_value(json!({"name":"rename","itemType":"custom","folder":"Agent","modules":[{"kind":"customSecret","name":"A","value":"value-A"},{"kind":"customSecret","name":"B","value":"value-B"}]})).unwrap()).unwrap();
+    let next=update(&vault,&first,json!({"modules":[{"id":first.module_ids[0],"name":"B"},{"id":first.module_ids[1],"name":" C "}]})).unwrap();
+    let item = vault.get_connection(first.id.parse().unwrap()).unwrap();
+    assert_eq!(item.secrets.get("B"), Some("value-A"));
+    assert_eq!(item.secrets.get("C"), Some("value-B"));
+    assert!(item.secrets.get("A").is_none());
+    assert_eq!(next.module_ids, first.module_ids);
+}
+
+#[test]
+fn manual_credential_removal_can_switch_ssh_mode() {
+    let (_dir, vault) = fixture();
+    allow(&vault, &["Agent"]);
+    let first = create(&vault, "switch", "Agent").unwrap();
+    let old = vault.get_connection(first.id.parse().unwrap()).unwrap();
+    let mut input: ConnectionInput =
+        serde_json::from_value(serde_json::to_value(old.stored.portable()).unwrap()).unwrap();
+    input.modules.retain(|m| m.kind != "password");
+    input.modules.push(ItemModule {
+        id: Uuid::new_v4(),
+        kind: "privateKey".into(),
+        name: "privateKey".into(),
+        value: String::new(),
+        agent_visible: Some(false),
+    });
+    let (key, _) = key_pair();
+    let saved = vault
+        .save_connection_with_private_key(input, None, Some((&key, "test")))
+        .unwrap();
+    assert_eq!(saved.ssh_auth_type, "privateKey");
+}
+
+#[test]
+fn renamed_hidden_field_cannot_transfer_into_visible_field() {
+    let (_dir, vault) = fixture();
+    allow(&vault, &["Agent"]);
+    let input:ConnectionInput=serde_json::from_value(json!({"name":"visibility","itemType":"custom","folder":"Agent","modules":[{"kind":"customSecret","name":"A","agentVisible":false},{"kind":"customSecret","name":"B","agentVisible":true}],"secrets":{"namedSecrets":{"A":"hidden-A","B":"public-B"}}})).unwrap();
+    let first: WriteOutput = vault.save_connection(input).unwrap().into();
+    update(&vault,&first,json!({"modules":[{"id":first.module_ids[0],"name":"B"},{"id":first.module_ids[1],"name":"C"}]})).unwrap();
+    let saved = vault.get_connection(first.id.parse().unwrap()).unwrap();
+    for module in &saved.stored.modules {
+        let value = saved.secrets.get(module.secret_name().unwrap());
+        if module.agent_visible() {
+            assert_eq!(value, Some("public-B"));
+        } else {
+            assert_eq!(value, Some("hidden-A"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn saved_ssh_credentials_authenticate_using_selected_mode_on_loopback() {
+    use russh::{
+        Channel, ChannelId,
+        server::{self, Server as _},
+    };
+    use std::sync::{Arc, Mutex};
+    #[derive(Clone)]
+    struct TestServer {
+        seen: Arc<Mutex<Vec<&'static str>>>,
+        public: russh::keys::ssh_key::PublicKey,
+    }
+    impl server::Server for TestServer {
+        type Handler = Self;
+        fn new_client(&mut self, _: Option<std::net::SocketAddr>) -> Self {
+            self.clone()
+        }
+    }
+    impl server::Handler for TestServer {
+        type Error = russh::Error;
+        async fn auth_password(
+            &mut self,
+            user: &str,
+            password: &str,
+        ) -> Result<server::Auth, Self::Error> {
+            if user == "deploy" && password == "synthetic-secret" {
+                self.seen.lock().unwrap().push("password");
+                Ok(server::Auth::Accept)
+            } else {
+                Ok(server::Auth::reject())
+            }
+        }
+        async fn auth_publickey(
+            &mut self,
+            user: &str,
+            key: &russh::keys::ssh_key::PublicKey,
+        ) -> Result<server::Auth, Self::Error> {
+            if user == "deploy" && key == &self.public {
+                self.seen.lock().unwrap().push("privateKey");
+                Ok(server::Auth::Accept)
+            } else {
+                Ok(server::Auth::reject())
+            }
+        }
+        async fn channel_open_session(
+            &mut self,
+            _: Channel<server::Msg>,
+            reply: server::ChannelOpenHandle,
+            _: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            reply.accept().await;
+            Ok(())
+        }
+        async fn exec_request(
+            &mut self,
+            channel: ChannelId,
+            _: &[u8],
+            session: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            session.channel_success(channel)?;
+            session.data(channel, b"synthetic-ok".to_vec())?;
+            session.exit_status_request(channel, 0)?;
+            session.eof(channel)?;
+            session.close(channel)?;
+            Ok(())
+        }
+    }
+    let (key, _) = key_pair();
+    let parsed = crate::ssh_keys::decode_private_key(&key, None).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut server = TestServer {
+        seen: seen.clone(),
+        public: parsed.public_key().clone(),
+    };
+    let config = Arc::new(server::Config {
+        keys: vec![parsed],
+        ..Default::default()
+    });
+    let task = tokio::spawn(async move {
+        server.run_on_socket(config, &listener).await.unwrap();
+    });
+    let (_dir, vault) = fixture();
+    allow(&vault, &["Agent"]);
+    let first=vault.agent_create(serde_json::from_value(json!({"name":"loopback","folder":"Agent","itemType":"ssh","sshAuthType":"privateKey","modules":[{"kind":"host","value":"127.0.0.1"},{"kind":"port","value":port},{"kind":"username","value":"deploy"},{"kind":"password","value":"synthetic-secret"},{"kind":"privateKey","value":key}]})).unwrap()).unwrap();
+    for mode in ["privateKey", "password"] {
+        let current = vault.get_connection(first.id.parse().unwrap()).unwrap();
+        let token: WriteOutput = current.stored.public(Some(&current.secrets)).into();
+        update(&vault, &token, json!({"sshAuthType":mode})).unwrap();
+        let current = vault.get_connection(first.id.parse().unwrap()).unwrap();
+        let result = crate::executor::execute_ssh(
+            &vault,
+            &current,
+            "synthetic-command",
+            None,
+            Some(10),
+            &Default::default(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.stdout, "synthetic-ok");
+        assert_eq!(result.exit_code, Some(0));
+    }
+    assert_eq!(*seen.lock().unwrap(), vec!["privateKey", "password"]);
+    task.abort();
+}

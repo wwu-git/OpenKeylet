@@ -279,6 +279,7 @@ fn set_auth(
 }
 fn apply_modules(input: &mut ConnectionInput, patches: &[ModulePatch], oci: bool) -> Result<()> {
     let mut seen = std::collections::HashSet::new();
+    let original_secrets = input.secrets.clone();
     for patch in patches {
         let index = if let Some(id) = &patch.id {
             let id = Uuid::parse_str(id).map_err(|_| anyhow::anyhow!("Invalid module ID"))?;
@@ -310,10 +311,22 @@ fn apply_modules(input: &mut ConnectionInput, patches: &[ModulePatch], oci: bool
                 "Unsupported module kind"
             );
             ensure!(patch.value.is_some(), "New module requires value");
+            ensure!(
+                kind != "customSecret"
+                    || patch
+                        .name
+                        .as_ref()
+                        .is_some_and(|name| !name.trim().is_empty()),
+                "Custom field requires a name"
+            );
             input.modules.push(ItemModule {
                 id: Uuid::new_v4(),
                 kind: kind.into(),
-                name: patch.name.clone().unwrap_or_else(|| kind.into()),
+                name: patch
+                    .name
+                    .as_ref()
+                    .map(|name| name.trim().to_owned())
+                    .unwrap_or_else(|| kind.into()),
                 value: String::new(),
                 agent_visible: None,
             });
@@ -339,9 +352,9 @@ fn apply_modules(input: &mut ConnectionInput, patches: &[ModulePatch], oci: bool
             && patch.name.as_ref().is_some_and(|name| name != &module.name)
         {
             let old = module.name.clone();
-            let name = patch.name.as_ref().unwrap();
+            let name = patch.name.as_ref().unwrap().trim().to_owned();
             ensure!(!name.trim().is_empty(), "Custom field requires a name");
-            if let Some(value) = input.secrets.get(&old).map(str::to_owned) {
+            if let Some(value) = original_secrets.get(&old).map(str::to_owned) {
                 input.secrets.named_secrets.insert(name.clone(), value);
             }
             input.remove_secret_names.push(old);
@@ -376,6 +389,15 @@ fn apply_modules(input: &mut ConnectionInput, patches: &[ModulePatch], oci: bool
             }
         }
     }
+    // Renames are simultaneous: an old name reused by another final module is not removed.
+    let retained: Vec<String> = input
+        .modules
+        .iter()
+        .filter_map(|m| m.secret_name().map(str::to_owned))
+        .collect();
+    input
+        .remove_secret_names
+        .retain(|name| !retained.contains(name));
     Ok(())
 }
 fn validate_credentials(
