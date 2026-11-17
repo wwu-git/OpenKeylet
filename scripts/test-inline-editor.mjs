@@ -105,7 +105,46 @@ try {
   const row = id => page.locator(`.connection-card[data-item-id="${id}"]`);
   const toggle = id => row(id).locator('.item-disclosure');
   const editor = page.locator('#connection-modal');
-  if (process.argv.includes('--ssh-keys')) {
+  if (process.argv.includes('--readability')) {
+    await page.locator('[data-page="settings"]').click();
+    const size = page.locator('#text-size');
+    assert.equal(await size.inputValue(), 'standard');
+    await size.selectOption('large');
+    await page.reload();
+    assert.equal(await size.inputValue(), 'large');
+    await page.locator('[data-page="connections"]').click();
+    for (const language of ['en', 'zh']) {
+      await page.locator(`[data-language="${language}"]`).click();
+      for (const [width, height] of [[720, 820], [460, 600]]) {
+        await page.setViewportSize({ width, height });
+        await page.locator('#add-connection-button').click();
+        await page.locator('[data-item-template="ssh"]').click();
+        await page.locator('#connection-name').fill('A long synthetic project name for the narrow layout');
+        const field = page.locator('#connection-name');
+        assert.equal(await field.evaluate(el => getComputedStyle(el).fontSize), '16px');
+        const columns = await editor.locator('.identity-grid').evaluate(el => getComputedStyle(el).gridTemplateColumns.split(' ').length);
+        assert.equal(columns, width === 460 ? 1 : 2);
+        await editor.locator('#add-module-button').click();
+        if (await editor.locator('[data-kind="privateKey"]').count() === 0) {
+          await page.locator('[data-add-module="privateKey"]').click();
+        } else {
+          await page.keyboard.press('Escape');
+        }
+        const keyMenu = editor.locator('.key-source-menu');
+        await keyMenu.locator('summary').click();
+        const clip = await keyMenu.locator('.key-source-options').boundingBox();
+        assert.ok(clip && clip.x >= 0 && clip.x + clip.width <= width);
+        await keyMenu.locator('summary').click();
+        const save = await page.locator('#save-connection-button').boundingBox();
+        assert.ok(save && save.y + save.height <= height);
+        assert.equal(await editor.locator('.form-scroll').evaluate(el => el.scrollWidth <= el.clientWidth), true);
+        await page.locator('#connection-name').press('Escape');
+        await editor.waitFor({ state: 'hidden' });
+      }
+    }
+    assert.deepEqual(errors, []);
+    console.log('English and Chinese readability checks passed at 460×600 and 720×820');
+  } else if (process.argv.includes('--ssh-keys')) {
     await toggle('beta').click();
     await page.locator('#add-module-button').click();
     await page.locator('[data-add-module="privateKey"]').click();

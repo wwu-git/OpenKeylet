@@ -1,0 +1,97 @@
+/* Readable defaults for the desktop viewport. */
+:root {
+  --reading-title: 16px;
+  --reading-text: 14px;
+  --reading-label: 13px;
+  --reading-help: 12px;
+  --reading-control: 36px;
+}
+
+:root[data-text-size="large"] {
+  --reading-title: 18px;
+  --reading-text: 16px;
+  --reading-label: 15px;
+  --reading-help: 14px;
+  --reading-control: 42px;
+}
+
+:is(.connection-name, .settings-heading h2, .modal-header h2, .github-modal-card .modal-header h2) {
+  font-size: var(--reading-title);
+  line-height: 1.3;
+}
+
+.connection-name { height: var(--reading-control); }
+.connection-card { min-height: calc(var(--reading-control) + 8px); }
+
+:is(.activity-title, .desktop-option > span > strong, .agent-client-copy strong, .settings-card .input, .modal-card .input) {
+  font-size: var(--reading-text);
+  line-height: 1.35;
+}
+
+:is(.settings-heading p, .desktop-option > span > small, .agent-client-copy span,
+    .activity-meta, .activity-time, .activity-error, .connection-description,
+    .browser-step-body p, .browser-install-fallback p, .secret-hint) {
+  font-size: var(--reading-help);
+  line-height: 1.45;
+}
+
+:is(.settings-card, .modal-card) :is(.button, .small-button, .field-label),
+html[lang] .modal-card .field > span {
+  font-size: var(--reading-label);
+}
+
+.modal-card .field em { font-size: var(--reading-help); }
+.modal-card .field-grid > .field,
+#connection-modal .field-grid > .field { grid-template-rows: auto auto; }
+
+#connection-modal:not(.inline-editor) .modal-card { width: min(690px, 100%); }
+#connection-modal .form-scroll { padding: 12px; }
+#connection-modal .field-grid { gap: 10px 14px; }
+#connection-modal .field-grid + .field-grid { margin-top: 12px; }
+#connection-modal .input { font-size: var(--reading-text); }
+
+#connection-modal .input:not(.textarea),
+#connection-modal .secret-input-control:not(.multiline),
+#connection-modal .module-key-control,
+#connection-modal.inline-editor :is(.input:not(.textarea), .secret-input-control:not(.multiline), .module-key-control),
+#connection-modal .modal-footer .button {
+  min-height: var(--reading-control);
+}
+
+#connection-modal .modal-footer { flex-shrink: 0; }
+#connection-modal :is(.editor-heading strong, .module-identity strong, .item-enabled-copy strong) {
+  font-size: var(--reading-text);
+  line-height: 1.35;
+}
+
+#connection-modal :is(.editor-heading small, .module-metadata small, .module-visibility-state,
+    .item-enabled-copy small, .template-copy small, .template-grid button small, .login-websites p) {
+  max-width: none;
+  font-size: var(--reading-help);
+  line-height: 1.4;
+}
+
+#connection-modal :is(.template-grid button > span, #add-module-button, .login-websites,
+    .module-control > [data-generate-password], .login-websites .small-button),
+.module-menu button, .key-source-menu > summary, .key-source-options > button {
+  font-size: var(--reading-label);
+}
+
+#connection-modal :is(.template-grid button, #add-module-button, .login-websites summary,
+    .module-control > [data-generate-password], .login-websites .small-button),
+.module-menu button, .key-source-options > button {
+  min-height: var(--reading-control);
+}
+
+#connection-modal .template-grid button { height: auto; }
+#connection-modal .module-key-control > span { font-size: var(--reading-help); }
+.key-source-options { max-width: min(320px, 74vw); min-width: 170px; }
+.key-source-options > button { white-space: normal; }
+.desktop-option > #text-size { min-height: var(--reading-control); }
+
+@media (max-width: 560px) {
+  #connection-modal .field-grid.two { grid-template-columns: minmax(0, 1fr); }
+  #connection-modal .template-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  #connection-modal .secret-hint { display: none; }
+  .module-editor-heading { flex-wrap: wrap; }
+}

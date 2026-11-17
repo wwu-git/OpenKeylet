@@ -1,18 +1,22 @@
 /* Local presentation preferences are independent of the encrypted vault. */
 (() => {
   const storageKey = 'openkeylet.appearance.v1';
-  let preferences = { theme: 'dark', sound: false };
+  let preferences = { theme: 'dark', sound: false, textSize: 'standard' };
   try {
     const saved = JSON.parse(localStorage.getItem(storageKey) || 'null');
-    preferences = { theme: saved?.theme === 'light' ? 'light' : 'dark', sound: saved?.sound === true };
+    preferences = { theme: saved?.theme === 'light' ? 'light' : 'dark', sound: saved?.sound === true, textSize: saved?.textSize === 'large' ? 'large' : 'standard' };
   } catch { /* Unavailable storage leaves safe defaults. */ }
   document.documentElement.dataset.theme = preferences.theme;
+  document.documentElement.dataset.textSize = preferences.textSize;
   let localize = (zh, en) => en;
   let context;
   let lastSoundAt = -Infinity;
 
   function render() {
     document.documentElement.dataset.theme = preferences.theme;
+    document.documentElement.dataset.textSize = preferences.textSize;
+    const size = document.getElementById('text-size');
+    if (size) size.value = preferences.textSize;
     const theme = document.getElementById('theme-toggle');
     const sound = document.getElementById('sound-toggle');
     if (!theme || !sound) return;
@@ -74,6 +78,10 @@
     feedback() { void playClick(); },
   };
   document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('text-size')?.addEventListener('change', event => {
+      preferences.textSize = event.target.value === 'large' ? 'large' : 'standard';
+      save();
+    });
     document.getElementById('theme-toggle').addEventListener('click', () => {
       setTheme(preferences.theme !== 'light');
     });

@@ -55,8 +55,84 @@ struct OwnerSession {
     unlocked: bool,
 }
 
-const WINDOW_LOGICAL_WIDTH: f64 = 460.0;
-const WINDOW_LOGICAL_HEIGHT: f64 = 690.0;
+const DEFAULT_WINDOW_SIZE: (f64, f64) = (720.0, 820.0);
+const MIN_WINDOW_SIZE: (f64, f64) = (460.0, 600.0);
+const WINDOW_SIZE_FILE: &str = "window-size.json";
+
+fn constrained_window_size(saved: (f64, f64), available: (f64, f64)) -> (f64, f64) {
+    fn dimension(saved: f64, default: f64, minimum: f64, available: f64) -> f64 {
+        let requested = if saved.is_finite() && saved > 0.0 {
+            saved
+        } else {
+            default
+        };
+        requested.max(minimum).min(available)
+    }
+    (
+        dimension(
+            saved.0,
+            DEFAULT_WINDOW_SIZE.0,
+            MIN_WINDOW_SIZE.0,
+            available.0,
+        ),
+        dimension(
+            saved.1,
+            DEFAULT_WINDOW_SIZE.1,
+            MIN_WINDOW_SIZE.1,
+            available.1,
+        ),
+    )
+}
+
+fn restore_window_size(window: &WebviewWindow, data_dir: &Path) -> Result<()> {
+    let saved = std::fs::read(data_dir.join(WINDOW_SIZE_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or(DEFAULT_WINDOW_SIZE);
+    let available = window
+        .current_monitor()?
+        .map_or((f64::MAX, f64::MAX), |monitor| {
+            let work_area = monitor
+                .work_area()
+                .size
+                .to_logical::<f64>(monitor.scale_factor());
+            (work_area.width, work_area.height)
+        });
+    let (width, height) = constrained_window_size(saved, available);
+    window.set_min_size(Some(LogicalSize::new(
+        MIN_WINDOW_SIZE.0.min(available.0),
+        MIN_WINDOW_SIZE.1.min(available.1),
+    )))?;
+    window.set_size(LogicalSize::new(width, height))?;
+    window.center()?;
+    Ok(())
+}
+
+fn remember_window_size(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let (Ok(size), Ok(scale)) = (window.inner_size(), window.scale_factor()) else {
+        return;
+    };
+    let size = size.to_logical::<f64>(scale);
+    if size.width <= 0.0 || size.height <= 0.0 {
+        return;
+    }
+    let path = app
+        .state::<AppRuntime>()
+        .vault
+        .data_dir()
+        .join(WINDOW_SIZE_FILE);
+    if let Ok(bytes) = serde_json::to_vec(&(size.width, size.height)) {
+        use std::io::Write;
+        let _ = (|| -> std::io::Result<()> {
+            let mut file = atomic_write_file::AtomicWriteFile::open(path)?;
+            file.write_all(&bytes)?;
+            file.commit()
+        })();
+    }
+}
 
 async fn owner_lock_state(runtime: &AppRuntime) -> Result<OwnerLockState, String> {
     let pin_configured = runtime
@@ -1042,6 +1118,7 @@ async fn window_action(
     match action.as_str() {
         "minimize" => window.minimize().map_err(command_error),
         "close" => {
+            remember_window_size(window.app_handle());
             let tray_available = runtime.tray_available.load(Ordering::Acquire);
             if !tray_available {
                 window.app_handle().exit(0);
@@ -1196,12 +1273,7 @@ pub fn run_gui() -> Result<()> {
             let window = app.get_webview_window("main").context("Main window not found")?;
             #[cfg(debug_assertions)]
             window.set_title("OpenKeylet · DEV")?;
-            let fixed_size = LogicalSize::new(WINDOW_LOGICAL_WIDTH, WINDOW_LOGICAL_HEIGHT);
-            window.set_min_size(Some(fixed_size))?;
-            window.set_max_size(Some(fixed_size))?;
-            window.set_size(fixed_size)?;
-            window.set_resizable(false)?;
-            window.set_maximizable(false)?;
+            restore_window_size(&window, app.state::<AppRuntime>().vault.data_dir())?;
             request_rounded_corners(&window)?;
             match install_tray(app) {
                 Ok(()) => app
@@ -1224,13 +1296,8 @@ pub fn run_gui() -> Result<()> {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if matches!(event, tauri::WindowEvent::ScaleFactorChanged { .. }) {
-                let _ = window.set_size(LogicalSize::new(
-                    WINDOW_LOGICAL_WIDTH,
-                    WINDOW_LOGICAL_HEIGHT,
-                ));
-            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                remember_window_size(window.app_handle());
                 let runtime = window.state::<AppRuntime>();
                 let close_behavior = runtime
                     .vault
@@ -1312,6 +1379,9 @@ pub fn run_gui() -> Result<()> {
 
     #[cfg(target_os = "macos")]
     app.run(|app, event| {
+        if matches!(&event, tauri::RunEvent::ExitRequested { .. }) {
+            remember_window_size(app);
+        }
         if let tauri::RunEvent::Reopen { .. } = event {
             show_main_window(app);
         }
@@ -1319,6 +1389,9 @@ pub fn run_gui() -> Result<()> {
 
     #[cfg(not(target_os = "macos"))]
     app.run(|app, event| {
+        if matches!(&event, tauri::RunEvent::ExitRequested { .. }) {
+            remember_window_size(app);
+        }
         // A hidden development launcher can pass its initial show state to the
         // child process. Explicitly show the GUI once its event loop is ready.
         if matches!(event, tauri::RunEvent::Ready) {
@@ -1331,7 +1404,23 @@ pub fn run_gui() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::should_hide_on_close;
+    use super::{constrained_window_size, should_hide_on_close};
+
+    #[test]
+    fn window_size_fits_the_current_screen() {
+        assert_eq!(
+            constrained_window_size((950.0, 900.0), (850.0, 740.0)),
+            (850.0, 740.0)
+        );
+        assert_eq!(
+            constrained_window_size((500.0, 650.0), (850.0, 740.0)),
+            (500.0, 650.0)
+        );
+        assert_eq!(
+            constrained_window_size((0.0, f64::NAN), (850.0, 900.0)),
+            (720.0, 820.0)
+        );
+    }
 
     #[test]
     fn close_only_hides_when_a_tray_entry_exists() {

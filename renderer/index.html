@@ -11,6 +11,7 @@
     <link rel="stylesheet" href="bricktone-editor.css" />
     <link rel="stylesheet" href="bricktone-light.css" />
     <link rel="stylesheet" href="bricktone-appearance.css" />
+    <link rel="stylesheet" href="readability.css" />
     <script src="appearance.js"></script>
   </head>
   <body>
@@ -166,8 +167,9 @@
             </section>
 
             <section class="content-panel settings-card" data-module="APP / 03">
-              <div class="settings-heading"><div><h2>Window and lock</h2><p>Control the close button and local PIN lock.</p></div></div>
+              <div class="settings-heading"><div><h2>Appearance, window and lock</h2><p>Adjust text size, window behavior and the local PIN lock.</p></div></div>
               <div class="desktop-options">
+                <label class="desktop-option" for="text-size"><span><strong id="text-size-label">Text size</strong></span><select class="input" id="text-size"><option value="standard">Standard</option><option value="large">Large</option></select></label>
                 <label class="desktop-option" for="close-behavior"><span><strong>Close button</strong><small>Minimize to keep the tray menu available</small></span><select class="input" id="close-behavior"><option value="tray">Minimize to tray</option><option value="exit">Quit OpenKeylet</option></select></label>
                 <div class="desktop-option pin-option"><span><strong>PIN lock</strong><small>Turning this off removes the current PIN; set a new PIN when you turn it on again</small></span><label class="switch"><input type="checkbox" id="pin-enabled" /><span></span></label></div>
               </div>
