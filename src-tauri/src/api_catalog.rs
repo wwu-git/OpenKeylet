@@ -10,6 +10,30 @@ pub struct ApiProfile {
     pub auth_prefix: &'static str,
 }
 
+/// Address templates for services that require per-request signing.
+/// These entries are not eligible for URL or authentication inference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignedApiEndpoint {
+    pub display_name: &'static str,
+    pub url_template: &'static str,
+    pub signing: &'static str,
+}
+
+// OCI commercial-cloud endpoints:
+// https://docs.oracle.com/en-us/iaas/Content/API/Concepts/usingapi.htm
+pub const SIGNED_API_ENDPOINTS: &[SignedApiEndpoint] = &[
+    SignedApiEndpoint {
+        display_name: "OCI Compute / Networking",
+        url_template: "https://iaas.<region>.oraclecloud.com/20160918/",
+        signing: "OCI request signing",
+    },
+    SignedApiEndpoint {
+        display_name: "OCI Object Storage",
+        url_template: "https://objectstorage.<region>.oraclecloud.com/",
+        signing: "OCI request signing",
+    },
+];
+
 const UNKNOWN: ApiProfile = ApiProfile {
     display_name: "API",
     default_base_url: "",
@@ -163,6 +187,16 @@ pub fn fallback_name(base_url: &str, profile: ApiProfile) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oci_templates_do_not_infer_bearer_profiles_or_default_urls() {
+        for entry in SIGNED_API_ENDPOINTS {
+            let url = entry.url_template.replace("<region>", "ap-tokyo-1");
+            assert_eq!(Url::parse(&url).unwrap().scheme(), "https");
+            assert_eq!(infer(entry.display_name, &url, ""), UNKNOWN);
+            assert_eq!(infer(entry.display_name, "", "").default_base_url, "");
+        }
+    }
 
     #[test]
     fn detects_common_provider_and_adds_https() {
