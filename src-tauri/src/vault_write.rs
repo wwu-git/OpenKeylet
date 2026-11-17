@@ -103,10 +103,10 @@ pub(crate) fn normalize_folders(folders: Vec<String>) -> Result<Vec<String>> {
 }
 fn authorize(settings: &Settings, folder: &str) -> Result<()> {
     ensure!(
-        settings.agent_write_enabled
+        settings.mcp_writes_enabled()
             && !folder.is_empty()
             && settings.agent_write_folders.iter().any(|f| f == folder),
-        "MCP write denied: enable writing and authorize the folder in desktop settings"
+        "MCP write denied: enable writing and authorize the folder in desktop settings or permissions CLI"
     );
     Ok(())
 }
@@ -114,7 +114,7 @@ impl Vault {
     pub fn write_capabilities(&self) -> Result<WriteCapabilities> {
         let settings = self.settings()?;
         Ok(WriteCapabilities {
-            enabled:settings.agent_write_enabled && !settings.agent_write_folders.is_empty(), folders:settings.agent_write_folders,
+            enabled:settings.mcp_writes_enabled(), folders:settings.agent_write_folders,
             operations:vec!["create".into(),"update".into(),"move via update".into()],
             item_types:vec!["ssh".into(),"api".into(),"login".into(),"custom".into()],
             modules:["host","port","username","password","privateKey","passphrase","url","apiCredential","totp","customSecret"].map(str::to_owned).to_vec(),

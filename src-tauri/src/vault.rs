@@ -39,6 +39,12 @@ struct VaultInner {
     key: MasterKey,
 }
 
+pub enum WritePermissionChange<'a> {
+    Enable(bool),
+    AddFolder(&'a str),
+    RemoveFolder(&'a str),
+}
+
 pub struct DecryptedConnection {
     pub stored: StoredConnection,
     pub secrets: SecretBundle,
@@ -261,6 +267,33 @@ impl Vault {
             Ok(())
         })?;
         Ok(next)
+    }
+
+    pub fn change_write_permissions(&self, change: WritePermissionChange<'_>) -> Result<Settings> {
+        use crate::vault_write::normalize_folders;
+        self.update_document_with_result(|document| {
+            let settings = &mut document.settings;
+            match change {
+                WritePermissionChange::Enable(enabled) => {
+                    if enabled && settings.agent_write_folders.is_empty() {
+                        bail!("Add at least one writable folder before enabling MCP writes");
+                    }
+                    settings.agent_write_enabled = enabled;
+                }
+                WritePermissionChange::AddFolder(name) => {
+                    let mut folders = settings.agent_write_folders.clone();
+                    folders.push(name.to_owned());
+                    settings.agent_write_folders = normalize_folders(folders)?;
+                }
+                WritePermissionChange::RemoveFolder(name) => {
+                    let name = normalize_folders(vec![name.to_owned()])?.remove(0);
+                    let index = settings.agent_write_folders.iter().position(|folder| folder == &name)
+                        .context("Writable folder not found")?;
+                    settings.agent_write_folders.remove(index);
+                }
+            }
+            Ok(settings.clone())
+        })
     }
 
     pub fn update_settings_patch(&self, patch: SettingsPatch) -> Result<Settings> {

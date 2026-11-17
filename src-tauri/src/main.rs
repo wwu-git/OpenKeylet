@@ -3,6 +3,8 @@
     windows_subsystem = "windows"
 )]
 
+mod admin_cli;
+
 use anyhow::{Context, Result};
 #[cfg(target_os = "macos")]
 use mcp_vault::crypto::MasterKey;
@@ -33,7 +35,7 @@ async fn dispatch() -> Result<()> {
         }
         #[cfg(not(feature = "gui"))]
         anyhow::bail!(
-            "This is the headless version of OpenKeylet; use the mcp stdio, config, browser, or backup subcommand"
+            "This is the headless version of OpenKeylet; use the mcp stdio, config, browser, backup, or permissions subcommand"
         );
     }
 
@@ -56,6 +58,7 @@ async fn dispatch() -> Result<()> {
         [command, transport] if command == "mcp" && transport == "stdio" => {
             mcp::serve_stdio(vault).await
         }
+        [command, rest @ ..] if command == "permissions" => admin_cli::permissions(&vault, rest),
         [command, format] if command == "config" => {
             println!("{}", mcp::render_config(format)?);
             Ok(())
@@ -95,7 +98,7 @@ async fn dispatch() -> Result<()> {
             Ok(())
         }
         _ => anyhow::bail!(
-            "Usage: openkeylet [gui] | mcp stdio | config <stdio-json|stdio-toml> | browser <status|enable [port]|disable|pair [port]|reset> | backup <export|import> <file> | key migrate (macOS)"
+            "Usage: openkeylet [gui] | mcp stdio | config <stdio-json|stdio-toml> | browser <status|enable [port]|disable|pair [port]|reset> | backup <export|import> <file> | permissions <status|enable|disable|folder add/remove NAME> | key migrate (macOS)"
         ),
     }
 }

@@ -43,6 +43,12 @@ pub struct SettingsPatch {
     pub browser_port: Option<u16>,
 }
 
+impl Settings {
+    pub fn mcp_writes_enabled(&self) -> bool {
+        self.agent_write_enabled && !self.agent_write_folders.is_empty()
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {

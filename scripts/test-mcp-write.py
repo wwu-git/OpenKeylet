@@ -64,14 +64,13 @@ try:
                                   {"kind":"apiCredential","value":"synthetic-token"}]}
             assert tool("items_create", payload).get("isError")
             path = Path(directory) / "vault.json"
-            def settings(enabled, folders):
-                # No requests in flight; emulate owner-controlled settings, never a MCP tool.
-                document = json.loads(path.read_text())
-                document["settings"].update(agentWriteEnabled=enabled, agentWriteFolders=folders)
-                tmp = path.with_suffix(".tmp")
-                tmp.write_text(json.dumps(document))
-                tmp.replace(path)
-            settings(True, ["Agent"])
+            def permissions(*args):
+                result = subprocess.run([str(binary), "permissions", *args], env=env,
+                                        capture_output=True, text=True, timeout=15, check=True)
+                return json.loads(result.stdout)
+            permissions("folder", "add", "Agent")
+            assert permissions("enable")["effective"]
+            assert tool("items_create", dict(payload, folder="Agent/child")).get("isError")
             created_result = tool("items_create", payload)
             created = data(created_result)
             assert "synthetic-token" not in json.dumps(created_result)
@@ -104,9 +103,11 @@ try:
             assert path.read_bytes() == before
             malformed = rpc("tools/call", {"name":"items_create","arguments":dict(payload, modules="NEVER-ECHO-THIS")})
             assert "NEVER-ECHO-THIS" not in json.dumps(malformed)
-            settings(False, ["Agent"])
+            assert not permissions("folder", "remove", "Agent")["effective"]
             assert tool("items_update", {"id":created["id"],"expectedRevision":updated["revision"],"description":"denied"}).get("isError")
             assert not data(tool("vault_write_capabilities", {}))["enabled"]
+            unchanged = data(tool("items_search", {"query":"synthetic-api"}))["items"][0]
+            assert unchanged["revision"] == updated["revision"]
             assert "replacement-token" not in path.read_text()
             print("PASS: real MCP stdio discovery, default deny, create/update, hidden search, HTTP Bearer/API Key/Basic use and token replacement, version conflict, move denial, rollback, sanitized schema errors, immediate revocation, encrypted persistence")
         finally:
