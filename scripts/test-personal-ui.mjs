@@ -71,12 +71,65 @@ try {
   });
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   await page.locator("#connections-list .empty-state").waitFor();
-  const fillItemSearch = async value => {
-    const search = page.locator('[data-page-search="connections"]');
-    if (!await search.isVisible()) await page.locator('#title-search-toggle').click();
-    await search.fill(value);
-  };
-  assert.equal(await page.locator('.vault-filters').count(),0);
+  const projectSearch = page.locator('#connection-search');
+  const fillItemSearch = value => projectSearch.fill(value);
+  assert.equal(await projectSearch.isVisible(), true);
+  await page.evaluate(async () => {
+    const item = { name: 'GitHub', description: '生产', itemType: 'api', enabled: true, folder: 'agent',
+      capabilities: ['http'], baseUrl: 'https://api.example.invalid', modules: [{kind: 'url', value: 'https://api.example.invalid'}] };
+    fixture.state.connections = [
+      { ...item, id: 'exact' },
+      { ...item, id: 'nested', folder: 'agent/测试' },
+      { ...item, id: 'disabled', enabled: false },
+      { ...item, id: 'ssh', itemType: 'ssh' },
+      { ...item, id: 'unfiled', folder: '' },
+    ];
+    await refresh();
+  });
+  const visible = () => page.locator('.connection-card').evaluateAll(rows => rows.map(row => row.dataset.itemId));
+  const filters = page.locator('#connection-filter-toggle');
+  const folder = page.locator('#connection-folder-filter');
+  const status = page.locator('#connection-status-filter');
+  await page.locator('[data-item-type-filter="api"]').click();
+  await filters.click();
+  await folder.selectOption({label: 'agent'});
+  await status.selectOption('enabled');
+  await filters.click();
+  await fillItemSearch('生产 github');
+  assert.deepEqual(await visible(), ['exact']);
+  assert.match(await page.locator('#connection-result-count').textContent(), /1\s*\/\s*5/);
+  await page.keyboard.press('Control+f');
+  assert.equal(await projectSearch.evaluate(el => document.activeElement === el), true);
+  await page.locator('#connection-clear-query').click();
+  assert.equal(await projectSearch.inputValue(), '');
+  assert.deepEqual(await visible(), ['exact'], 'Clearing keywords preserves the active filters');
+  await page.locator('[data-clear-item-filter="status"]').click();
+  assert.deepEqual(await visible(), ['exact', 'disabled']);
+  await filters.click();
+  await status.selectOption('enabled');
+  await filters.click();
+  await page.locator('[data-item-id="exact"] .item-disclosure').click();
+  await page.locator('#connection-description').fill('未保存的编辑');
+  await fillItemSearch('不存在');
+  await filters.click();
+  await folder.selectOption({label: '未分组'});
+  await status.selectOption('disabled');
+  await page.locator('[data-item-type-filter="ssh"]').click();
+  assert.equal(await page.locator('#connection-description').inputValue(), '未保存的编辑');
+  assert.deepEqual(await visible(), ['exact']);
+  assert.match(await page.locator('#connection-result-count').textContent(), /0\s*\/\s*5/);
+  await page.locator('[data-item-id="exact"] .item-disclosure').click();
+  await page.locator('#connection-modal').waitFor({state: 'hidden'});
+  await page.waitForFunction(() => fixture.drafts.some(d => d.input.description === '未保存的编辑'));
+  await page.locator('#connection-clear-all').click();
+  assert.equal(await page.locator('#connection-search').inputValue(), '');
+  assert.equal((await visible()).length, 5);
+  await page.evaluate(async () => {
+    fixture.state.connections = [];
+    fixture.drafts = [];
+    await refresh();
+    await refreshDrafts();
+  });
   assert.equal(await page.locator('#drafts-button').isDisabled(),true);
   // A closed unsaved editor remains recoverable through the shared selector.
   await page.locator('#add-connection-button').click();
@@ -208,6 +261,17 @@ try {
   await page.waitForFunction(()=>fixture.trash.length===0);
   await page.locator("#vault-management-close").click();
   await page.locator('[data-page="connections"]').click();
+  await page.setViewportSize({width:460,height:520});
+  await page.locator('#toast-region .toast').last().waitFor({state:'hidden'});
+  await filters.click();
+  assert.ok(await page.locator('#connection-filter-panel').evaluate(el => {
+    const rect = el.getBoundingClientRect();
+    return rect.left >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight;
+  }));
+  assert.ok(await projectSearch.evaluate(el => el.getBoundingClientRect().width >= 100));
+  await page.screenshot({path:path.join(artifacts,'narrow-filter-panel.png')});
+  await filters.press('Escape');
+  assert.equal(await page.locator('#connection-filter-panel').isHidden(), true);
   await page.screenshot({path:path.join(artifacts,"narrow-vault.png")});
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
   await page.locator("#add-connection-button").click();
@@ -215,5 +279,5 @@ try {
   await page.screenshot({path:path.join(artifacts,"narrow-card-editor.png")});
   assert.ok(await page.evaluate(()=>document.querySelector("#connection-modal .modal-card").getBoundingClientRect().bottom<=innerHeight));
   assert.deepEqual(errors,[]);
-  console.log(JSON.stringify({ok:true,checks:["combined add/draft selector","draft preservation and recovery","card editor","encrypted field payload","search by name and folder","multiline secure note","generator inserts password","backup password flow","multiple website rules","migration preview/cancel/commit","password history","trash restore and purge from settings","narrow layout"],artifacts},null,2));
+  console.log(JSON.stringify({ok:true,checks:["combined add/draft selector","draft preservation and recovery","card editor","encrypted field payload","combined keyword, type, exact folder and enabled status filters","unsaved edits survive filtering and are saved as drafts","460px filter controls","multiline secure note","generator inserts password","backup password flow","multiple website rules","migration preview/cancel/commit","password history","trash restore and purge from settings","narrow layout"],artifacts},null,2));
 } finally {await browser.close();server.close();}

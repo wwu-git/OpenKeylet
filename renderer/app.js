@@ -247,6 +247,8 @@ let currentActivityFilter = 'all';
 const pageSearch = { connections: '', activity: '', settings: '' };
 const itemTypeFilterOrder = ['all', 'ssh', 'login', 'api', 'passkey', 'card', 'identity', 'secureNote', 'custom'];
 let currentItemTypeFilter = 'all';
+let currentFolderFilter = 'all';
+let currentItemStatusFilter = 'all';
 const settingsFilterOrder = ['all', 'SYSTEM', 'MCP', 'APP', 'WEB', 'CLOUD', 'SAFE'];
 let currentSettingsFilter = 'all';
 let titleSearchOpen = false;
@@ -652,8 +654,6 @@ async function selectFilterButton(button) {
 
 async function setItemTypeFilter(kind) {
   if (!itemTypeFilterOrder.includes(kind) || kind === currentItemTypeFilter) return;
-  const edited = state.connections.find(item => item.id === inlineEditorItemId);
-  if (edited && kind !== 'all' && itemDisplayKind(edited) !== kind && !await closeEditorWithDraft()) return;
   currentItemTypeFilter = kind;
   syncItemTypeFilter();
   renderConnections();
@@ -865,19 +865,85 @@ function syncActivityFilterControl() {
   syncFilterStrip('#activity-filter-switch', activityFilterOrder, currentActivityFilter, 'data-activity-filter', kind => localized(...labels[kind]), true);
 }
 
+function syncConnectionSearchControls(matchCount, editingOutsideFilters) {
+  const search = $('#connection-search');
+  search.placeholder = localized('搜索项目名、主机或公开用途…', 'Search names, hosts, or descriptions…');
+  search.setAttribute('aria-label', localized('搜索项目', 'Search projects'));
+  if (search.value !== pageSearch.connections) search.value = pageSearch.connections;
+  const clearQuery = $('#connection-clear-query');
+  clearQuery.hidden = !pageSearch.connections;
+  clearQuery.setAttribute('aria-label', localized('清除关键词', 'Clear search'));
+  $('#connection-folder-filter-label').textContent = localized('文件夹', 'Folder');
+  $('#connection-status-filter-label').textContent = localized('启用状态', 'Status');
+
+  const folders = [...new Set(state.connections.map(item => item.folder).filter(Boolean))];
+  // Keep a selected folder available when its last project is moved or removed.
+  if (currentFolderFilter.startsWith('folder:')) {
+    const selected = currentFolderFilter.slice('folder:'.length);
+    if (!folders.includes(selected)) folders.push(selected);
+  }
+  const folderOptions = [
+    ['all', localized('全部文件夹', 'All folders')],
+    ['unfiled', localized('未分组', 'Unfiled')],
+    ...folders.sort((a, b) => a.localeCompare(b, language)).map(name => [`folder:${name}`, name]),
+  ];
+  const statusOptions = [
+    ['all', localized('全部状态', 'All statuses')],
+    ['enabled', localized('已启用', 'Enabled')],
+    ['disabled', localized('已禁用', 'Disabled')],
+  ];
+  for (const [selector, options, selected] of [
+    ['#connection-folder-filter', folderOptions, currentFolderFilter],
+    ['#connection-status-filter', statusOptions, currentItemStatusFilter],
+  ]) {
+    const select = $(selector);
+    const markup = options.map(([value, label]) => `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`).join('');
+    if (select.innerHTML !== markup) select.innerHTML = markup;
+    select.value = selected;
+  }
+
+  const chips = [];
+  if (currentItemTypeFilter !== 'all') chips.push(['type', itemFilterLabel(currentItemTypeFilter)]);
+  if (currentFolderFilter !== 'all') chips.push(['folder', folderOptions.find(([value]) => value === currentFolderFilter)[1]]);
+  if (currentItemStatusFilter !== 'all') chips.push(['status', statusOptions.find(([value]) => value === currentItemStatusFilter)[1]]);
+  const chipList = $('#connection-filter-chips');
+  const chipMarkup = chips.map(([kind, label]) => `<button type="button" class="button quiet" data-clear-item-filter="${kind}" aria-label="${escapeHtml(localized(`移除筛选：${label}`, `Remove filter: ${label}`))}">${escapeHtml(label)} <span aria-hidden="true">×</span></button>`).join('');
+  if (chipList.innerHTML !== chipMarkup) chipList.innerHTML = chipMarkup;
+  const advancedCount = Number(currentFolderFilter !== 'all') + Number(currentItemStatusFilter !== 'all');
+  $('#connection-filter-toggle').textContent = localized('筛选', 'Filters') + (advancedCount ? ` (${advancedCount})` : '');
+  $('#connection-result-count').textContent = localized(
+    `${matchCount} / ${state.connections.length} 个项目` + (editingOutsideFilters ? ' · 保留正在编辑的项目' : ''),
+    `${matchCount} / ${state.connections.length} projects` + (editingOutsideFilters ? ' · Open editor kept visible' : ''),
+  );
+  const clearAll = $('#connection-clear-all');
+  clearAll.textContent = localized('清除全部', 'Clear all');
+  clearAll.hidden = !chips.length && !pageSearch.connections;
+}
+
+function matchesConnectionFilters(item, words) {
+  if (currentItemTypeFilter !== 'all' && itemDisplayKind(item) !== currentItemTypeFilter) return false;
+  const folder = item.folder ? `folder:${item.folder}` : 'unfiled';
+  if (currentFolderFilter !== 'all' && currentFolderFilter !== folder) return false;
+  if (currentItemStatusFilter !== 'all' && Boolean(item.enabled) !== (currentItemStatusFilter === 'enabled')) return false;
+  if (!words.length) return true;
+  const fields = (item.secret?.fields || []).map(field => field.name);
+  const addresses = (item.loginUris || []).map(rule => rule.uri);
+  const searchable = normalizeSearch([
+    item.name, item.description, item.folder, item.host, item.baseUrl, ...addresses,
+    itemTypeLabel(item.itemType), itemDisplayType(item), ...itemCapabilities(item), itemDetail(item), itemPermission(item), ...fields,
+  ].join(' '));
+  return words.every(word => searchable.includes(word));
+}
+
 function renderConnections() {
   if (itemPointerDrag || itemOrderSaving) return;
-  const query = normalizeSearch(pageSearch.connections);
-  const signature = JSON.stringify([state.connections, query, language, inlineEditorItemId, currentItemTypeFilter]);
+  const words = normalizeSearch(pageSearch.connections).split(/\s+/).filter(Boolean);
+  const signature = JSON.stringify([state.connections, pageSearch.connections, language, inlineEditorItemId, currentItemTypeFilter, currentFolderFilter, currentItemStatusFilter]);
   if (signature === renderedConnectionsSignature) return;
   renderedConnectionsSignature = signature;
-  const items = state.connections.filter((item) => {
-    if (item.id === inlineEditorItemId) return true;
-    if (currentItemTypeFilter !== 'all' && itemDisplayKind(item) !== currentItemTypeFilter) return false;
-    if (!query) return true;
-    const fields = (item.secret?.fields || []).map((field) => field.name).join(' ');
-    return normalizeSearch([item.name, item.description, item.folder, itemTypeLabel(item.itemType), itemDisplayType(item), itemCapabilities(item).join(' '), itemDetail(item), itemPermission(item), fields].join(' ')).includes(query);
-  });
+  const matched = new Set(state.connections.filter(item => matchesConnectionFilters(item, words)).map(item => item.id));
+  const items = state.connections.filter(item => matched.has(item.id) || item.id === inlineEditorItemId);
+  syncConnectionSearchControls(matched.size, items.length > matched.size);
   const container = $('#connections-list');
   const editor = $('#connection-modal');
   const focusedEditorControl = editor.contains(document.activeElement) ? document.activeElement : null;
@@ -2068,10 +2134,13 @@ document.addEventListener('click', async (event) => {
   if (action?.dataset.action === 'clear-connection-filters') {
     pageSearch.connections = '';
     currentItemTypeFilter = 'all';
-    $('[data-page-search="connections"]').value = '';
+    currentFolderFilter = 'all';
+    currentItemStatusFilter = 'all';
+    $('#connection-filter-menu').open = false;
     syncItemTypeFilter();
     syncTitleSearch();
     renderConnections();
+    $('#connection-search').focus();
   }
   if (action?.dataset.action === 'clear-activity-filters') {
     currentActivityFilter = 'all';
@@ -2146,6 +2215,39 @@ document.addEventListener('click', async (event) => {
       await scanAgents();
     } catch (error) { toast(cleanError(error), 'error'); }
   }
+});
+
+$('#connection-search').addEventListener('input', event => {
+  pageSearch.connections = event.target.value;
+  syncTitleSearch();
+  renderConnections();
+});
+$('#connection-clear-query').addEventListener('click', () => {
+  pageSearch.connections = '';
+  syncTitleSearch();
+  renderConnections();
+  $('#connection-search').focus();
+});
+$('#connection-folder-filter').addEventListener('change', event => {
+  currentFolderFilter = event.target.value;
+  renderConnections();
+});
+$('#connection-status-filter').addEventListener('change', event => {
+  currentItemStatusFilter = event.target.value;
+  renderConnections();
+});
+$('#connection-filter-chips').addEventListener('click', event => {
+  const kind = event.target.closest('[data-clear-item-filter]')?.dataset.clearItemFilter;
+  if (!kind) return;
+  if (kind === 'type') { currentItemTypeFilter = 'all'; syncItemTypeFilter(); }
+  if (kind === 'folder') currentFolderFilter = 'all';
+  if (kind === 'status') currentItemStatusFilter = 'all';
+  renderConnections();
+  $('#connection-search').focus();
+});
+document.addEventListener('click', event => {
+  const filters = $('#connection-filter-menu');
+  if (filters.open && !filters.contains(event.target)) filters.open = false;
 });
 
 document.addEventListener('input', (event) => {
@@ -2546,9 +2648,14 @@ document.addEventListener('keydown', (event) => {
     void selectFilterButton(buttons[next]).then(() => $('[aria-pressed="true"]', strip).focus());
     return;
   }
-  const pageSearchAvailable = $('#connection-modal').classList.contains('hidden') && $('#owner-lock-layer').classList.contains('hidden') && !githubBackup.isOpen();
+  const pageSearchAvailable = (inlineEditorItemId || $('#connection-modal').classList.contains('hidden')) && $('#owner-lock-layer').classList.contains('hidden') && !githubBackup.isOpen();
   if (pageSearchAvailable && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f' && !event.altKey) {
     event.preventDefault();
+    if (activePage === 'connections') {
+      $('#connection-search').focus();
+      $('#connection-search').select();
+      return;
+    }
     setTitleSearchOpen(true);
     const search = $(`[data-page-search="${activePage}"]`);
     search?.focus();
@@ -2556,12 +2663,24 @@ document.addEventListener('keydown', (event) => {
     return;
   }
   if (event.key === 'Escape') {
+    const filters = $('#connection-filter-menu');
+    if (filters.open && filters.contains(event.target)) {
+      event.preventDefault();
+      filters.open = false;
+      $('#connection-filter-toggle').focus();
+      return;
+    }
+    if (event.target.id === 'connection-search' && pageSearch.connections) {
+      event.preventDefault();
+      $('#connection-clear-query').click();
+      return;
+    }
     const search = event.target.closest?.('[data-page-search]');
     if (search?.value) {
       const page = search.dataset.pageSearch;
       search.value = '';
       pageSearch[page] = '';
-      if (page === 'connections') renderConnections();
+      if (page === 'connections') { syncTitleSearch(); renderConnections(); }
       if (page === 'activity') { activityVisibleCount = ACTIVITY_PAGE_SIZE; renderActivity(); }
       if (page === 'settings') applySettingsSearch();
     }

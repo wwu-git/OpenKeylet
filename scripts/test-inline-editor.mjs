@@ -598,10 +598,12 @@ try {
   await page.locator('#title-search-toggle').click();
   assert.equal(await search.isHidden(), true);
   assert.equal(await page.locator('.connection-card').count(), 1, 'Collapsing search keeps its query');
+  const projectSearch = page.locator('#connection-search');
   await page.keyboard.press('Control+f');
-  assert.equal(await search.isVisible(), true);
-  await search.press('Escape');
-  assert.equal(await search.isHidden(), true);
+  assert.equal(await projectSearch.evaluate(el => document.activeElement === el), true);
+  assert.equal(await projectSearch.inputValue(), 'server');
+  await projectSearch.press('Escape');
+  assert.equal(await projectSearch.inputValue(), '');
   assert.equal(await page.locator('.connection-card').count(), 3);
   await page.locator('[data-language="en"]').click();
   await toggle('alpha').click();
