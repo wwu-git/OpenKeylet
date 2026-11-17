@@ -1,12 +1,12 @@
 # 无界面版管理 CLI 设计
 
-状态：方案，待实现。目标是在没有桌面窗口的机器上完成 OpenKeylet 写入授权、GitHub 加密备份和恢复，使 Grok Bot 云电脑可以独立初始化并使用自己的保险库。
+状态：已实现，通过本机验收。真实 GitHub 和 Grok Bot 云电脑待验收。目标是在没有桌面窗口的机器上完成 OpenKeylet 写入授权、GitHub 加密备份和恢复，使 Grok Bot 云电脑可以独立初始化并使用自己的保险库。
 
 ## 1. 范围
 
 沿用无界面版现有的 `openkeylet mcp stdio` 和保险库存储。增加两组本地管理命令，桌面界面与 CLI 共用权限配置、备份格式和后端校验。现有 `backup export/import` 继续处理本地文件。首版连接已有的私有仓库，备份和恢复由管理员手动触发。
 
-Grok Bot 通过 Command 类型的自定义连接器，在其云电脑上启动对应系统与架构的 OpenKeylet 无界面二进制。连接器只运行 `mcp stdio`。验收前确认管理员有受控终端，并核对连接器和管理 CLI 使用同一个绝对数据目录。两边都通过 `OPENKEYLET_DATA_DIR` 显式指定。下文命令为拟定接口。
+Grok Bot 通过 Command 类型的自定义连接器，在其云电脑上启动对应系统与架构的 OpenKeylet 无界面二进制。连接器只运行 `mcp stdio`。验收前确认管理员有受控终端，并核对连接器和管理 CLI 使用同一个绝对数据目录。两边都通过 `OPENKEYLET_DATA_DIR` 显式指定。构建命令为 `npm run build:headless`，二进制路径为 `src-tauri/target/release/openkeylet`。
 
 ## 2. 写入权限
 
@@ -61,6 +61,16 @@ openkeylet github-backup disconnect
 | 真实 GitHub 私有测试仓库 | 用模拟项目连接已有私有仓库，从第一个保险库上传加密快照，再用第二个空保险库恢复并回查。确认上传文件是加密快照，写入授权仍需单独配置。此项可独立于 Grok Bot 完成。 | 需用户指定专用私有测试仓库并授权写入，由管理员在受控终端配置 `gh` 登录和恢复密钥。 |
 | Grok Bot 云电脑与实际聊天 | 确认系统、架构、管理员终端和共同数据目录。注册 Command 连接器，从实际聊天调用 `vault_write_capabilities`，验证默认拒绝、授权后新增和更新（版本 `1 → 2`）、回查及撤权后拒绝。真实 GitHub 端到端验收再从私有测试仓库恢复到云电脑上的空保险库，由 Bot 聊天回查模拟项目。 | 需用户提供云电脑受控终端和连接器入口，并完成接入批准。真实 GitHub 恢复的登录和密钥由管理员操作。缺少受控终端时，单独报告已完成的 Bot 调用和 GitHub 验证，云端恢复留待验收。 |
 
-目前已有本机 macOS ARM64 无界面构建和 `stdio` 工具发现的验证记录。上表是新增 CLI 的待验收项目。只有实际 Grok Bot 聊天成功调用工具并回查结果，才算 Bot 接入通过；本机工具发现只证明 OpenKeylet 进程就绪。
+### 本机验收结果
+
+macOS ARM64 上，无界面版 Rust 测试 154 项、默认桌面版 Rust 测试 185 项通过，桌面 GitHub 备份界面回归通过。已使用实际无界面二进制和同一 MCP 会话验证 CLI 授权、文件夹精确匹配、项目新增和修改、越权移动及即时撤权。独立进程持有设备锁时，CLI 读取状态仍可用，写操作返回忙。伪终端验证新密钥只展示一次，已有密钥输入无回显，取消或无效密钥未写入连接配置。GitHub 加密上传、换保险库恢复、远端冲突与缺失用模拟服务完成。
+
+### 需要用户配合的云端验收
+
+1. 提供 Grok Bot 云电脑的系统和 CPU 架构（Linux 或 macOS 可执行 `uname -s; uname -m`），以及管理员受控终端和 Command 连接器入口。准备对应构建与临时数据目录。
+2. 管理员和连接器使用同一 `OPENKEYLET_DATA_DIR`。注册 OpenKeylet 的 `mcp stdio` 命令，完成批准。在实际 Bot 聊天调用写入能力查询，按上表验证默认拒绝、授权后新增和修改、撤权后拒绝。
+3. 指定并授权专用私有测试仓库，由管理员登录 `gh`，在受控终端使用测试恢复密钥。以本机临时保险库上传，在云电脑的空保险库运行 `connect --mode existing` 和 `restore`。最后在 Bot 聊天回查恢复的模拟项目，并确认源设备的写入授权未随备份迁移。
+
+Grok Bot 接入以实际聊天成功调用并回查为准。实际 GitHub 私有仓库验收也可独立于 Grok Bot 开展。
 
 Grok Bot 接入方式参考 [Grok Bot 自定义连接器说明](https://docs.x.ai/grok-bot/computer-and-apps)。

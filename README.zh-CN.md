@@ -308,7 +308,7 @@ npm run release:linux
 npm run release:headless
 ```
 
-无界面版的权限管理及 GitHub 备份、恢复命令见[管理 CLI 设计](docs/headless-admin-cli.md)（待实现）。
+无界面版支持 `permissions` 写入授权管理和 `github-backup` 加密备份、恢复。命令与验收步骤见[管理 CLI 文档](docs/headless-admin-cli.md)。
 
 ## 许可证
 
