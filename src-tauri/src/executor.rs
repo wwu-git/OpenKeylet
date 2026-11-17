@@ -204,8 +204,9 @@ pub async fn execute_api(
     )?;
 
     let response_limit = input.max_response_bytes.filter(|limit| *limit > 0);
-    let mut client_builder =
-        Client::builder().redirect(reqwest::redirect::Policy::custom(move |attempt| {
+    let mut client_builder = Client::builder()
+        .user_agent(concat!("OpenKeylet/", env!("CARGO_PKG_VERSION")))
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
             if redirect_target_supported(attempt.url()) {
                 attempt.follow()
             } else {
@@ -2108,6 +2109,60 @@ mod tests {
             "new-tree"
         );
         assert!(!replacement_tree.exists());
+    }
+
+    #[tokio::test]
+    async fn api_supplies_user_agent_and_preserves_explicit_override() {
+        async fn response(headers: AxumHeaders) -> (axum::http::StatusCode, String) {
+            let agent = headers
+                .get("user-agent")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            if agent.is_empty() {
+                (axum::http::StatusCode::FORBIDDEN, "User-Agent required".into())
+            } else {
+                (axum::http::StatusCode::OK, agent.to_owned())
+            }
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/", get(response)))
+                .await
+                .unwrap();
+        });
+        let connection = DecryptedConnection {
+            stored: stored(format!("http://{address}/")),
+            secrets: SecretBundle {
+                token: Some("synthetic-token".into()),
+                ..Default::default()
+            },
+        };
+        let result = execute_api(&connection, ApiRequestInput::default())
+            .await
+            .unwrap();
+        assert_eq!(result.status, 200, "{}", result.body);
+        assert!(result.body.starts_with("OpenKeylet/"));
+
+        let directory = tempdir().unwrap();
+        let vault = Vault::open(directory.path().join("vault")).unwrap();
+        assert_eq!(
+            test_connection(&vault, &connection).await.unwrap(),
+            "API responded: HTTP 200"
+        );
+
+        let result = execute_api(
+            &connection,
+            ApiRequestInput {
+                headers: HashMap::from([("User-Agent".into(), "CustomClient/1.0".into())]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.status, 200);
+        assert_eq!(result.body, "CustomClient/1.0");
+        server.abort();
     }
 
     #[tokio::test]
