@@ -2323,6 +2323,7 @@ mod tests {
         secrets.named_secrets = named;
         let saved = vault
             .save_connection(ConnectionInput {
+                ssh_auth_type: String::new(),
                 login_uris: Vec::new(),
                 item_type: String::new(),
                 folder: String::new(),
@@ -2330,30 +2331,35 @@ mod tests {
                 id: None,
                 modules: vec![
                     ItemModule {
+                        id: uuid::Uuid::nil(),
                         kind: "username".into(),
                         name: String::new(),
                         value: String::new(),
                         agent_visible: Some(true),
                     },
                     ItemModule {
+                        id: uuid::Uuid::nil(),
                         kind: "password".into(),
                         name: String::new(),
                         value: String::new(),
                         agent_visible: Some(false),
                     },
                     ItemModule {
+                        id: uuid::Uuid::nil(),
                         kind: "totp".into(),
                         name: String::new(),
                         value: String::new(),
                         agent_visible: Some(true),
                     },
                     ItemModule {
+                        id: uuid::Uuid::nil(),
                         kind: "host".into(),
                         name: String::new(),
                         value: "ssh.example.test".into(),
                         agent_visible: Some(true),
                     },
                     ItemModule {
+                        id: uuid::Uuid::nil(),
                         kind: "port".into(),
                         name: String::new(),
                         value: "22".into(),
@@ -2468,6 +2474,7 @@ mod tests {
         api_secrets.named_secrets = api_named;
         let api_saved = vault
             .save_connection(ConnectionInput {
+                ssh_auth_type: String::new(),
                 login_uris: Vec::new(),
                 item_type: String::new(),
                 folder: String::new(),
@@ -2475,12 +2482,14 @@ mod tests {
                 id: None,
                 modules: vec![
                     ItemModule {
+                        id: uuid::Uuid::nil(),
                         kind: "apiCredential".into(),
                         name: String::new(),
                         value: String::new(),
                         agent_visible: Some(false),
                     },
                     ItemModule {
+                        id: uuid::Uuid::nil(),
                         kind: "url".into(),
                         name: String::new(),
                         value: "https://example.test".into(),
@@ -2567,12 +2576,14 @@ mod tests {
         secrets.password = Some("runtime-ssh-password-marker".into());
         let public = vault
             .save_connection(ConnectionInput {
+                ssh_auth_type: String::new(),
                 login_uris: Vec::new(),
                 item_type: String::new(),
                 folder: String::new(),
                 favorite: false,
                 id: None,
                 modules: vec![ItemModule {
+                    id: uuid::Uuid::nil(),
                     kind: "password".into(),
                     agent_visible: Some(false),
                     ..Default::default()
@@ -2712,6 +2723,7 @@ mod tests {
         secrets.named_secrets = named;
         vault
             .save_connection(ConnectionInput {
+                ssh_auth_type: String::new(),
                 login_uris: Vec::new(),
                 item_type: String::new(),
                 folder: String::new(),
@@ -2719,12 +2731,14 @@ mod tests {
                 id: None,
                 modules: vec![
                     ItemModule {
+                        id: uuid::Uuid::nil(),
                         kind: "customSecret".into(),
                         name: "service password".into(),
                         value: String::new(),
                         agent_visible: Some(false),
                     },
                     ItemModule {
+                        id: uuid::Uuid::nil(),
                         kind: "totp".into(),
                         name: String::new(),
                         value: String::new(),
@@ -2850,12 +2864,14 @@ mod tests {
         secrets.password = Some("single-secret-terminal-marker".into());
         vault
             .save_connection(ConnectionInput {
+                ssh_auth_type: String::new(),
                 login_uris: Vec::new(),
                 item_type: String::new(),
                 folder: String::new(),
                 favorite: false,
                 id: None,
                 modules: vec![ItemModule {
+                    id: uuid::Uuid::nil(),
                     kind: "password".into(),
                     name: String::new(),
                     value: String::new(),
@@ -2915,6 +2931,7 @@ mod tests {
         secrets.named_secrets = named;
         let saved = vault
             .save_connection(ConnectionInput {
+                ssh_auth_type: String::new(),
                 login_uris: Vec::new(),
                 item_type: String::new(),
                 folder: String::new(),
@@ -2922,12 +2939,14 @@ mod tests {
                 id: None,
                 modules: vec![
                     ItemModule {
+                        id: uuid::Uuid::nil(),
                         kind: "username".into(),
                         name: String::new(),
                         value: String::new(),
                         agent_visible: Some(false),
                     },
                     ItemModule {
+                        id: uuid::Uuid::nil(),
                         kind: "password".into(),
                         name: String::new(),
                         value: String::new(),
@@ -3074,12 +3093,14 @@ mod tests {
         secrets.password = Some(secret.to_owned());
         vault
             .save_connection(ConnectionInput {
+                ssh_auth_type: String::new(),
                 login_uris: Vec::new(),
                 item_type: String::new(),
                 folder: String::new(),
                 favorite: false,
                 id: None,
                 modules: vec![ItemModule {
+                    id: uuid::Uuid::nil(),
                     kind: "password".into(),
                     agent_visible: Some(false),
                     ..Default::default()
@@ -3102,12 +3123,14 @@ mod tests {
         other_secrets.password = Some("other-terminal-secret-marker".into());
         vault
             .save_connection(ConnectionInput {
+                ssh_auth_type: String::new(),
                 login_uris: Vec::new(),
                 item_type: String::new(),
                 folder: String::new(),
                 favorite: false,
                 id: None,
                 modules: vec![ItemModule {
+                    id: uuid::Uuid::nil(),
                     kind: "password".into(),
                     agent_visible: Some(false),
                     ..Default::default()

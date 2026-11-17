@@ -1938,6 +1938,7 @@ mod tests {
 
     fn stored(base_url: String) -> StoredConnection {
         StoredConnection {
+            revision: 0,
             login_uris: Vec::new(),
             item_type: String::new(),
             folder: String::new(),
@@ -1975,6 +1976,7 @@ mod tests {
         let vault = Vault::open(directory.path().join("vault")).unwrap();
         let mut stored = stored(String::new());
         stored.modules.push(ItemModule {
+            id: uuid::Uuid::nil(),
             kind: "password".to_owned(),
             ..Default::default()
         });
@@ -2135,6 +2137,7 @@ mod tests {
         secrets.token = Some("synthetic-token".into());
         let mut stored = stored(format!("http://{address}/"));
         stored.modules.push(ItemModule {
+            id: uuid::Uuid::nil(),
             kind: "apiCredential".into(),
             ..Default::default()
         });

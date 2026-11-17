@@ -91,6 +91,8 @@ fn blank(kind: &str, name: &str) -> Result<Entry> {
     let now = chrono::Utc::now().to_rfc3339();
     Ok((
         PortableConnection {
+            ssh_auth_type: String::new(),
+            revision: 0,
             login_uris: vec![],
             item_type: kind.into(),
             folder: String::new(),
@@ -124,6 +126,7 @@ fn field(entry: &mut Entry, kind: &str, value: &str) -> Result<()> {
         return Ok(());
     }
     entry.0.modules.push(ItemModule {
+        id: uuid::Uuid::nil(),
         kind: kind.into(),
         agent_visible: Some(false),
         ..Default::default()
@@ -169,6 +172,7 @@ fn custom(entry: &mut Entry, name: &str, value: &str) -> Result<()> {
         index += 1;
     }
     entry.0.modules.push(ItemModule {
+        id: uuid::Uuid::nil(),
         kind: "customSecret".into(),
         name: unique.clone(),
         agent_visible: Some(false),
@@ -201,6 +205,7 @@ fn finish(entry: &mut Entry) -> Result<()> {
         .find(|uri| crate::passkey::origin(&uri.uri).is_ok())
     {
         entry.0.modules.push(ItemModule {
+            id: uuid::Uuid::nil(),
             kind: "url".into(),
             value: uri.uri.clone(),
             agent_visible: Some(false),
@@ -209,6 +214,7 @@ fn finish(entry: &mut Entry) -> Result<()> {
     }
     if entry.0.modules.is_empty() {
         entry.0.modules.push(ItemModule {
+            id: uuid::Uuid::nil(),
             kind: "username".into(),
             agent_visible: Some(false),
             ..Default::default()

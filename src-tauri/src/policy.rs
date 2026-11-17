@@ -108,6 +108,7 @@ mod tests {
 
     fn connection() -> StoredConnection {
         StoredConnection {
+            revision: 0,
             login_uris: Vec::new(),
             item_type: String::new(),
             folder: String::new(),

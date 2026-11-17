@@ -22,7 +22,7 @@ use url::Url;
 use uuid::Uuid;
 
 const MAX_ACTIVITIES: usize = 3_000;
-const VAULT_VERSION: u8 = 12;
+const VAULT_VERSION: u8 = 13;
 #[cfg(test)]
 #[path = "vault_lifecycle_tests.rs"]
 mod lifecycle_tests;
@@ -116,9 +116,9 @@ impl Vault {
         let bytes = fs::read(&self.inner.vault_path).context("Could not read vault")?;
         let document: VaultDocument =
             serde_json::from_slice(&bytes).context("Invalid vault file format")?;
-        if !matches!(document.version, 7 | 8 | 9 | 10 | 11 | VAULT_VERSION) {
+        if !matches!(document.version, 7 | 8 | 9 | 10 | 11 | 12 | VAULT_VERSION) {
             bail!(
-                "OpenKeylet supports vault versions 7 through 12; current file version is {}",
+                "OpenKeylet supports vault versions 7 through 13; current file version is {}",
                 document.version
             );
         }
@@ -495,6 +495,15 @@ impl Vault {
             }
             let previous_password =
                 zeroize::Zeroizing::new(secrets.get("password").map(str::to_owned));
+            if let Some(old) = &existing {
+                for module in &mut input.modules {
+                    if module.id.is_nil() {
+                        if let Some(previous) = old.modules.iter().find(|m| m.kind == module.kind && (m.kind != "customSecret" || m.name == module.name)) {
+                            module.id = previous.id;
+                        }
+                    }
+                }
+            }
             if !input.modules.is_empty() {
                 input.modules = normalize_modules(input.modules.clone())?;
                 if let Some(connection) = &existing {
@@ -980,12 +989,23 @@ impl Vault {
         let bytes = fs::read(&self.inner.vault_path).context("Could not read vault")?;
         let mut document: VaultDocument =
             serde_json::from_slice(&bytes).context("Invalid vault file format")?;
-        if !matches!(document.version, 7 | 8 | 9 | 10 | 11 | VAULT_VERSION) {
+        if !matches!(document.version, 7 | 8 | 9 | 10 | 11 | 12 | VAULT_VERSION) {
             bail!("Unsupported vault version {}", document.version);
         }
-        // Reading older vaults is harmless; the next actual write uses v12
+        // Reading older vaults is harmless; the next actual write uses v13
         // schema so older processes cannot mistake it for their own model.
         document.version = VAULT_VERSION;
+        for item in document.connections.iter_mut().chain(document.trash.iter_mut().map(|entry| &mut entry.connection)) {
+            item.revision = item.revision.max(1);
+            for (index, module) in item.modules.iter_mut().enumerate() {
+                if module.id.is_nil() {
+                    use sha2::{Digest, Sha256};
+                    let digest = Sha256::digest(format!("{}:module:{index}", item.id).as_bytes());
+                    let mut bytes = [0u8; 16]; bytes.copy_from_slice(&digest[..16]);
+                    module.id = Uuid::from_bytes(bytes);
+                }
+            }
+        }
         Ok(document)
     }
 
@@ -1004,7 +1024,9 @@ impl Vault {
     {
         self.with_exclusive_lock(|_| {
             let mut document = self.read_document_unlocked()?;
+            let before = document.clone();
             update(&mut document)?;
+            advance_revisions(&before, &mut document);
             self.write_document_unlocked(&document)
         })
     }
@@ -1015,7 +1037,9 @@ impl Vault {
     {
         self.with_exclusive_lock(|_| {
             let mut document = self.read_document_unlocked()?;
+            let before = document.clone();
             let result = update(&mut document)?;
+            advance_revisions(&before, &mut document);
             self.write_document_unlocked(&document)?;
             Ok(result)
         })
@@ -1058,9 +1082,12 @@ fn canonical_secret_module_name(kind: &str) -> Option<&str> {
 
 fn normalize_modules(modules: Vec<ItemModule>) -> Result<Vec<ItemModule>> {
     let mut output = Vec::new();
+    let mut ids = std::collections::HashSet::new();
     let mut singleton_kinds = Vec::new();
     let mut secret_names: Vec<String> = Vec::new();
     for mut module in modules {
+        if module.id.is_nil() { module.id = Uuid::new_v4(); }
+        if !ids.insert(module.id) { bail!("Duplicate module ID"); }
         module.kind = module.kind.trim().to_owned();
         if !crate::item_types::personal_field(&module.kind)
             && !matches!(
@@ -1167,6 +1194,7 @@ fn push_module(modules: &mut Vec<ItemModule>, kind: &str, name: &str, value: &st
         return;
     }
     modules.push(ItemModule {
+        id: uuid::Uuid::nil(),
         kind: kind.to_owned(),
         name: name.to_owned(),
         value: value.to_owned(),
@@ -1246,7 +1274,7 @@ pub(crate) fn normalize_connection(
     } else {
         String::new()
     };
-    let ssh_auth_type = if module_secret_configured(&modules, secrets, "password") {
+    let inferred_ssh_auth_type = if module_secret_configured(&modules, secrets, "password") {
         "password"
     } else if module_secret_configured(&modules, secrets, "privateKey") {
         "privateKey"
@@ -1254,9 +1282,16 @@ pub(crate) fn normalize_connection(
         ""
     }
     .to_owned();
+    let ssh_auth_type = if input.ssh_auth_type.is_empty() {
+        existing.filter(|old| !old.ssh_auth_type.is_empty()).map(|old| old.ssh_auth_type.clone()).unwrap_or(inferred_ssh_auth_type)
+    } else {
+        if !matches!(input.ssh_auth_type.as_str(), "password" | "privateKey") { bail!("Invalid SSH authentication mode"); }
+        input.ssh_auth_type.clone()
+    };
     let http_auth_type = input.http_auth_type.clone();
     let name = fallback_item_name(&input.name, id, &modules, secrets);
     Ok(StoredConnection {
+        revision: existing.map_or(1, |old| old.revision.saturating_add(1)),
         login_uris: input.login_uris,
         item_type,
         folder: checked_text(&input.folder, "Folder", 120)?,
@@ -1296,6 +1331,7 @@ fn stored_from_portable(
     key: &MasterKey,
 ) -> Result<StoredConnection> {
     let input = ConnectionInput {
+        ssh_auth_type: portable.ssh_auth_type.clone(),
         login_uris: portable.login_uris.clone(),
         item_type: portable.item_type.clone(),
         folder: portable.folder.clone(),
@@ -1323,6 +1359,7 @@ fn stored_from_portable(
         portable.updated_at.clone(),
     )?;
     stored.created_at = portable.created_at.clone();
+    stored.revision = portable.revision.max(1);
     let mut secrets = secrets.clone();
     if let Some(oci) = &mut secrets.oci {
         oci.forget_key();
@@ -1338,7 +1375,8 @@ fn same_portable_content(
     right_secrets: &SecretBundle,
 ) -> bool {
     if left.login_uris != right.login_uris
-        || left.modules != right.modules
+        || !left.modules.iter().zip(&right.modules).all(|(a,b)| a.kind == b.kind && a.name == b.name && a.value == b.value && a.agent_visible == b.agent_visible)
+        || left.modules.len() != right.modules.len()
         || left.item_type() != right.item_type()
         || left.folder != right.folder
         || left.favorite != right.favorite
@@ -1546,21 +1584,48 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn write_metadata_survives_manual_edit_and_backup() {
+        let dir = tempdir().unwrap();
+        let vault = Vault::open(dir.path().join("v")).unwrap();
+        let input: ConnectionInput = serde_json::from_value(serde_json::json!({
+            "name": "metadata", "modules": [{"kind":"host", "value":"example.test"}]
+        })).unwrap();
+        let first = vault.save_connection(input.clone()).unwrap();
+        let json = serde_json::to_value(&first).unwrap();
+        assert_eq!(json["revision"], 1);
+        assert!(json["modules"][0]["id"].as_str().is_some());
+        let mut edit = input;
+        edit.id = Some(first.id);
+        edit.description = "manual edit".into();
+        let second = vault.save_connection(edit).unwrap();
+        let next = serde_json::to_value(&second).unwrap();
+        assert_eq!(next["revision"], 2);
+        assert_eq!(next["modules"][0]["id"], json["modules"][0]["id"]);
+        let dest = Vault::open(dir.path().join("dest")).unwrap();
+        dest.merge_connections(vault.export_connections().unwrap()).unwrap();
+        let restored = serde_json::to_value(dest.list_connections().unwrap()).unwrap();
+        assert_eq!(restored[0]["modules"][0]["id"], json["modules"][0]["id"]);
+    }
+
+    #[test]
     fn module_normalization_preserves_editor_order() {
         let modules = vec![
             ItemModule {
+                id: uuid::Uuid::nil(),
                 kind: "url".to_owned(),
                 name: String::new(),
                 value: "https://example.test".to_owned(),
                 agent_visible: None,
             },
             ItemModule {
+                id: uuid::Uuid::nil(),
                 kind: "password".to_owned(),
                 name: String::new(),
                 value: String::new(),
                 agent_visible: None,
             },
             ItemModule {
+                id: uuid::Uuid::nil(),
                 kind: "host".to_owned(),
                 name: String::new(),
                 value: "example.test".to_owned(),
@@ -1591,6 +1656,7 @@ mod tests {
             .named_secrets
             .insert("apiCredential".into(), token.to_owned());
         ConnectionInput {
+            ssh_auth_type: String::new(),
             login_uris: Vec::new(),
             item_type: String::new(),
             folder: String::new(),
@@ -1598,11 +1664,13 @@ mod tests {
             id,
             modules: vec![
                 ItemModule {
+                    id: uuid::Uuid::nil(),
                     kind: "url".into(),
                     value: "https://api.example.test/v1/".into(),
                     ..Default::default()
                 },
                 ItemModule {
+                    id: uuid::Uuid::nil(),
                     kind: "apiCredential".into(),
                     ..Default::default()
                 },
@@ -1629,6 +1697,7 @@ mod tests {
             .named_secrets
             .insert("username".into(), "root".into());
         ConnectionInput {
+            ssh_auth_type: String::new(),
             login_uris: Vec::new(),
             item_type: String::new(),
             folder: String::new(),
@@ -1636,20 +1705,24 @@ mod tests {
             id,
             modules: vec![
                 ItemModule {
+                    id: uuid::Uuid::nil(),
                     kind: "host".into(),
                     value: "127.0.0.1".into(),
                     ..Default::default()
                 },
                 ItemModule {
+                    id: uuid::Uuid::nil(),
                     kind: "port".into(),
                     value: "22".into(),
                     ..Default::default()
                 },
                 ItemModule {
+                    id: uuid::Uuid::nil(),
                     kind: "username".into(),
                     ..Default::default()
                 },
                 ItemModule {
+                    id: uuid::Uuid::nil(),
                     kind: "password".into(),
                     ..Default::default()
                 },
@@ -1774,6 +1847,7 @@ mod tests {
 
         input.modules.retain(|module| module.kind != "port");
         input.modules.push(ItemModule {
+            id: uuid::Uuid::nil(),
             kind: "url".into(),
             value: "https://example.test".into(),
             ..Default::default()
@@ -1810,6 +1884,7 @@ mod tests {
         input.name = "unfinished-draft-name-7129".to_owned();
         input.description = "unfinished-draft-note-7129".to_owned();
         input.modules = vec![ItemModule {
+            id: uuid::Uuid::nil(),
             kind: "password".to_owned(),
             name: String::new(),
             value: String::new(),
@@ -1895,6 +1970,7 @@ mod tests {
             .modules
             .retain(|module| !matches!(module.kind.as_str(), "host" | "port"));
         input.modules.push(ItemModule {
+            id: uuid::Uuid::nil(),
             kind: "url".into(),
             value: "api.example.test/v1".into(),
             ..Default::default()
@@ -1951,30 +2027,35 @@ mod tests {
         mixed.http_auth_type = "auto".to_owned();
         mixed.modules = vec![
             ItemModule {
+                id: uuid::Uuid::nil(),
                 kind: "host".into(),
                 name: String::new(),
                 value: "127.0.0.1".into(),
                 agent_visible: None,
             },
             ItemModule {
+                id: uuid::Uuid::nil(),
                 kind: "port".into(),
                 name: String::new(),
                 value: "22".into(),
                 agent_visible: None,
             },
             ItemModule {
+                id: uuid::Uuid::nil(),
                 kind: "username".into(),
                 name: String::new(),
                 value: String::new(),
                 agent_visible: None,
             },
             ItemModule {
+                id: uuid::Uuid::nil(),
                 kind: "password".into(),
                 name: String::new(),
                 value: String::new(),
                 agent_visible: None,
             },
             ItemModule {
+                id: uuid::Uuid::nil(),
                 kind: "apiCredential".into(),
                 name: String::new(),
                 value: String::new(),
@@ -1999,18 +2080,21 @@ mod tests {
         draft.secrets = SecretBundle::default();
         draft.modules = vec![
             ItemModule {
+                id: uuid::Uuid::nil(),
                 kind: "host".into(),
                 name: String::new(),
                 value: "draft.example".into(),
                 agent_visible: None,
             },
             ItemModule {
+                id: uuid::Uuid::nil(),
                 kind: "port".into(),
                 name: String::new(),
                 value: "22".into(),
                 agent_visible: None,
             },
             ItemModule {
+                id: uuid::Uuid::nil(),
                 kind: "username".into(),
                 name: String::new(),
                 value: String::new(),
@@ -2030,6 +2114,7 @@ mod tests {
         let mut missing_name = ssh_input(None);
         missing_name.name.clear();
         missing_name.modules = vec![ItemModule {
+            id: uuid::Uuid::nil(),
             kind: "password".into(),
             name: String::new(),
             value: String::new(),
@@ -2084,7 +2169,7 @@ mod tests {
         drop(vault);
 
         let error = Vault::open(vault_dir).err().expect("version 6 must fail");
-        assert!(format!("{error:#}").contains("supports vault versions 7 through 12"));
+        assert!(format!("{error:#}").contains("supports vault versions 7 through 13"));
     }
 
     #[test]
@@ -2250,6 +2335,7 @@ mod tests {
         let vault = Vault::open(vault_dir.clone()).unwrap();
         let saved = vault
             .save_connection(ConnectionInput {
+                ssh_auth_type: String::new(),
                 login_uris: Vec::new(),
                 item_type: String::new(),
                 folder: String::new(),
@@ -2257,20 +2343,24 @@ mod tests {
                 id: None,
                 modules: vec![
                     ItemModule {
+                        id: uuid::Uuid::nil(),
                         kind: "host".into(),
                         value: "127.0.0.1".into(),
                         ..Default::default()
                     },
                     ItemModule {
+                        id: uuid::Uuid::nil(),
                         kind: "port".into(),
                         value: "22".into(),
                         ..Default::default()
                     },
                     ItemModule {
+                        id: uuid::Uuid::nil(),
                         kind: "username".into(),
                         ..Default::default()
                     },
                     ItemModule {
+                        id: uuid::Uuid::nil(),
                         kind: "privateKey".into(),
                         ..Default::default()
                     },
@@ -2317,6 +2407,7 @@ mod tests {
             .named_secrets
             .insert("username".into(), "developer@example.test".into());
         let input = |id, secrets, remove_secret_names| ConnectionInput {
+            ssh_auth_type: String::new(),
             login_uris: Vec::new(),
             item_type: String::new(),
             folder: String::new(),
@@ -2324,10 +2415,12 @@ mod tests {
             id,
             modules: vec![
                 ItemModule {
+                    id: uuid::Uuid::nil(),
                     kind: "username".into(),
                     ..Default::default()
                 },
                 ItemModule {
+                    id: uuid::Uuid::nil(),
                     kind: "password".into(),
                     ..Default::default()
                 },
@@ -2391,6 +2484,7 @@ mod tests {
         let module_name = format!("a{}", "x".repeat(79));
         let mut input = api_input(None, "Exact module lookup", "api-secret");
         input.modules.push(ItemModule {
+            id: uuid::Uuid::nil(),
             kind: "customSecret".into(),
             name: module_name.clone(),
             agent_visible: Some(false),
@@ -2420,6 +2514,7 @@ mod tests {
         let module_name = "Backup verification code";
         let mut input = api_input(None, "Natural module name", "api-secret");
         input.modules.push(ItemModule {
+            id: uuid::Uuid::nil(),
             kind: "customSecret".into(),
             name: module_name.into(),
             agent_visible: Some(false),
@@ -2435,5 +2530,15 @@ mod tests {
             vault.get_secret_value(saved.id, module_name).unwrap().2,
             "custom-value"
         );
+    }
+}
+
+fn advance_revisions(before: &VaultDocument, after: &mut VaultDocument) {
+    for item in &mut after.connections {
+        if let Some(old) = before.connections.iter().chain(before.trash.iter().map(|entry| &entry.connection)).find(|old| old.id == item.id) {
+            if serde_json::to_value(&*item).ok() != serde_json::to_value(old).ok() {
+                item.revision = old.revision.saturating_add(1);
+            }
+        } else { item.revision = item.revision.max(1); }
     }
 }

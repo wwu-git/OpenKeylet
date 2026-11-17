@@ -127,6 +127,8 @@ pub struct SecretProfile {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ItemModule {
+    #[serde(default)]
+    pub id: Uuid,
     pub kind: String,
     #[serde(default)]
     pub name: String,
@@ -178,6 +180,8 @@ impl ItemModule {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicItemModule {
+    #[serde(default)]
+    pub id: Uuid,
     pub kind: String,
     pub name: String,
     pub value: String,
@@ -335,6 +339,8 @@ pub struct PasswordHistoryEntry {
 #[serde(rename_all = "camelCase")]
 pub struct StoredConnection {
     #[serde(default)]
+    pub revision: u64,
+    #[serde(default)]
     pub login_uris: Vec<crate::login_uri::LoginUri>,
     #[serde(default)]
     pub item_type: String,
@@ -396,6 +402,10 @@ pub struct ApiAuthHeader {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PortableConnection {
     #[serde(default)]
+    pub ssh_auth_type: String,
+    #[serde(default)]
+    pub revision: u64,
+    #[serde(default)]
     pub login_uris: Vec<crate::login_uri::LoginUri>,
     #[serde(default)]
     pub item_type: String,
@@ -422,6 +432,8 @@ pub struct PortableConnection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicConnection {
+    #[serde(default)]
+    pub revision: u64,
     pub password_history_count: usize,
     pub login_uris: Vec<crate::login_uri::LoginUri>,
     pub item_type: String,
@@ -461,6 +473,8 @@ pub struct PublicConnection {
 impl StoredConnection {
     pub fn portable(&self) -> PortableConnection {
         PortableConnection {
+            revision: self.revision,
+            ssh_auth_type: self.ssh_auth_type.clone(),
             login_uris: self.login_uris.clone(),
             item_type: self.item_type().to_owned(),
             folder: self.folder.clone(),
@@ -557,6 +571,7 @@ impl StoredConnection {
 
     pub fn public(&self, secrets: Option<&SecretBundle>) -> PublicConnection {
         PublicConnection {
+            revision: self.revision,
             password_history_count: secrets.map_or(0, |s| s.password_history.len()),
             login_uris: self.login_uris.clone(),
             item_type: self.item_type().to_owned(),
@@ -582,6 +597,7 @@ impl StoredConnection {
                 .map(|module| {
                     let secret = module.is_secret();
                     PublicItemModule {
+                        id: module.id,
                         kind: module.kind.clone(),
                         name: module.name.clone(),
                         value: if secret {
@@ -627,6 +643,8 @@ impl StoredConnection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionInput {
+    #[serde(default)]
+    pub ssh_auth_type: String,
     #[serde(default)]
     pub login_uris: Vec<crate::login_uri::LoginUri>,
     #[serde(default)]
@@ -835,6 +853,7 @@ mod tests {
             "customSecret",
         ] {
             let module = ItemModule {
+                id: uuid::Uuid::nil(),
                 kind: kind.to_owned(),
                 name: String::new(),
                 value: String::new(),
@@ -846,6 +865,7 @@ mod tests {
 
         for kind in ["host", "port", "url"] {
             let module = ItemModule {
+                id: uuid::Uuid::nil(),
                 kind: kind.to_owned(),
                 name: String::new(),
                 value: String::new(),
@@ -859,12 +879,14 @@ mod tests {
     #[test]
     fn explicit_agent_visibility_overrides_the_module_default() {
         let visible_secret = ItemModule {
+            id: uuid::Uuid::nil(),
             kind: "password".to_owned(),
             name: String::new(),
             value: String::new(),
             agent_visible: Some(true),
         };
         let hidden_public_value = ItemModule {
+            id: uuid::Uuid::nil(),
             kind: "host".to_owned(),
             name: String::new(),
             value: String::new(),

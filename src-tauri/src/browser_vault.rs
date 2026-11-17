@@ -348,6 +348,7 @@ impl Vault {
             );
             if !input.modules.iter().any(|m| m.kind == *name) {
                 input.modules.push(ItemModule {
+                    id: uuid::Uuid::nil(),
                     kind: name.clone(),
                     ..Default::default()
                 });
@@ -417,6 +418,7 @@ impl Vault {
             for kind in ["username", "password"] {
                 if !stored.modules.iter().any(|m| m.kind == kind) {
                     stored.modules.push(ItemModule {
+                        id: uuid::Uuid::nil(),
                         kind: kind.into(),
                         name: kind.into(),
                         agent_visible: Some(false),

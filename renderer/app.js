@@ -1135,6 +1135,7 @@ function syncModuleDraft() {
   currentModules = rows.map((row, index) => {
     row.dataset.moduleIndex = String(index);
     return {
+      id: row.dataset.moduleId || undefined,
       kind: row.dataset.kind,
       name: $('[data-module-name]', row)?.value ?? row.dataset.name ?? '',
       value: $('[data-module-value]', row)?.value ?? '',
@@ -1203,7 +1204,7 @@ function renderModules() {
     }
     const removeLabel = localized('删除模块', 'Remove module');
     const reorderLabel = localized('拖动调整顺序，或聚焦后按上/下方向键', 'Drag to reorder, or focus and use the Up/Down arrow keys');
-    return `<div class="module-row" data-module-index="${index}" data-kind="${escapeHtml(module.kind)}" data-name="${escapeHtml(module.name || '')}" data-existing="${Boolean(module.existing)}" data-configured="${Boolean(module.configured)}" data-private-key-name="${escapeHtml(module.privateKeyName || '')}" data-pending="${escapeHtml(module.pending || '')}" data-key-fingerprint="${escapeHtml(module.fingerprint || '')}"><button type="button" class="module-drag-handle" data-module-drag-handle aria-label="${reorderLabel}" title="${reorderLabel}" aria-keyshortcuts="ArrowUp ArrowDown"><svg viewBox="0 0 12 20" aria-hidden="true"><path d="M4 5h.01M8 5h.01M4 10h.01M8 10h.01M4 15h.01M8 15h.01"/></svg></button><button type="button" class="module-agent-toggle" data-module-agent-visible aria-pressed="${agentVisible}" aria-label="${agentVisibilityLabel}" title="${agentVisibilityLabel}"><i aria-hidden="true"></i></button><div class="module-identity">${customName}</div><div class="module-control">${control}</div><div class="module-actions ${actions ? 'full' : 'single'}">${actions}<button type="button" class="remove-module module-action-icon" data-remove-module aria-label="${removeLabel}" title="${removeLabel}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5.5h14M7.5 5.5V3.25h5v2.25M5.25 5.5l.75 11h8l.75-11M8.25 8.5v5M11.75 8.5v5"/></svg></button></div></div>`;
+    return `<div class="module-row" data-module-index="${index}" data-module-id="${escapeHtml(module.id || '')}" data-kind="${escapeHtml(module.kind)}" data-name="${escapeHtml(module.name || '')}" data-existing="${Boolean(module.existing)}" data-configured="${Boolean(module.configured)}" data-private-key-name="${escapeHtml(module.privateKeyName || '')}" data-pending="${escapeHtml(module.pending || '')}" data-key-fingerprint="${escapeHtml(module.fingerprint || '')}"><button type="button" class="module-drag-handle" data-module-drag-handle aria-label="${reorderLabel}" title="${reorderLabel}" aria-keyshortcuts="ArrowUp ArrowDown"><svg viewBox="0 0 12 20" aria-hidden="true"><path d="M4 5h.01M8 5h.01M4 10h.01M8 10h.01M4 15h.01M8 15h.01"/></svg></button><button type="button" class="module-agent-toggle" data-module-agent-visible aria-pressed="${agentVisible}" aria-label="${agentVisibilityLabel}" title="${agentVisibilityLabel}"><i aria-hidden="true"></i></button><div class="module-identity">${customName}</div><div class="module-control">${control}</div><div class="module-actions ${actions ? 'full' : 'single'}">${actions}<button type="button" class="remove-module module-action-icon" data-remove-module aria-label="${removeLabel}" title="${removeLabel}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5.5h14M7.5 5.5V3.25h5v2.25M5.25 5.5l.75 11h8l.75-11M8.25 8.5v5M11.75 8.5v5"/></svg></button></div></div>`;
   }).join('');
   syncModuleDraft();
 }
@@ -1526,7 +1527,7 @@ function collectModules(validate = true) {
     const uniqueName = name.toLocaleLowerCase().replace(/[\s_-]+/g, '');
     if (validate && name && secretNames.has(uniqueName)) throw new Error(localized(`字段名重复：${name}`, `Duplicate field name: ${name}`));
     if (name) secretNames.add(uniqueName);
-    modules.push({ kind: module.kind, name: module.kind === 'customSecret' ? name : '', value: MODULE_DEFS[module.kind]?.secret ? '' : String(module.value || '').trim(), agentVisible: Boolean(module.agentVisible) });
+    modules.push({ id: module.id, kind: module.kind, name: module.kind === 'customSecret' ? name : '', value: MODULE_DEFS[module.kind]?.secret ? '' : String(module.value || '').trim(), agentVisible: Boolean(module.agentVisible) });
     const fieldValue = module.secretValue || '';
     if (name === 'password') secrets.password = fieldValue;
     else if (name === 'passphrase') secrets.passphrase = fieldValue;
@@ -1556,6 +1557,7 @@ function serializeItem(validate = true) {
     name,
     description: value('#connection-description'),
     enabled: $('#connection-enabled').checked,
+    sshAuthType: editorSourceInput?.sshAuthType || '',
     httpAuthType: editorSourceInput?.httpAuthType || 'auto',
     authHeader: editorSourceInput?.authHeader || '',
     authLocation: editorSourceInput?.authLocation || '',

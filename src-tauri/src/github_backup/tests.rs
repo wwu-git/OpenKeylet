@@ -286,6 +286,7 @@ fn add_item(vault: &Vault, id: Uuid, name: &str, secret: &str) {
         .insert("apiCredential".into(), secret.into());
     vault
         .save_connection(ConnectionInput {
+            ssh_auth_type: String::new(),
             login_uris: Vec::new(),
             item_type: String::new(),
             folder: String::new(),
@@ -295,6 +296,7 @@ fn add_item(vault: &Vault, id: Uuid, name: &str, secret: &str) {
             enabled: true,
             description: "private-description-marker".into(),
             modules: vec![ItemModule {
+                id: uuid::Uuid::nil(),
                 kind: "apiCredential".into(),
                 ..Default::default()
             }],

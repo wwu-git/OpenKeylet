@@ -408,6 +408,7 @@ mod tests {
             .named_secrets
             .insert("apiCredential".into(), token.to_owned());
         ConnectionInput {
+            ssh_auth_type: String::new(),
             login_uris: Vec::new(),
             item_type: String::new(),
             folder: String::new(),
@@ -415,11 +416,13 @@ mod tests {
             id: Some(id),
             modules: vec![
                 crate::model::ItemModule {
+                    id: uuid::Uuid::nil(),
                     kind: "url".into(),
                     value: "https://api.example.test/v1/".into(),
                     ..Default::default()
                 },
                 crate::model::ItemModule {
+                    id: uuid::Uuid::nil(),
                     kind: "apiCredential".into(),
                     ..Default::default()
                 },
