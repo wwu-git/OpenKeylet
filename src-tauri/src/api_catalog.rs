@@ -10,27 +10,71 @@ pub struct ApiProfile {
     pub auth_prefix: &'static str,
 }
 
-/// Address templates for services that require per-request signing.
+/// Address templates for services that need signing or additional configuration.
 /// These entries are not eligible for URL or authentication inference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SignedApiEndpoint {
+pub struct ApiAddressTemplate {
     pub display_name: &'static str,
     pub url_template: &'static str,
-    pub signing: &'static str,
+    pub requirements: &'static str,
 }
 
-// OCI commercial-cloud endpoints:
-// https://docs.oracle.com/en-us/iaas/Content/API/Concepts/usingapi.htm
-pub const SIGNED_API_ENDPOINTS: &[SignedApiEndpoint] = &[
-    SignedApiEndpoint {
+pub const API_ADDRESS_TEMPLATES: &[ApiAddressTemplate] = &[
+    // OCI commercial-cloud endpoints.
+    ApiAddressTemplate {
         display_name: "OCI Compute / Networking",
         url_template: "https://iaas.<region>.oraclecloud.com/20160918/",
-        signing: "OCI request signing",
+        requirements: "OCI request signing",
     },
-    SignedApiEndpoint {
+    ApiAddressTemplate {
         display_name: "OCI Object Storage",
         url_template: "https://objectstorage.<region>.oraclecloud.com/",
-        signing: "OCI request signing",
+        requirements: "OCI request signing",
+    },
+    ApiAddressTemplate {
+        display_name: "AWS EC2",
+        url_template: "https://ec2.<region>.amazonaws.com/",
+        requirements: "AWS SigV4 request signing",
+    },
+    ApiAddressTemplate {
+        display_name: "Alibaba Cloud ECS",
+        url_template: "https://ecs.<region>.aliyuncs.com/",
+        requirements: "Choose a supported ECS endpoint; ACS3 request signing",
+    },
+    ApiAddressTemplate {
+        display_name: "Tencent Cloud CVM",
+        url_template: "https://cvm.tencentcloudapi.com/",
+        requirements: "TC3-HMAC-SHA256 request signing",
+    },
+    ApiAddressTemplate {
+        display_name: "Huawei Cloud ECS",
+        url_template: "https://ecs.<region>.myhuaweicloud.com/",
+        requirements: "Choose a supported ECS endpoint; AK/SK request signing or an IAM X-Auth-Token",
+    },
+    ApiAddressTemplate {
+        display_name: "Notion",
+        url_template: "https://api.notion.com/v1/",
+        requirements: "Bearer token and a Notion-Version header",
+    },
+    ApiAddressTemplate {
+        display_name: "Alibaba Cloud Model Studio (Beijing pay-as-you-go)",
+        url_template: "https://<workspace-id>.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/",
+        requirements: "Bearer API key for the selected workspace and plan",
+    },
+    ApiAddressTemplate {
+        display_name: "Alibaba Cloud Model Studio (Singapore pay-as-you-go)",
+        url_template: "https://<workspace-id>.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/",
+        requirements: "Bearer API key for the selected workspace and plan",
+    },
+    ApiAddressTemplate {
+        display_name: "Alibaba Cloud Model Studio (Beijing Token Plan)",
+        url_template: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/",
+        requirements: "Token Plan bearer API key",
+    },
+    ApiAddressTemplate {
+        display_name: "Alibaba Cloud Model Studio (Coding Plan)",
+        url_template: "https://coding.dashscope.aliyuncs.com/v1/",
+        requirements: "Coding Plan bearer API key",
     },
 ];
 
@@ -137,14 +181,128 @@ const PROFILES: &[ApiProfileEntry] = &[
             auth_prefix: "",
         },
     ),
+    (
+        &["api.deepseek.com"],
+        &["deepseek"],
+        &[],
+        ApiProfile {
+            display_name: "DeepSeek",
+            default_base_url: "https://api.deepseek.com/",
+            ..UNKNOWN
+        },
+    ),
+    (
+        &["open.bigmodel.cn"],
+        &["zhipu", "智谱", "bigmodel"],
+        &[],
+        ApiProfile {
+            display_name: "Zhipu GLM",
+            default_base_url: "https://open.bigmodel.cn/api/paas/v4/",
+            ..UNKNOWN
+        },
+    ),
+    (
+        &["api.mistral.ai"],
+        &["mistral"],
+        &[],
+        ApiProfile {
+            display_name: "Mistral",
+            default_base_url: "https://api.mistral.ai/v1/",
+            ..UNKNOWN
+        },
+    ),
+    (
+        &["api.x.ai"],
+        &["xai", "grok"],
+        &[],
+        ApiProfile {
+            display_name: "xAI / Grok",
+            default_base_url: "https://api.x.ai/v1/",
+            ..UNKNOWN
+        },
+    ),
+    (
+        &["gitlab.com"],
+        &["gitlab"],
+        &[],
+        ApiProfile {
+            display_name: "GitLab.com",
+            default_base_url: "https://gitlab.com/api/v4/",
+            auth_type: "apiKey",
+            auth_header: "PRIVATE-TOKEN",
+            auth_prefix: "",
+            ..UNKNOWN
+        },
+    ),
+    (
+        &["slack.com"],
+        &["slack"],
+        &[],
+        ApiProfile {
+            display_name: "Slack",
+            default_base_url: "https://slack.com/api/",
+            ..UNKNOWN
+        },
+    ),
+    (
+        &["api.digitalocean.com"],
+        &["digitalocean", "digital ocean"],
+        &[],
+        ApiProfile {
+            display_name: "DigitalOcean",
+            default_base_url: "https://api.digitalocean.com/v2/",
+            ..UNKNOWN
+        },
+    ),
+    (
+        &["api.hetzner.cloud"],
+        &["hetzner"],
+        &[],
+        ApiProfile {
+            display_name: "Hetzner Cloud",
+            default_base_url: "https://api.hetzner.cloud/v1/",
+            ..UNKNOWN
+        },
+    ),
+    (
+        &["management.azure.com"],
+        &["azure resource manager", "azure arm"],
+        &[],
+        ApiProfile {
+            display_name: "Azure Resource Manager",
+            default_base_url: "https://management.azure.com/",
+            ..UNKNOWN
+        },
+    ),
+    (
+        &["compute.googleapis.com"],
+        &["google cloud compute", "compute engine"],
+        &[],
+        ApiProfile {
+            display_name: "Google Cloud Compute Engine",
+            default_base_url: "https://compute.googleapis.com/compute/v1/",
+            ..UNKNOWN
+        },
+    ),
 ];
 
 pub fn infer(name: &str, base_url: &str, secret: &str) -> ApiProfile {
-    let text = format!("{name} {base_url}").to_ascii_lowercase();
-    for (hosts, aliases, _, profile) in PROFILES {
-        if hosts.iter().any(|host| text.contains(host))
-            || aliases.iter().any(|alias| text.contains(alias))
-        {
+    if !base_url.trim().is_empty() {
+        return normalize_base_url(base_url, "")
+            .ok()
+            .and_then(|value| Url::parse(&value).ok())
+            .and_then(|url| {
+                let host = url.host_str()?;
+                PROFILES
+                    .iter()
+                    .find(|(hosts, _, _, _)| hosts.contains(&host))
+                    .map(|(_, _, _, profile)| *profile)
+            })
+            .unwrap_or(UNKNOWN);
+    }
+    let name = name.to_ascii_lowercase();
+    for (_, aliases, _, profile) in PROFILES {
+        if aliases.iter().any(|alias| name.contains(alias)) {
             return *profile;
         }
     }
@@ -189,9 +347,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn oci_templates_do_not_infer_bearer_profiles_or_default_urls() {
-        for entry in SIGNED_API_ENDPOINTS {
-            let url = entry.url_template.replace("<region>", "ap-tokyo-1");
+    fn infers_only_from_the_actual_host_when_a_url_is_given() {
+        let gitlab = infer("GitLab", "gitlab.com/api/v4", "");
+        assert_eq!(gitlab.auth_header, "PRIVATE-TOKEN");
+        assert_eq!(gitlab.auth_prefix, "");
+        assert_eq!(
+            infer("GitLab", "https://api.deepseek.com/", "").display_name,
+            "DeepSeek"
+        );
+        assert_eq!(
+            infer(
+                "GitLab",
+                "https://gitlab.com.example.test/api/gitlab.com",
+                "sk-ant-example"
+            ),
+            UNKNOWN
+        );
+        assert_eq!(
+            infer("Hetzner project", "", "").default_base_url,
+            "https://api.hetzner.cloud/v1/"
+        );
+    }
+
+    #[test]
+    fn address_templates_stay_out_of_auto_inference() {
+        for entry in API_ADDRESS_TEMPLATES {
+            let url = entry
+                .url_template
+                .replace("<region>", "ap-tokyo-1")
+                .replace("<workspace-id>", "example-workspace");
             assert_eq!(Url::parse(&url).unwrap().scheme(), "https");
             assert_eq!(infer(entry.display_name, &url, ""), UNKNOWN);
             assert_eq!(infer(entry.display_name, "", "").default_base_url, "");
