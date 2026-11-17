@@ -119,3 +119,13 @@ html[lang] .modal-card .field > span {
 .oci-config legend { font-size: var(--reading-label); }
 #oci-import-key { margin-top: 10px; min-height: var(--reading-control); }
 .oci-config p { margin: 6px 0 0; font-size: var(--reading-help); line-height: 1.4; }
+
+#connection-modal .template-grid [data-item-template="oci"] {
+  grid-column: 1 / -1;
+}
+
+#connection-modal [data-item-template="oci"] small {
+  overflow: visible;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
