@@ -74,6 +74,16 @@ try {
       }
       if (command === 'copy_ssh_public_key') { fixture.publicKeyCopy = args; return; }
       if (command === 'discard_private_key') { fixture.discardedKey = args.id; return; }
+      if (command === 'oci_regions') return ['ap-tokyo-1', 'ap-osaka-1'];
+      if (command === 'stage_oci_key') return fixture.rejectOciKey ? Promise.reject(Error('Invalid RSA PEM')) : 'test-oci-key';
+      if (command === 'discard_oci_key') { fixture.discardedOciKey = args.id; return; }
+      if (command === 'save_oci_connection') {
+        fixture.savedOci = structuredClone(args);
+        const saved = { ...item('oci', args.input.name, ['http']), httpAuthType: 'oci-signature', itemType: 'api' };
+        state.connections.push(saved);
+        return saved;
+      }
+      if (command === 'oci_editor_state') return { config: fixture.savedOci.config, hasKey: true };
       if (command === 'save_editor_draft') {
         if (fixture.failDraft) throw Error('Synthetic draft failure');
         const draft = { id: args.draftId || `draft-${args.input.id || 'new'}`, input: structuredClone(args.input) };
@@ -105,7 +115,44 @@ try {
   const row = id => page.locator(`.connection-card[data-item-id="${id}"]`);
   const toggle = id => row(id).locator('.item-disclosure');
   const editor = page.locator('#connection-modal');
-  if (process.argv.includes('--readability')) {
+  if (process.argv.includes('--oci')) {
+    const openTemplate = async () => {
+      await page.locator('#add-connection-button').click();
+      await page.locator('[data-item-template="oci"]').click();
+      await editor.locator('#oci-config').waitFor({state: 'visible'});
+      await page.locator('#oci-region').selectOption('ap-tokyo-1');
+      assert.equal(await page.locator('#oci-url').inputValue(), 'https://iaas.ap-tokyo-1.oraclecloud.com/20160918/');
+    };
+    await openTemplate();
+    await page.locator('#oci-import-key').click();
+    await page.waitForFunction(() => document.querySelector('#oci-key-status').textContent.includes('pending'));
+    await page.evaluate(() => { fixture.rejectOciKey = true; });
+    await page.locator('#oci-import-key').click();
+    await page.getByText('Invalid RSA PEM', {exact: true}).waitFor();
+    assert.match(await page.locator('#oci-key-status').innerText(), /pending/);
+    await page.locator('#connection-name').press('Escape');
+    await editor.waitFor({state: 'hidden'});
+    await page.waitForFunction(() => fixture.discardedOciKey === 'test-oci-key');
+    assert.equal(await page.evaluate(() => fixture.savedOci), undefined);
+    assert.equal(await page.evaluate(() => fixture.drafts.length), 0);
+
+    await page.evaluate(() => { fixture.rejectOciKey = false; });
+    await openTemplate();
+    await page.locator('#connection-name').fill('OCI test');
+    await page.locator('#oci-tenancy').fill('ocid1.tenancy.oc1..test');
+    await page.locator('#oci-user').fill('ocid1.user.oc1..test');
+    await page.locator('#oci-fingerprint').fill(Array(16).fill('00').join(':'));
+    await page.locator('#oci-import-key').click();
+    await page.waitForFunction(() => document.querySelector('#oci-key-status').textContent.includes('pending'));
+    await page.locator('#save-connection-button').click();
+    await editor.waitFor({state: 'hidden'});
+    assert.equal(await page.evaluate(() => fixture.savedOci.pendingId), 'test-oci-key');
+    await toggle('oci').click();
+    assert.equal(await page.locator('#oci-region').inputValue(), 'ap-tokyo-1');
+    assert.match(await page.locator('#oci-key-status').innerText(), /configured/);
+    assert.deepEqual(errors, []);
+    console.log('OCI Compute template checks passed');
+  } else if (process.argv.includes('--readability')) {
     await page.locator('[data-page="settings"]').click();
     const size = page.locator('#text-size');
     assert.equal(await size.inputValue(), 'standard');

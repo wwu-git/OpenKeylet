@@ -37,6 +37,7 @@ pub struct AppRuntime {
     executable: String,
     browser: BrowserBridge,
     pending_private_key: Mutex<Option<PendingPrivateKey>>,
+    pending_oci_key: Mutex<Option<(Uuid, zeroize::Zeroizing<String>)>>,
     pending_import: Mutex<Option<PendingImport>>,
     owner_session: Mutex<OwnerSession>,
     github_backup: Mutex<GithubBackup>,
@@ -229,6 +230,7 @@ async fn owner_lock(runtime: State<'_, AppRuntime>) -> Result<OwnerLockState, St
     runtime.owner_session.lock().await.unlocked = false;
     *runtime.pending_import.lock().await = None;
     runtime.pending_private_key.lock().await.take();
+    runtime.pending_oci_key.lock().await.take();
     owner_lock_state(&runtime).await
 }
 
@@ -281,6 +283,102 @@ async fn copy_owner_value(
     require_owner_unlocked(&runtime).await?;
     keep_owner_unlocked(&runtime).await;
     app.clipboard().write_text(&value).map_err(command_error)
+}
+
+#[tauri::command]
+fn oci_regions() -> &'static [&'static str] {
+    crate::oci::REGIONS
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OciEditorState {
+    config: crate::oci::Config,
+    has_key: bool,
+}
+
+#[tauri::command]
+async fn oci_editor_state(
+    runtime: State<'_, AppRuntime>,
+    id: Uuid,
+) -> Result<OciEditorState, String> {
+    require_owner_unlocked(&runtime).await?;
+    let item = runtime.vault.get_connection(id).map_err(command_error)?;
+    let credential = item
+        .secrets
+        .oci
+        .as_ref()
+        .ok_or_else(|| "Missing OCI configuration".to_owned())?;
+    Ok(OciEditorState {
+        config: credential.config.clone(),
+        has_key: credential.is_configured(),
+    })
+}
+
+#[tauri::command]
+async fn stage_oci_key(
+    app: AppHandle,
+    runtime: State<'_, AppRuntime>,
+) -> Result<Option<Uuid>, String> {
+    use std::io::Read;
+    require_owner_unlocked(&runtime).await?;
+    let Some(file) = app.dialog().file().blocking_pick_file() else {
+        return Ok(None);
+    };
+    let path = file.into_path().map_err(command_error)?;
+    let mut pem = zeroize::Zeroizing::new(String::new());
+    std::fs::File::open(path)
+        .map_err(command_error)?
+        .take(64 * 1024 + 1)
+        .read_to_string(&mut pem)
+        .map_err(|_| "Unable to read OCI signing key file".to_owned())?;
+    crate::oci::validate_pem(&pem).map_err(command_error)?;
+    let mut pending = runtime.pending_oci_key.lock().await;
+    require_owner_unlocked(&runtime).await?;
+    let id = Uuid::new_v4();
+    *pending = Some((id, pem));
+    Ok(Some(id))
+}
+
+#[tauri::command]
+async fn discard_oci_key(runtime: State<'_, AppRuntime>, id: Uuid) -> Result<(), String> {
+    let mut pending = runtime.pending_oci_key.lock().await;
+    if pending.as_ref().is_some_and(|(key_id, _)| *key_id == id) {
+        pending.take();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn save_oci_connection(
+    app: AppHandle,
+    runtime: State<'_, AppRuntime>,
+    input: ConnectionInput,
+    expected_updated_at: Option<String>,
+    config: crate::oci::Config,
+    pending_id: Option<Uuid>,
+) -> Result<PublicConnection, String> {
+    let mut pending = runtime.pending_oci_key.lock().await;
+    require_owner_unlocked(&runtime).await?;
+    let key = pending_id
+        .map(|requested| {
+            pending
+                .as_ref()
+                .filter(|(id, _)| *id == requested)
+                .map(|(_, pem)| pem.as_str())
+                .ok_or_else(|| "Please select the OCI signing key again".to_owned())
+        })
+        .transpose()?;
+    let saved = runtime
+        .vault
+        .save_oci_connection(input, expected_updated_at.as_deref(), config, key)
+        .map_err(command_error)?;
+    if pending_id.is_some() {
+        pending.take();
+    }
+    drop(pending);
+    emit_changed(&app);
+    Ok(saved)
 }
 
 #[tauri::command]
@@ -1264,6 +1362,7 @@ pub fn run_gui() -> Result<()> {
                 executable,
                 browser,
                 pending_private_key: Mutex::new(None),
+                pending_oci_key: Mutex::new(None),
                 pending_import: Mutex::new(None),
                 owner_session: Mutex::new(OwnerSession::default()),
                 agent_registry,
@@ -1330,6 +1429,11 @@ pub fn run_gui() -> Result<()> {
             delete_editor_draft,
             copy_owner_value,
             save_connection,
+            oci_regions,
+            oci_editor_state,
+            stage_oci_key,
+            discard_oci_key,
+            save_oci_connection,
             reorder_connections,
             set_connection_enabled,
             delete_connection,

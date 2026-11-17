@@ -1,6 +1,6 @@
 # OCI API 请求签名设计
 
-状态：待实现。
+状态：首版已实现。真实 OCI 只读联调需要部署方提供已配置的专用只读项目和用于验收的 compartment。
 
 OpenKeylet 将为 OCI 用户 API 密钥提供显式的「OCI API 签名」认证方式。Agent 继续使用现有的 `http_send`，由 OpenKeylet 在本机校验、签名并发送请求。
 
@@ -8,7 +8,7 @@ OpenKeylet 将为 OCI 用户 API 密钥提供显式的「OCI API 签名」认证
 
 首版只支持 OCI 商业云 Compute 的 **`ListInstances`（`GET /20160918/instances`）**。Compute 和 Networking 可能共用入口，因此同一主机上的其他路径也不允许。
 
-OCI 地址模板只提供服务地址。用户需明确选择「OCI API 签名」，再从受控的 OCI 商业云区域列表中选择一个区域。其他 Compute 操作、Networking、Object Storage、S3 兼容接口和实例主体认证留待后续。
+OCI 地址模板只提供服务地址。用户需明确选择「OCI API 签名」，再从受控的 OCI 商业云 OC1 区域列表中选择一个区域。其他 Compute 操作、Networking、Object Storage、S3 兼容接口和实例主体认证留待后续。
 
 ## 添加项目模板
 
@@ -32,7 +32,7 @@ OCI 地址模板只提供服务地址。用户需明确选择「OCI API 签名�
 
 ## 私钥和备份
 
-项目保存区域、租户 OCID、用户 OCID 和已登记的 OCI API 公钥指纹。首版仅导入未加密 RSA PEM，导入时验证密钥格式和类型。加密 PEM、非 RSA 或损坏文件均拒绝，校验失败或取消编辑保留原密钥。有效私钥在保存项目时加密入库。
+项目保存区域、租户 OCID、用户 OCID 和已登记的 OCI API 公钥指纹。首版仅导入未加密 RSA PEM（PKCS#1 或 PKCS#8，至少 2048 位，允许 Oracle 的 `OCI_API_KEY` 文件尾标记），导入时验证密钥格式和类型。加密 PEM、非 RSA 或损坏文件均拒绝，校验失败或取消编辑保留原密钥。有效私钥在保存项目时加密入库。
 
 签名私钥是独立的凭据类型，只供本地 OCI 签名器使用。桌面端可以导入和替换，但不提供私钥明文查看、复制或单独导出。MCP 项目查询、通用填写、占位符和终端环境变量均不能读取或引用它。签名私钥、签名认证头不进入 MCP 响应、活动记录或错误信息。可保留 HTTP 状态、OCI 请求 ID 和错误类别用于诊断。
 
@@ -58,6 +58,22 @@ OCI 地址模板只提供服务地址。用户需明确选择「OCI API 签名�
 | 查询、填写、复制、通用占位符、终端环境变量，或对项目执行备份与恢复 | 这些路径不能取得签名私钥。备份不含私钥，恢复到无本地密钥的保险库后须重新导入。 |
 | 签名失败或 OCI 返回认证错误 | 响应和活动记录不含私钥、签名认证头，OCI 响应带请求 ID 时保留该 ID。 |
 | 用专用 OCI IAM 只读身份调用真实 `ListInstances` | 能读取获准 compartment 的一页实例，包括合法空页。访问无权 compartment 时失败，保留可诊断的状态和 OCI 请求 ID。 |
+
+## 调用示例
+
+在桌面端保存 OCI Compute 项目后，Agent 可以通过现有 `http_send` 读取一页实例。以下示例中的项目名和 compartment ID 需换成实际值。
+
+```json
+{
+  "item": "OCI Compute 东京",
+  "method": "GET",
+  "url": "instances",
+  "query": {
+    "compartmentId": "<compartment OCID>",
+    "limit": 20
+  }
+}
+```
 
 - [Oracle OCI 请求签名规范](https://docs.oracle.com/en-us/iaas/Content/API/Concepts/signingrequests.htm)
 - [OCI REST API、区域接入点与分页](https://docs.oracle.com/en-us/iaas/Content/API/Concepts/usingapi.htm)

@@ -1956,7 +1956,7 @@ impl VaultMcp {
 
     #[tool(
         name = "http_send",
-        description = "Send an HTTP request using any enabled OpenKeylet project that contains a configured secret, without returning hidden plaintext. Omit item when this MCP session already selected a compatible project or exactly one compatible project exists; otherwise pass its name or a natural phrase containing it. Built-in API/Basic authentication is injected automatically. For any other scheme, write a module directly as {{openkeylet:password}} or {{openkeylet:service token}} inside URL, header, query, JSON/text body, or form values; OpenKeylet resolves it locally. secretBindings is needed only for optional short aliases. A saved service URL is only a default; any HTTP/HTTPS URL and method may be used, redirects cross origins, and large responses may stream to saveResponseTo.",
+        description = "Send an HTTP request using any enabled OpenKeylet project that contains a configured secret, without returning hidden plaintext. Omit item when this MCP session already selected a compatible project or exactly one compatible project exists; otherwise pass its name or a natural phrase containing it. Built-in API/Basic authentication is injected automatically. OCI Compute projects only support signed GET ListInstances, require compartmentId, and may use page and limit. For any other scheme, write a module directly as {{openkeylet:password}} or {{openkeylet:service token}} inside URL, header, query, JSON/text body, or form values; OpenKeylet resolves it locally. secretBindings is needed only for optional short aliases. A saved service URL is only a default; any HTTP/HTTPS URL and method may be used, redirects cross origins, and large responses may stream to saveResponseTo.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<ApiResponse>(),
         annotations(title = "Send an authenticated API request", read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = true)
     )]
@@ -1972,6 +1972,9 @@ impl VaultMcp {
             let has_secret_bindings = !input.secret_bindings.is_empty();
             let mut connection = self.resolve_item_for_action(&input.item, Some("http"))?;
             let item_id = connection.stored.id;
+            if connection.stored.http_auth_type == crate::oci::AUTH_MODE && has_secret_bindings {
+                return Err("OCI signing does not accept secret placeholders".to_owned());
+            }
             self.prepare_http_secret_bindings(&mut connection, &mut input)?;
             let request = ApiRequestInput {
                 url: input.url,
@@ -2154,6 +2157,51 @@ mod tests {
     use super::*;
     use crate::model::{ConnectionInput, ItemModule, NamedSecrets, SecretBundle};
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn oci_mcp_exposes_only_http_and_rejects_non_list_requests() {
+        let directory = tempdir().unwrap();
+        let vault = Vault::open(directory.path().join("vault")).unwrap();
+        vault
+            .save_oci_connection(
+                serde_json::from_value(serde_json::json!({"name": "OCI test"})).unwrap(),
+                None,
+                crate::oci::tests::config(),
+                Some(crate::oci::tests::KEY),
+            )
+            .unwrap();
+        let server = VaultMcp::new(vault);
+        let discovered = server
+            .search_items(ItemsSearchInput {
+                query: Some("OCI test".into()),
+            })
+            .unwrap();
+        assert_eq!(discovered.items[0].actions, ["http_send"]);
+        assert_eq!(discovered.items[0].modules.len(), 1);
+        assert_eq!(discovered.items[0].modules[0].kind, "url");
+        assert!(
+            server
+                .resolve_item_for_action("OCI test", Some("fill"))
+                .is_err()
+        );
+
+        for (request, reason) in [
+            (
+                serde_json::json!({"item": "OCI test", "method": "POST", "url": "instances?compartmentId=test"}),
+                "only GET",
+            ),
+            (
+                serde_json::json!({"item": "OCI test", "url": "instances?compartmentId={{openkeylet:oci}}"}),
+                "does not accept secret placeholders",
+            ),
+        ] {
+            let result = server
+                .http_send(Parameters(serde_json::from_value(request).unwrap()))
+                .await;
+            assert_eq!(result.is_error, Some(true));
+            assert!(serde_json::to_string(&result).unwrap().contains(reason));
+        }
+    }
 
     #[test]
     fn old_and_new_secret_templates_can_be_mixed_without_recursive_substitution() {

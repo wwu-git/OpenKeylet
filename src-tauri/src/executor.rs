@@ -172,6 +172,9 @@ pub async fn execute_api(
     if !connection.stored.enabled {
         bail!("This connection is disabled");
     }
+    if connection.stored.http_auth_type == crate::oci::AUTH_MODE {
+        return execute_oci_list_instances(connection, input).await;
+    }
     let mut target = build_api_url(&connection.stored, &input.url, &input.query)?;
     let save_response_to = match input.save_response_to {
         Some(path) => {
@@ -342,6 +345,109 @@ pub async fn execute_api(
             &connection.secrets,
         ),
         headers: response_headers,
+        body,
+        truncated,
+        saved_to: None,
+        bytes_transferred: None,
+    })
+}
+
+async fn execute_oci_list_instances(
+    connection: &DecryptedConnection,
+    input: ApiRequestInput,
+) -> Result<ApiResponse> {
+    execute_oci_list_instances_with(connection, input, |timeout| {
+        Ok(crate::oci::client_builder(timeout).build()?)
+    })
+    .await
+}
+
+async fn execute_oci_list_instances_with(
+    connection: &DecryptedConnection,
+    input: ApiRequestInput,
+    client: impl FnOnce(Option<u64>) -> Result<Client>,
+) -> Result<ApiResponse> {
+    let credential = connection
+        .secrets
+        .oci
+        .as_ref()
+        .context("Import an OCI signing private key")?;
+    // Preserve scalar query parameters so nulls and empty arrays cannot bypass validation.
+    if input
+        .query
+        .values()
+        .any(|value| !value.is_string() && !value.is_number())
+    {
+        bail!("OCI ListInstances requires scalar query parameters");
+    }
+    let target = build_api_url(&connection.stored, &input.url, &input.query)
+        .map_err(|_| anyhow::anyhow!("Invalid OCI request URL"))?;
+    let date = chrono::Utc::now()
+        .format("%a, %d %b %Y %H:%M:%S GMT")
+        .to_string();
+    let (request, signature) = crate::oci::prepare(credential, target, &input, &date)?;
+    let client = client(input.timeout_seconds)?;
+    let mut response = client
+        .execute(request)
+        .await
+        .map_err(|error| anyhow::anyhow!(api_request_error_message(&error)))?;
+    let status = response.status();
+    if status.is_redirection() {
+        bail!("OCI redirect blocked");
+    }
+
+    // OCI's page token is opaque. Preserve it exactly, and never return an
+    // echoed Authorization header or arbitrary service response headers.
+    let authorization = signature.to_str().unwrap_or_default();
+    let signature_value = authorization
+        .rsplit_once("signature=\"")
+        .and_then(|(_, value)| value.strip_suffix('"'))
+        .unwrap_or_default();
+    let mut headers = HashMap::new();
+    for name in ["opc-next-page", "opc-request-id"] {
+        if let Some(value) = response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+        {
+            if !value.contains(authorization) && !value.contains(signature_value) {
+                headers.insert(name.to_owned(), value.to_owned());
+            }
+        }
+    }
+    let max_bytes = input
+        .max_response_bytes
+        .filter(|limit| *limit > 0)
+        .unwrap_or(2 * 1024 * 1024);
+    let mut bytes = Vec::new();
+    let mut truncated = false;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .context("Unable to read OCI response")?
+    {
+        let remaining = max_bytes.saturating_sub(bytes.len());
+        bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        if chunk.len() > remaining {
+            truncated = true;
+            break;
+        }
+    }
+    let body = if truncated {
+        "[OCI response exceeded the size limit]".to_owned()
+    } else if status.is_success() {
+        String::from_utf8_lossy(&bytes)
+            .replace(authorization, "[REDACTED]")
+            .replace(signature_value, "[REDACTED]")
+    } else {
+        // Retain status and request ID; an error body can echo request data.
+        String::new()
+    };
+    Ok(ApiResponse {
+        status: status.as_u16(),
+        status_text: status.canonical_reason().unwrap_or_default().to_owned(),
+        url: response.url().to_string(),
+        headers,
         body,
         truncated,
         saved_to: None,
@@ -2493,5 +2599,181 @@ mod tests {
             )
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod oci_transport_tests {
+    use super::*;
+    use crate::oci::{
+        self,
+        tests::{HOST, KEY, config},
+    };
+    use tokio::io::AsyncReadExt;
+    use tokio_rustls::{
+        TlsAcceptor,
+        rustls::{
+            ServerConfig,
+            pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
+        },
+    };
+
+    #[tokio::test]
+    async fn oci_https_request_keeps_page_tokens_and_blocks_redirects() {
+        let pem = |name| match name {
+            "leaf" => include_bytes!("../tests/fixtures/oci/test-leaf.pem").as_slice(),
+            "root" => include_bytes!("../tests/fixtures/oci/test-root.pem").as_slice(),
+            _ => unreachable!(),
+        };
+        let tls = ServerConfig::builder_with_provider(Arc::new(
+            tokio_rustls::rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![CertificateDer::from_pem_slice(pem("leaf")).unwrap()],
+            PrivateKeyDer::from_pem_slice(KEY.as_bytes()).unwrap(),
+        )
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let outside = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let outside_addr = outside.local_addr().unwrap();
+        let responses = [
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\nopc-next-page: a+b c\r\nopc-request-id: fixture\r\n\r\n[]".to_owned(),
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]".to_owned(),
+            format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: https://{HOST}/20160918/vcns\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+            format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: https://{outside_addr}/20160918/instances\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+            "HTTP/1.1 401 Unauthorized\r\nContent-Length: 11\r\nConnection: close\r\nopc-request-id: auth-fixture\r\nAuthorization: test-header\r\n\r\ntest-secret".to_owned(),
+        ];
+        let server = tokio::spawn(async move {
+            let acceptor = TlsAcceptor::from(Arc::new(tls));
+            let mut requests = Vec::new();
+            for response in responses {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = acceptor.accept(stream).await.unwrap();
+                let mut bytes = Vec::new();
+                loop {
+                    bytes.push(stream.read_u8().await.unwrap());
+                    if bytes.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                    assert!(bytes.len() < 16_384);
+                }
+                requests.push(String::from_utf8(bytes).unwrap());
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.shutdown().await.unwrap();
+            }
+            // A same-origin redirect would connect to this socket again.
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                    .await
+                    .is_err()
+            );
+            requests
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open(dir.path().join("vault")).unwrap();
+        let saved = vault
+            .save_oci_connection(
+                serde_json::from_value(serde_json::json!({"name": "OCI HTTPS fixture"})).unwrap(),
+                None,
+                config(),
+                Some(KEY),
+            )
+            .unwrap();
+        let connection = vault.get_connection(saved.id).unwrap();
+        let base_request = ApiRequestInput {
+            url: "instances?compartmentId=fixture".to_owned(),
+            method: "GET".to_owned(),
+            timeout_seconds: Some(3),
+            ..Default::default()
+        };
+        let client = |timeout| {
+            Ok(oci::client_builder(timeout)
+                .add_root_certificate(reqwest::Certificate::from_pem(pem("root")).unwrap())
+                .resolve(HOST, addr)
+                .build()?)
+        };
+
+        let mut duplicate = base_request.clone();
+        duplicate
+            .query
+            .insert("compartmentId".to_owned(), serde_json::json!("duplicate"));
+        let error = execute_oci_list_instances_with(&connection, duplicate, |_| {
+            panic!("invalid request reached transport")
+        })
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("Duplicate OCI query parameter"));
+
+        let first = execute_oci_list_instances_with(&connection, base_request.clone(), client)
+            .await
+            .unwrap();
+        assert_eq!(first.body, "[]");
+        assert_eq!(first.headers["opc-next-page"], "a+b c");
+        assert_eq!(first.headers["opc-request-id"], "fixture");
+        let mut next = base_request.clone();
+        next.query.insert(
+            "page".to_owned(),
+            serde_json::json!(&first.headers["opc-next-page"]),
+        );
+        let second = execute_oci_list_instances_with(&connection, next, client)
+            .await
+            .unwrap();
+        assert!(!second.headers.contains_key("opc-next-page"));
+        for _ in 0..2 {
+            let error = execute_oci_list_instances_with(&connection, base_request.clone(), client)
+                .await
+                .unwrap_err();
+            assert_eq!(error.to_string(), "OCI redirect blocked");
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), outside.accept())
+                .await
+                .is_err()
+        );
+        let failure = execute_oci_list_instances_with(&connection, base_request, client)
+            .await
+            .unwrap();
+        assert_eq!(failure.status, 401);
+        assert_eq!(failure.headers["opc-request-id"], "auth-fixture");
+        assert!(!failure.headers.contains_key("authorization"));
+        assert!(failure.body.is_empty());
+        let requests = server.await.unwrap();
+        assert!(requests[1].starts_with(
+            "GET /20160918/instances?compartmentId=fixture&page=a%2Bb%20c HTTP/1.1\r\n"
+        ));
+
+        let pem_body: String = KEY
+            .lines()
+            .filter(|line| !line.starts_with("-----"))
+            .collect();
+        let key =
+            ring::signature::RsaKeyPair::from_pkcs8(&STANDARD.decode(pem_body).unwrap()).unwrap();
+        let verifier = ring::signature::UnparsedPublicKey::new(
+            &ring::signature::RSA_PKCS1_2048_8192_SHA256,
+            key.public().as_ref(),
+        );
+        for request in requests {
+            let mut lines = request.lines();
+            let target = lines.next().unwrap().split_whitespace().nth(1).unwrap();
+            let headers: HashMap<_, _> = lines.filter_map(|line| line.split_once(": ")).collect();
+            assert_eq!(headers["host"], HOST);
+            let message = format!(
+                "(request-target): get {target}\nhost: {HOST}\nx-date: {}",
+                headers["x-date"]
+            );
+            let signature = headers["authorization"]
+                .rsplit_once("signature=\"")
+                .unwrap()
+                .1
+                .trim_end_matches('"');
+            verifier
+                .verify(message.as_bytes(), &STANDARD.decode(signature).unwrap())
+                .unwrap();
+        }
     }
 }

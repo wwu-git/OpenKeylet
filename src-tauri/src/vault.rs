@@ -206,6 +206,7 @@ impl Vault {
         id: Option<Uuid>,
         mut input: ConnectionInput,
     ) -> Result<OwnerEditorDraft> {
+        input.secrets.oci = None;
         input.name = checked_text(&input.name, "Project name", 80)?;
         input.description = checked_text(&input.description, "Project description", 240)?;
         let id = id.unwrap_or_else(Uuid::new_v4);
@@ -393,9 +394,30 @@ impl Vault {
 
     pub(crate) fn save_connection_with_private_key(
         &self,
+        input: ConnectionInput,
+        expected_updated_at: Option<&str>,
+        private_key: Option<(&str, &str)>,
+    ) -> Result<PublicConnection> {
+        self.save_connection_inner(input, expected_updated_at, private_key, None)
+    }
+
+    #[cfg(any(feature = "gui", test))]
+    pub(crate) fn save_oci_connection(
+        &self,
+        input: ConnectionInput,
+        expected: Option<&str>,
+        config: crate::oci::Config,
+        key: Option<&str>,
+    ) -> Result<PublicConnection> {
+        self.save_connection_inner(input, expected, None, Some((config, key)))
+    }
+
+    fn save_connection_inner(
+        &self,
         mut input: ConnectionInput,
         expected_updated_at: Option<&str>,
         private_key: Option<(&str, &str)>,
+        oci: Option<(crate::oci::Config, Option<&str>)>,
     ) -> Result<PublicConnection> {
         self.update_document_with_result(|document| {
             let existing_index = input.id.and_then(|id| {
@@ -426,6 +448,50 @@ impl Vault {
             } else {
                 SecretBundle::default()
             };
+            if let Some((config, key)) = oci {
+                let editing_oci = existing
+                    .as_ref()
+                    .is_none_or(|item| item.http_auth_type == crate::oci::AUTH_MODE);
+                if !editing_oci {
+                    bail!("Create a separate OCI Compute project");
+                }
+                config.validate()?;
+                let base = config.base_url()?;
+                if let Some(key) = key {
+                    secrets.oci = Some(crate::oci::Credential::new(config, key)?);
+                } else {
+                    let credential = secrets
+                        .oci
+                        .as_mut()
+                        .filter(|key| key.is_configured())
+                        .context("Import an OCI signing private key")?;
+                    if credential.config.fingerprint != config.fingerprint
+                        || credential.config.user_ocid != config.user_ocid
+                        || credential.config.tenancy_ocid != config.tenancy_ocid
+                    {
+                        bail!("Reimport the OCI private key when changing its identity");
+                    }
+                    credential.config = config;
+                }
+                input.modules.clear();
+                push_module(&mut input.modules, "url", "", base.as_str());
+                input.item_type = "api".to_owned();
+                input.http_auth_type = crate::oci::AUTH_MODE.to_owned();
+                input.login_uris.clear();
+                input.auth_header.clear();
+                input.auth_location.clear();
+                input.auth_prefix.clear();
+                input.api_auth_headers.clear();
+                input.test_path.clear();
+                input.private_key_import_path.clear();
+                input.secrets = SecretBundle::default();
+            } else if input.http_auth_type == crate::oci::AUTH_MODE
+                || existing
+                    .as_ref()
+                    .is_some_and(|item| item.http_auth_type == crate::oci::AUTH_MODE)
+            {
+                bail!("Edit OCI Compute projects using the OCI signing form");
+            }
             let previous_password =
                 zeroize::Zeroizing::new(secrets.get("password").map(str::to_owned));
             if !input.modules.is_empty() {
@@ -748,10 +814,13 @@ impl Vault {
             .connections
             .into_iter()
             .map(|connection| {
-                let secrets = self
+                let mut secrets = self
                     .inner
                     .key
                     .decrypt::<SecretBundle>(&connection.encrypted_secrets)?;
+                if let Some(oci) = &mut secrets.oci {
+                    oci.forget_key();
+                }
                 Ok((connection.portable(), secrets))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -759,13 +828,17 @@ impl Vault {
             .trash
             .into_iter()
             .map(|entry| {
+                let mut secrets = self
+                    .inner
+                    .key
+                    .decrypt::<SecretBundle>(&entry.connection.encrypted_secrets)?;
+                if let Some(oci) = &mut secrets.oci {
+                    oci.forget_key();
+                }
                 Ok(crate::model::PortableTrashItem {
                     deleted_at: entry.deleted_at,
                     connection: entry.connection.portable(),
-                    secrets: self
-                        .inner
-                        .key
-                        .decrypt(&entry.connection.encrypted_secrets)?,
+                    secrets,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -1249,6 +1322,10 @@ fn stored_from_portable(
         portable.updated_at.clone(),
     )?;
     stored.created_at = portable.created_at.clone();
+    let mut secrets = secrets.clone();
+    if let Some(oci) = &mut secrets.oci {
+        oci.forget_key();
+    }
     stored.encrypted_secrets = key.encrypt(&secrets)?;
     Ok(stored)
 }
@@ -1267,7 +1344,9 @@ fn same_portable_content(
     {
         return false;
     }
-    if left_secrets.passkeys != right_secrets.passkeys
+    if left_secrets.oci.as_ref().map(|oci| &oci.config)
+        != right_secrets.oci.as_ref().map(|oci| &oci.config)
+        || left_secrets.passkeys != right_secrets.passkeys
         || left_secrets.password_history != right_secrets.password_history
     {
         return false;

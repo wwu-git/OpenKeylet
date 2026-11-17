@@ -11,6 +11,7 @@ pub mod login_uri;
 pub mod mcp;
 pub mod migration;
 pub mod model;
+mod oci;
 pub mod passkey;
 pub mod policy;
 pub mod runtime_epoch;

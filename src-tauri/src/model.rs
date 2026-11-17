@@ -197,6 +197,8 @@ impl PublicItemModule {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 #[serde(rename_all = "camelCase")]
 pub struct SecretBundle {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) oci: Option<crate::oci::Credential>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub password_history: Vec<PasswordHistoryEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -497,6 +499,17 @@ impl StoredConnection {
     }
 
     pub fn capabilities(&self, secrets: &SecretBundle) -> Vec<String> {
+        if self.http_auth_type == crate::oci::AUTH_MODE {
+            return if secrets
+                .oci
+                .as_ref()
+                .is_some_and(crate::oci::Credential::is_configured)
+            {
+                vec!["http".to_owned()]
+            } else {
+                Vec::new()
+            };
+        }
         let can_fill = self.modules.iter().any(|module| {
             !crate::item_types::personal_field(&module.kind)
                 && module
@@ -526,6 +539,9 @@ impl StoredConnection {
     }
 
     pub fn test_target(&self, secrets: &SecretBundle) -> Option<&'static str> {
+        if self.http_auth_type == crate::oci::AUTH_MODE {
+            return None; // ListInstances needs an explicit compartment.
+        }
         if self.has_capability(secrets, "ssh")
             && !self.host.trim().is_empty()
             && self.port > 0
