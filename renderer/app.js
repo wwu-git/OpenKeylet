@@ -139,7 +139,6 @@ const staticCopy = [
   ['#oci-user-label', 'text', '用户 OCID', 'User OCID'],
   ['#oci-fingerprint-label', 'text', '公钥指纹', 'Public key fingerprint'],
   ['#oci-import-key', 'text', '导入 RSA 签名私钥', 'Import RSA signing key'],
-  ['#oci-add-field', 'text', '＋ 添加字段', '＋ ADD FIELD'],
   ['#oci-key-note', 'text', '请保管原始 PEM。签名私钥不随备份导出。', 'Keep your original PEM. Signing keys are excluded from backups.'],
   ['[data-item-template="blank"] > span', 'html', '空白<small>从零添加模块</small>', 'BLANK<small>START WITH NO MODULES</small>'],
   ['#connection-enabled-label', 'text', '启用此项目', 'ENABLE ITEM'],
@@ -1310,10 +1309,9 @@ async function showOciEditor(existing = null) {
     renderOciKeyStatus();
     $('#oci-config').classList.remove('hidden');
     $('#oci-config').disabled = false;
-    currentModules = currentModules.filter(module => module.kind === 'customSecret');
+    currentModules = currentModules.filter(module => module.kind !== 'url');
     renderModules();
-    $('#add-module-button').classList.add('hidden');
-    $('#oci-add-field').classList.remove('hidden');
+    $('#module-menu [data-add-module="url"]').classList.add('hidden');
     $('#connection-modal .login-websites').classList.add('hidden');
     value('#connection-type', 'api');
     $('#connection-type').disabled = true;
@@ -1329,8 +1327,7 @@ function clearOciEditor() {
   ociEditor = null;
   $('#oci-config').classList.add('hidden');
   $('#oci-config').disabled = true;
-  $('#add-module-button').classList.remove('hidden');
-  $('#oci-add-field').classList.add('hidden');
+  $('#module-menu [data-add-module="url"]').classList.remove('hidden');
   $('#connection-modal .login-websites').classList.remove('hidden');
   $('#connection-type').disabled = false;
 }

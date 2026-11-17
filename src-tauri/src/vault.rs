@@ -408,8 +408,9 @@ impl Vault {
         expected: Option<&str>,
         config: crate::oci::Config,
         key: Option<&str>,
+        ssh_key: Option<(&str, &str)>,
     ) -> Result<PublicConnection> {
-        self.save_connection_inner(input, expected, None, Some((config, key)))
+        self.save_connection_inner(input, expected, ssh_key, Some((config, key)))
     }
 
     fn save_connection_inner(
@@ -473,19 +474,8 @@ impl Vault {
                     }
                     credential.config = config;
                 }
-                // The signer owns the URL; the editor may only add custom secret fields.
+                // Only the region-derived URL determines the signing origin.
                 input.modules.retain(|module| module.kind != "url");
-                if input.modules.iter().any(|module| module.kind != "customSecret") {
-                    bail!("OCI Compute accepts only custom fields in addition to the signing configuration");
-                }
-                input.modules = normalize_modules(input.modules)?;
-                let mut custom_secrets = SecretBundle::default();
-                for module in &input.modules {
-                    if let Some(value) = input.secrets.named_secrets.get(&module.name) {
-                        custom_secrets.named_secrets.insert(module.name.clone(), value.clone());
-                    }
-                }
-                input.secrets = custom_secrets;
                 push_module(&mut input.modules, "url", "", base.as_str());
                 input.item_type = "api".to_owned();
                 input.http_auth_type = crate::oci::AUTH_MODE.to_owned();

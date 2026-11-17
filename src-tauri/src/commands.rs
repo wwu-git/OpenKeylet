@@ -353,7 +353,7 @@ async fn discard_oci_key(runtime: State<'_, AppRuntime>, id: Uuid) -> Result<(),
 async fn save_oci_connection(
     app: AppHandle,
     runtime: State<'_, AppRuntime>,
-    input: ConnectionInput,
+    mut input: ConnectionInput,
     expected_updated_at: Option<String>,
     config: crate::oci::Config,
     pending_id: Option<Uuid>,
@@ -369,10 +369,16 @@ async fn save_oci_connection(
                 .ok_or_else(|| "Please select the OCI signing key again".to_owned())
         })
         .transpose()?;
+    let mut pending_ssh = runtime.pending_private_key.lock().await;
+    let ssh_key = staged_ssh_key(&mut input, pending_ssh.as_ref())?;
     let saved = runtime
         .vault
-        .save_oci_connection(input, expected_updated_at.as_deref(), config, key)
+        .save_oci_connection(input, expected_updated_at.as_deref(), config, key, ssh_key)
         .map_err(command_error)?;
+    if ssh_key.is_some() {
+        pending_ssh.take();
+    }
+    drop(pending_ssh);
     if pending_id.is_some() {
         pending.take();
     }
@@ -390,29 +396,32 @@ async fn save_connection(
 ) -> Result<PublicConnection, String> {
     require_owner_unlocked(&runtime).await?;
     let mut pending = runtime.pending_private_key.lock().await;
-    let staged = !input.private_key_import_path.is_empty();
-    let private_key = if staged {
-        let key = pending
-            .as_ref()
-            .filter(|key| key.id.to_string() == input.private_key_import_path)
-            .ok_or_else(|| "Please add the SSH private key again".to_owned())?;
-        decode_private_key(&key.text, input.secrets.passphrase.as_deref())
-            .map_err(command_error)?;
-        Some((key.text.as_str(), key.name.as_str()))
-    } else {
-        None
-    };
-    input.private_key_import_path.clear();
+    let private_key = staged_ssh_key(&mut input, pending.as_ref())?;
     let connection = runtime
         .vault
         .save_connection_with_private_key(input, expected_updated_at.as_deref(), private_key)
         .map_err(command_error)?;
-    if staged {
+    if private_key.is_some() {
         pending.take();
     }
     drop(pending);
     emit_changed(&app);
     Ok(connection)
+}
+
+fn staged_ssh_key<'a>(
+    input: &mut ConnectionInput,
+    pending: Option<&'a PendingPrivateKey>,
+) -> Result<Option<(&'a str, &'a str)>, String> {
+    if input.private_key_import_path.is_empty() {
+        return Ok(None);
+    }
+    let key = pending
+        .filter(|key| key.id.to_string() == input.private_key_import_path)
+        .ok_or_else(|| "Please add the SSH private key again".to_owned())?;
+    decode_private_key(&key.text, input.secrets.passphrase.as_deref()).map_err(command_error)?;
+    input.private_key_import_path.clear();
+    Ok(Some((key.text.as_str(), key.name.as_str())))
 }
 
 #[tauri::command]

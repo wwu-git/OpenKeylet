@@ -71,13 +71,13 @@ html[lang] .modal-card .field > span {
   line-height: 1.4;
 }
 
-#connection-modal :is(.template-grid button > span, #add-module-button, #oci-add-field, .login-websites,
+#connection-modal :is(.template-grid button > span, #add-module-button, .login-websites,
     .module-control > [data-generate-password], .login-websites .small-button),
 .module-menu button, .key-source-menu > summary, .key-source-options > button {
   font-size: var(--reading-label);
 }
 
-#connection-modal :is(.template-grid button, #add-module-button, #oci-add-field, .login-websites summary,
+#connection-modal :is(.template-grid button, #add-module-button, .login-websites summary,
     .module-control > [data-generate-password], .login-websites .small-button),
 .module-menu button, .key-source-options > button {
   min-height: var(--reading-control);
@@ -129,5 +129,3 @@ html[lang] .modal-card .field > span {
   white-space: normal;
   overflow-wrap: anywhere;
 }
-
-#oci-add-field { width: auto; padding-inline: 10px; white-space: nowrap; }

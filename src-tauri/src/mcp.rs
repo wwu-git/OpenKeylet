@@ -2168,14 +2168,17 @@ mod tests {
                     "name": "OCI test",
                     "modules": [
                         {"kind":"customSecret", "name":"auth_token"},
+                        {"kind":"username"},
+                        {"kind":"password"},
                         {"kind":"customSecret", "name":"project_note", "agentVisible":true},
                         {"kind":"url", "value":"https://wrong.example"}
                     ],
-                    "secrets": {"namedSecrets":{"auth_token":"hidden fixture","project_note":"visible fixture"}}
+                    "secrets": {"password":"fixture password","namedSecrets":{"username":"fixture account","auth_token":"hidden fixture","project_note":"visible fixture"}}
                 })).unwrap(),
                 None,
                 crate::oci::tests::config(),
                 Some(crate::oci::tests::KEY),
+                None,
             )
             .unwrap();
         let server = VaultMcp::new(vault);
@@ -2186,7 +2189,13 @@ mod tests {
             .unwrap();
         assert_eq!(discovered.items[0].actions, ["http_send"]);
         let modules = &discovered.items[0].modules;
-        assert_eq!(modules.len(), 3);
+        assert_eq!(modules.len(), 5);
+        assert!(modules.iter().any(|m| m.kind == "username" && m.configured));
+        assert!(
+            modules
+                .iter()
+                .any(|m| m.kind == "password" && m.configured && m.value.is_none())
+        );
         assert!(modules.iter().any(|module| module.name == "auth_token"
             && module.configured
             && module.value.is_none()));

@@ -2682,6 +2682,7 @@ mod oci_transport_tests {
                 None,
                 config(),
                 Some(KEY),
+                None,
             )
             .unwrap();
         let connection = vault.get_connection(saved.id).unwrap();

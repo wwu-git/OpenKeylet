@@ -147,7 +147,12 @@ try {
     await page.locator('#oci-fingerprint').fill(Array(16).fill('00').join(':'));
     await page.locator('#oci-import-key').click();
     await page.waitForFunction(() => document.querySelector('#oci-key-status').textContent.includes('pending'));
-    await page.locator('#oci-add-field').click();
+    await page.locator('#add-module-button').click();
+    assert.equal(await page.locator('#module-menu [data-add-module="url"]').isHidden(), true);
+    await page.locator('#module-menu [data-add-module="username"]').click();
+    await editor.locator('[data-kind="username"] [data-secret-value]').fill('oci-console-user');
+    await page.locator('#add-module-button').click();
+    await page.locator('#module-menu [data-add-module="customSecret"]').click();
     const custom = editor.locator('[data-kind="customSecret"]');
     await custom.locator('[data-module-name]').fill('auth_token');
     await custom.locator('[data-secret-value]').fill('synthetic OCI extra value');
@@ -157,6 +162,7 @@ try {
     assert.equal(await page.evaluate(() => fixture.savedOci.pendingId), 'test-oci-key');
     await toggle('oci').click();
     assert.equal(await page.locator('#oci-region').inputValue(), 'ap-tokyo-1');
+    assert.equal(await editor.locator('[data-kind="username"] [data-secret-value]').inputValue(), 'oci-console-user');
     assert.equal(await custom.locator('[data-module-name]').inputValue(), 'auth_token');
     assert.equal(await custom.locator('[data-secret-value]').inputValue(), 'synthetic OCI extra value');
     assert.match(await page.locator('#oci-key-status').innerText(), /configured/);

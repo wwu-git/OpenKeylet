@@ -495,7 +495,7 @@ pub(crate) mod tests {
         }))
         .unwrap();
         let saved = vault
-            .save_oci_connection(input.clone(), None, config(), Some(KEY))
+            .save_oci_connection(input.clone(), None, config(), Some(KEY), None)
             .unwrap();
         let item = vault.get_connection(saved.id).unwrap();
         assert_eq!(item.stored.capabilities(&item.secrets), ["http"]);
@@ -522,7 +522,8 @@ pub(crate) mod tests {
                     input,
                     Some(&saved.updated_at),
                     config(),
-                    Some("bad replacement")
+                    Some("bad replacement"),
+                    None,
                 )
                 .is_err()
         );
