@@ -2136,7 +2136,7 @@ document.addEventListener('click', async (event) => {
     currentItemTypeFilter = 'all';
     currentFolderFilter = 'all';
     currentItemStatusFilter = 'all';
-    $('#connection-filter-menu').open = false;
+    setConnectionFiltersOpen(false);
     syncItemTypeFilter();
     syncTitleSearch();
     renderConnections();
@@ -2245,9 +2245,17 @@ $('#connection-filter-chips').addEventListener('click', event => {
   renderConnections();
   $('#connection-search').focus();
 });
+function setConnectionFiltersOpen(open) {
+  $('#connection-filter-panel').hidden = !open;
+  $('#connection-filter-toggle').setAttribute('aria-expanded', String(open));
+}
+$('#connection-filter-toggle').addEventListener('click', () => {
+  setConnectionFiltersOpen($('#connection-filter-panel').hidden);
+});
 document.addEventListener('click', event => {
-  const filters = $('#connection-filter-menu');
-  if (filters.open && !filters.contains(event.target)) filters.open = false;
+  if (!$('#connection-filter-panel').hidden && !$('#connection-filter-menu').contains(event.target)) {
+    setConnectionFiltersOpen(false);
+  }
 });
 
 document.addEventListener('input', (event) => {
@@ -2664,9 +2672,9 @@ document.addEventListener('keydown', (event) => {
   }
   if (event.key === 'Escape') {
     const filters = $('#connection-filter-menu');
-    if (filters.open && filters.contains(event.target)) {
+    if (!$('#connection-filter-panel').hidden && filters.contains(event.target)) {
       event.preventDefault();
-      filters.open = false;
+      setConnectionFiltersOpen(false);
       $('#connection-filter-toggle').focus();
       return;
     }

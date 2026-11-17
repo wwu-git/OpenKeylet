@@ -138,13 +138,13 @@
                 <input id="connection-search" type="search" autocomplete="off" aria-label="Search projects" />
                 <button type="button" class="button quiet" id="connection-clear-query" aria-label="Clear search" hidden>×</button>
               </div>
-              <details id="connection-filter-menu">
-                <summary class="button quiet" id="connection-filter-toggle">Filters</summary>
-                <div id="connection-filter-panel">
+              <div id="connection-filter-menu">
+                <button type="button" class="button quiet" id="connection-filter-toggle" aria-expanded="false" aria-controls="connection-filter-panel">Filters</button>
+                <div id="connection-filter-panel" hidden>
                   <label><span id="connection-folder-filter-label">Folder</span><select id="connection-folder-filter"></select></label>
                   <label><span id="connection-status-filter-label">Status</span><select id="connection-status-filter"></select></label>
                 </div>
-              </details>
+              </div>
             </div>
             <div class="connection-search-summary">
               <div id="connection-filter-chips"></div>

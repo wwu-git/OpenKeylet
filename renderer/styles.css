@@ -1588,16 +1588,15 @@ html.platform-macos .nav-item small { line-height: 7px; }
 #connection-search::-webkit-search-cancel-button { display: none; }
 #connection-clear-query { position: absolute; right: 3px; top: 3px; min-height: 30px; padding: 0 8px; }
 #connection-filter-menu { position: relative; flex: none; }
-#connection-filter-toggle { min-height: 36px; display: flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; list-style: none; }
-#connection-filter-toggle::-webkit-details-marker { display: none; }
+#connection-filter-toggle { min-height: 36px; display: flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; }
 #connection-filter-toggle::after { content: "▾"; }
 #connection-filter-panel {
-  display: none;
+  display: grid; gap: 8px;
   position: absolute; z-index: 1; right: 0; top: calc(100% + 5px); width: 220px;
   max-width: calc(100vw - 28px); padding: 10px; border: 1px solid var(--chassis-dark);
   border-radius: 4px; background: var(--panel); box-shadow: 0 5px 16px #0003;
 }
-#connection-filter-menu[open] #connection-filter-panel { display: grid; gap: 8px; }
+#connection-filter-panel[hidden] { display: none; }
 #connection-filter-panel label { display: grid; gap: 3px; min-width: 0; }
 #connection-filter-panel select { width: 100%; min-width: 0; }
 .connection-search-summary, #connection-filter-chips { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
