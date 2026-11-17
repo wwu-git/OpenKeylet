@@ -1997,7 +1997,8 @@ mod tests {
         assert_eq!(explicit.state, "available");
 
         registry.opencode_config_explicit = false;
-        assert!(!registry.status("opencode").await.detected);
+        // A globally installed CLI is legitimate even when the fixture has no config.
+        assert_eq!(registry.status("opencode").await.detected, registry.find_client_executable("opencode").is_some());
         fs::create_dir_all(registry.opencode_config.parent().unwrap()).unwrap();
         let desktop = registry.status("opencode").await;
         assert!(desktop.detected);
@@ -2007,6 +2008,7 @@ mod tests {
     #[test]
     fn common_user_bin_directories_are_scanned_by_exact_name() {
         let (temp, registry) = registry();
+        let baseline_opencode = registry.find_client_executable("opencode");
         let suffix = if cfg!(windows) { ".exe" } else { "" };
         let opencode = temp
             .path()
@@ -2036,7 +2038,7 @@ mod tests {
         fs::create_dir_all(unrelated.parent().unwrap()).unwrap();
         fs::write(unrelated, b"test").unwrap();
         fs::remove_file(opencode).unwrap();
-        assert!(registry.find_client_executable("opencode").is_none());
+        assert_eq!(registry.find_client_executable("opencode"), baseline_opencode);
     }
 
     #[tokio::test]
