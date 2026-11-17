@@ -308,6 +308,8 @@ npm run release:linux
 npm run release:headless
 ```
 
+无界面版的权限管理及 GitHub 备份、恢复命令见[管理 CLI 设计](docs/headless-admin-cli.md)（待实现）。
+
 ## 许可证
 
 [MIT](LICENSE) — 可以使用、检查和改进它。
