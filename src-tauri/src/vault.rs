@@ -1435,6 +1435,16 @@ fn same_portable_content(
         || left.item_type() != right.item_type()
         || left.folder != right.folder
         || left.favorite != right.favorite
+        || left.description != right.description
+        || left.enabled != right.enabled
+        || left.ssh_auth_type != right.ssh_auth_type
+        || left.http_auth_type != right.http_auth_type
+        || left.auth_header != right.auth_header
+        || left.auth_location != right.auth_location
+        || left.auth_prefix != right.auth_prefix
+        || left.api_auth_headers != right.api_auth_headers
+        || left.test_path != right.test_path
+        || left.private_key_name != right.private_key_name
     {
         return false;
     }

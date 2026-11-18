@@ -666,9 +666,16 @@ mod tests {
         target.save_connection(locally_edited).unwrap();
 
         let summary = import_from_file(&target, &path).unwrap();
-        assert_eq!(summary.added, 0);
-        assert_eq!(summary.merged, 2);
-        assert_eq!(target.list_connections().unwrap().len(), 3);
+        assert_eq!(summary.added, 1);
+        assert_eq!(summary.merged, 1);
+        let entries = target.list_connections().unwrap();
+        assert_eq!(entries.len(), 4);
+        assert!(entries.iter().any(|item| item.id == connections[1].id && item.description == "local note"));
+        assert!(entries.iter().any(|item| item.name == "service(4)" && item.description.is_empty()));
+        let repeated = import_from_file(&target, &path).unwrap();
+        assert_eq!(repeated.added, 0);
+        assert_eq!(repeated.merged, 2);
+        assert_eq!(target.list_connections().unwrap().len(), 4);
     }
 
     #[test]

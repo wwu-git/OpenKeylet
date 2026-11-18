@@ -350,3 +350,34 @@ async fn browser_management_is_locked_and_deleted_passkeys_cannot_sign() {
     );
     assert!(handle(&vault,&mut session,&throttle,"vault.save",&json!({"input":{"name":"file probe","privateKeyImportPath":"C:/secret","modules":[{"kind":"privateKey"}]}})).await.is_err());
 }
+
+#[test]
+fn backup_deduplication_compares_metadata_and_authentication_settings() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::open(directory.path().into()).unwrap();
+    let saved = vault.save_connection(login("metadata", "synthetic-password", None)).unwrap();
+    let original = vault.get_connection(saved.id).unwrap();
+    let mutations = [
+        json!({"description":"changed"}), json!({"enabled":false}),
+        json!({"sshAuthType":"privateKey"}), json!({"httpAuthType":"basic"}),
+        json!({"authHeader":"X-Key"}), json!({"authLocation":"query"}),
+        json!({"authPrefix":"Token"}), json!({"testPath":"/new"}),
+        json!({"apiAuthHeaders":[{"name":"X-Key","secretName":"password"}]}),
+    ];
+    for change in mutations {
+        let mut value = serde_json::to_value(&original.stored).unwrap();
+        for (key, field) in change.as_object().unwrap() {
+            value[key] = field.clone();
+        }
+        let modified: StoredConnection = serde_json::from_value(value).unwrap();
+        assert!(!same_portable_content(&original.stored, &original.secrets, &modified, &original.secrets),
+                "Modified metadata was incorrectly deduplicated: {change}");
+    }
+    let mut renamed = original.stored.clone();
+    renamed.id = Uuid::new_v4();
+    renamed.name = "metadata (2)".into();
+    renamed.revision += 1;
+    renamed.updated_at = Utc::now().to_rfc3339();
+    for module in &mut renamed.modules { module.id = Uuid::new_v4(); }
+    assert!(same_portable_content(&original.stored, &original.secrets, &renamed, &original.secrets));
+}

@@ -406,7 +406,7 @@ fn default_ssh_port() -> u16 {
     22
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiAuthHeader {
     pub name: String,

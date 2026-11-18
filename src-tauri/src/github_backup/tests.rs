@@ -581,3 +581,37 @@ async fn large_contents_use_the_pinned_blob_and_errors_are_redacted() {
         assert!(!error.contains("token-and-secret-marker"));
     }
 }
+
+#[tokio::test]
+async fn description_only_remote_change_is_preserved_and_reimport_is_idempotent() {
+    let mock = MockGithub::start().await;
+    let (_a, first) = mock.manager();
+    let (_b, second) = mock.manager();
+    let key = generate_recovery_key().unwrap();
+    let id = Uuid::new_v4();
+    add_item(&first.vault, id, "description-test", "synthetic-secret");
+    first.connect(input(&key, "new")).await.unwrap();
+    first.upload().await.unwrap();
+    second.connect(input(&key, "existing")).await.unwrap();
+    second.restore().await.unwrap();
+
+    let original = first.vault.get_connection(id).unwrap();
+    let mut edit: ConnectionInput =
+        serde_json::from_value(serde_json::to_value(original.stored.portable()).unwrap()).unwrap();
+    edit.description = "updated-description".into();
+    first.vault.save_connection(edit).unwrap();
+    first.upload().await.unwrap();
+    assert_eq!(second.upload().await.err().unwrap().to_string(), "GITHUB_REMOTE_CHANGED");
+
+    let restored = second.restore().await.unwrap();
+    assert_eq!(restored.summary.added, 1);
+    assert_eq!(restored.summary.merged, 0);
+    let projects = second.vault.list_connections().unwrap();
+    assert_eq!(projects.len(), 2);
+    assert!(projects.iter().any(|p| p.id == id && p.description == "private-description-marker"));
+    assert!(projects.iter().any(|p| p.id != id && p.description == "updated-description"));
+    let repeated = second.restore().await.unwrap();
+    assert_eq!(repeated.summary.added, 0);
+    assert_eq!(repeated.summary.merged, 1);
+    assert_eq!(second.vault.list_connections().unwrap().len(), 2);
+}
