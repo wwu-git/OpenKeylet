@@ -91,6 +91,8 @@ fn blank(kind: &str, name: &str) -> Result<Entry> {
     let now = chrono::Utc::now().to_rfc3339();
     Ok((
         PortableConnection {
+            ssh_jump_item_id: None,
+            ssh_jump_unresolved: false,
             ssh_auth_type: String::new(),
             revision: 0,
             login_uris: vec![],

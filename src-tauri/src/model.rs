@@ -354,6 +354,10 @@ pub struct PasswordHistoryEntry {
 #[serde(rename_all = "camelCase")]
 pub struct StoredConnection {
     #[serde(default)]
+    pub ssh_jump_item_id: Option<Uuid>,
+    #[serde(default)]
+    pub ssh_jump_unresolved: bool,
+    #[serde(default)]
     pub revision: u64,
     #[serde(default)]
     pub login_uris: Vec<crate::login_uri::LoginUri>,
@@ -417,6 +421,10 @@ pub struct ApiAuthHeader {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PortableConnection {
     #[serde(default)]
+    pub ssh_jump_item_id: Option<Uuid>,
+    #[serde(default)]
+    pub ssh_jump_unresolved: bool,
+    #[serde(default)]
     pub ssh_auth_type: String,
     #[serde(default)]
     pub revision: u64,
@@ -447,6 +455,10 @@ pub struct PortableConnection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicConnection {
+    #[serde(default)]
+    pub ssh_jump_item_id: Option<Uuid>,
+    #[serde(default)]
+    pub ssh_jump_unresolved: bool,
     #[serde(default)]
     pub revision: u64,
     pub password_history_count: usize,
@@ -488,6 +500,8 @@ pub struct PublicConnection {
 impl StoredConnection {
     pub fn portable(&self) -> PortableConnection {
         PortableConnection {
+            ssh_jump_item_id: self.ssh_jump_item_id,
+            ssh_jump_unresolved: self.ssh_jump_unresolved,
             revision: self.revision,
             ssh_auth_type: self.ssh_auth_type.clone(),
             login_uris: self.login_uris.clone(),
@@ -586,6 +600,8 @@ impl StoredConnection {
 
     pub fn public(&self, secrets: Option<&SecretBundle>) -> PublicConnection {
         PublicConnection {
+            ssh_jump_item_id: self.ssh_jump_item_id,
+            ssh_jump_unresolved: self.ssh_jump_unresolved,
             revision: self.revision,
             password_history_count: secrets.map_or(0, |s| s.password_history.len()),
             login_uris: self.login_uris.clone(),
@@ -659,6 +675,10 @@ impl StoredConnection {
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionInput {
     #[serde(default)]
+    pub ssh_jump_item_id: Option<Uuid>,
+    #[serde(default)]
+    pub ssh_jump_unresolved: bool,
+    #[serde(default)]
     pub ssh_auth_type: String,
     #[serde(default)]
     pub login_uris: Vec<crate::login_uri::LoginUri>,
@@ -730,6 +750,8 @@ pub struct NewActivity {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultDocument {
+    #[serde(default)]
+    pub ssh_host_trust: Vec<SshHostTrust>,
     pub version: u8,
     #[serde(default)]
     pub settings: Settings,
@@ -911,4 +933,12 @@ mod tests {
         assert!(visible_secret.agent_visible());
         assert!(!hidden_public_value.agent_visible());
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshHostTrust {
+    pub host: String,
+    pub port: u16,
+    pub fingerprint: String,
 }

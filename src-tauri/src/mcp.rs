@@ -2361,6 +2361,8 @@ mod tests {
         secrets.named_secrets = named;
         let saved = vault
             .save_connection(ConnectionInput {
+                ssh_jump_item_id: None,
+                ssh_jump_unresolved: false,
                 ssh_auth_type: String::new(),
                 login_uris: Vec::new(),
                 item_type: String::new(),
@@ -2511,6 +2513,8 @@ mod tests {
         api_secrets.named_secrets = api_named;
         let api_saved = vault
             .save_connection(ConnectionInput {
+                ssh_jump_item_id: None,
+                ssh_jump_unresolved: false,
                 ssh_auth_type: String::new(),
                 login_uris: Vec::new(),
                 item_type: String::new(),
@@ -2613,6 +2617,8 @@ mod tests {
         secrets.password = Some("runtime-ssh-password-marker".into());
         let public = vault
             .save_connection(ConnectionInput {
+                ssh_jump_item_id: None,
+                ssh_jump_unresolved: false,
                 ssh_auth_type: String::new(),
                 login_uris: Vec::new(),
                 item_type: String::new(),
@@ -2760,6 +2766,8 @@ mod tests {
         secrets.named_secrets = named;
         vault
             .save_connection(ConnectionInput {
+                ssh_jump_item_id: None,
+                ssh_jump_unresolved: false,
                 ssh_auth_type: String::new(),
                 login_uris: Vec::new(),
                 item_type: String::new(),
@@ -2901,6 +2909,8 @@ mod tests {
         secrets.password = Some("single-secret-terminal-marker".into());
         vault
             .save_connection(ConnectionInput {
+                ssh_jump_item_id: None,
+                ssh_jump_unresolved: false,
                 ssh_auth_type: String::new(),
                 login_uris: Vec::new(),
                 item_type: String::new(),
@@ -2968,6 +2978,8 @@ mod tests {
         secrets.named_secrets = named;
         let saved = vault
             .save_connection(ConnectionInput {
+                ssh_jump_item_id: None,
+                ssh_jump_unresolved: false,
                 ssh_auth_type: String::new(),
                 login_uris: Vec::new(),
                 item_type: String::new(),
@@ -3130,6 +3142,8 @@ mod tests {
         secrets.password = Some(secret.to_owned());
         vault
             .save_connection(ConnectionInput {
+                ssh_jump_item_id: None,
+                ssh_jump_unresolved: false,
                 ssh_auth_type: String::new(),
                 login_uris: Vec::new(),
                 item_type: String::new(),
@@ -3160,6 +3174,8 @@ mod tests {
         other_secrets.password = Some("other-terminal-secret-marker".into());
         vault
             .save_connection(ConnectionInput {
+                ssh_jump_item_id: None,
+                ssh_jump_unresolved: false,
                 ssh_auth_type: String::new(),
                 login_uris: Vec::new(),
                 item_type: String::new(),

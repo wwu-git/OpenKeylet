@@ -108,6 +108,8 @@ mod tests {
 
     fn connection() -> StoredConnection {
         StoredConnection {
+            ssh_jump_item_id: None,
+            ssh_jump_unresolved: false,
             revision: 0,
             login_uris: Vec::new(),
             item_type: String::new(),

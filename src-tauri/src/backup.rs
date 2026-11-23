@@ -408,6 +408,8 @@ mod tests {
             .named_secrets
             .insert("apiCredential".into(), token.to_owned());
         ConnectionInput {
+            ssh_jump_item_id: None,
+            ssh_jump_unresolved: false,
             ssh_auth_type: String::new(),
             login_uris: Vec::new(),
             item_type: String::new(),

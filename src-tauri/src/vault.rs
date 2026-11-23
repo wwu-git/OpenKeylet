@@ -26,6 +26,9 @@ const VAULT_VERSION: u8 = 13;
 #[cfg(test)]
 #[path = "vault_lifecycle_tests.rs"]
 mod lifecycle_tests;
+#[cfg(test)]
+#[path = "ssh_jump_tests.rs"]
+mod ssh_jump_tests;
 
 #[derive(Clone)]
 pub struct Vault {
@@ -77,6 +80,7 @@ impl Vault {
             if !vault.inner.vault_path.exists() {
                 let document = VaultDocument {
                     version: VAULT_VERSION,
+                    ssh_host_trust: Vec::new(),
                     settings: Settings::default(),
                     browser_bridge_secret: None,
                     owner_pin: None,
@@ -93,6 +97,56 @@ impl Vault {
         })();
         let _ = FileExt::unlock(&bootstrap);
         result
+    }
+
+    pub fn ssh_host_trust(&self) -> Result<Vec<crate::model::SshHostTrust>> {
+        Ok(self.read_document()?.ssh_host_trust)
+    }
+
+    pub fn set_ssh_host_trust(&self, host: &str, port: u16, fingerprint: Option<&str>) -> Result<()> {
+        let host = ssh_endpoint_host(host)?;
+        anyhow::ensure!(port > 0, "Invalid SSH port");
+        if let Some(value) = fingerprint {
+            use base64::Engine;
+            let encoded = value.strip_prefix("SHA256:").context("Expected SHA256 SSH fingerprint")?;
+            let decoded = base64::engine::general_purpose::STANDARD_NO_PAD.decode(encoded)
+                .context("Invalid SHA256 SSH fingerprint")?;
+            anyhow::ensure!(decoded.len() == 32, "Invalid SHA256 SSH fingerprint");
+        }
+        self.update_document(|document| {
+            document.ssh_host_trust.retain(|entry| entry.host != host || entry.port != port);
+            if let Some(fingerprint) = fingerprint {
+                document.ssh_host_trust.push(crate::model::SshHostTrust { host, port, fingerprint: fingerprint.to_owned() });
+            }
+            Ok(())
+        })
+    }
+
+    pub(crate) fn validate_ssh_jump(&self, document: &VaultDocument, item: &StoredConnection, secrets: &SecretBundle) -> Result<()> {
+        anyhow::ensure!(!item.ssh_jump_unresolved, "SSH jump reference is unresolved; select the jump project again");
+        if let Some(id) = item.ssh_jump_item_id {
+            anyhow::ensure!(id != item.id, "An SSH project cannot be its own jump host");
+            anyhow::ensure!(ssh_config_complete(item, secrets), "SSH target configuration is incomplete");
+            let jump = document.connections.iter().find(|candidate| candidate.id == id)
+                .context("SSH jump project is unavailable")?;
+            anyhow::ensure!(jump.enabled && jump.ssh_jump_item_id.is_none() && !jump.ssh_jump_unresolved, "SSH jump must be enabled and use a direct connection");
+            let jump_secrets = self.decrypt_stored(jump)?;
+            anyhow::ensure!(ssh_config_complete(jump, &jump_secrets), "SSH jump configuration is incomplete");
+        }
+        if item.ssh_jump_item_id.is_some() {
+            anyhow::ensure!(!document.connections.iter().any(|candidate| candidate.id != item.id && candidate.ssh_jump_item_id == Some(item.id)), "Multi-hop SSH is not supported");
+        }
+        Ok(())
+    }
+
+    pub fn ssh_jump_connection(&self, target: &DecryptedConnection) -> Result<Option<DecryptedConnection>> {
+        let document = self.read_document()?;
+        self.validate_ssh_jump(&document, &target.stored, &target.secrets)?;
+        target.stored.ssh_jump_item_id.map(|id| {
+            let stored = document.connections.iter().find(|item| item.id == id).context("SSH jump project unavailable")?.clone();
+            let secrets = self.decrypt_stored(&stored)?;
+            Ok(DecryptedConnection { stored, secrets })
+        }).transpose()
     }
 
     pub fn data_dir(&self) -> &Path {
@@ -647,6 +701,7 @@ impl Vault {
             let mut stored =
                 normalize_connection(input, existing.as_ref(), &secrets, imported_key_name, now)?;
             stored.encrypted_secrets = self.inner.key.encrypt(&secrets)?;
+            self.validate_ssh_jump(document, &stored, &secrets)?;
             let public = stored.public(Some(&secrets));
             if let Some(index) = existing_index {
                 document.connections[index] = stored;
@@ -922,7 +977,22 @@ impl Vault {
                 added: 0,
                 merged: 0,
             };
-            for (public, secrets) in imported {
+            let mut ids = std::collections::HashSet::new();
+            anyhow::ensure!(imported.iter().all(|(item, _)| ids.insert(item.id)) && trash.iter().all(|entry| ids.insert(entry.connection.id)), "Duplicate project IDs in imported snapshot");
+            let mut imported = imported;
+            imported.sort_by_key(|(item, _)| item.ssh_jump_item_id.is_some());
+            let mut id_map = std::collections::HashMap::new();
+            for (mut public, secrets) in imported {
+                let source_id = public.id;
+                if let Some(jump_id) = public.ssh_jump_item_id {
+                    if !public.ssh_jump_unresolved {
+                        if let Some(mapped) = id_map.get(&jump_id) {
+                            public.ssh_jump_item_id = Some(*mapped);
+                        } else {
+                            public.ssh_jump_unresolved = true;
+                        }
+                    }
+                }
                 let mut stored = stored_from_portable(&public, &secrets, &self.inner.key)?;
                 let imported_secrets: SecretBundle =
                     self.inner.key.decrypt(&stored.encrypted_secrets)?;
@@ -937,7 +1007,7 @@ impl Vault {
                     .connections
                     .iter()
                     .any(|item| same_item_name(&item.name, &stored.name));
-                let mut duplicate = false;
+                let mut duplicate = None;
                 for existing in document.connections.iter().filter(|item| {
                     same_item_name(&item.name, &stored.name)
                         || (has_requested_name && import_name_in_family(&item.name, &stored.name))
@@ -950,12 +1020,13 @@ impl Vault {
                         &stored,
                         &imported_secrets,
                     ) {
-                        duplicate = true;
+                        duplicate = Some(existing.id);
                         break;
                     }
                 }
 
-                if duplicate {
+                if let Some(existing_id) = duplicate {
+                    id_map.insert(source_id, existing_id);
                     summary.merged += 1;
                     continue;
                 }
@@ -969,6 +1040,7 @@ impl Vault {
                 {
                     stored.id = Uuid::new_v4();
                 }
+                id_map.insert(source_id, stored.id);
                 document.connections.push(stored);
                 summary.added += 1;
             }
@@ -977,6 +1049,10 @@ impl Vault {
                     .context("Invalid trash deletion date")?;
                 let mut stored =
                     stored_from_portable(&entry.connection, &entry.secrets, &self.inner.key)?;
+                if let Some(id) = stored.ssh_jump_item_id {
+                    if let Some(mapped) = id_map.get(&id) { stored.ssh_jump_item_id = Some(*mapped); }
+                    else { stored.ssh_jump_unresolved = true; }
+                }
                 let mut duplicate = false;
                 for existing in document.trash.iter().map(|entry| &entry.connection) {
                     if same_item_name(&existing.name, &stored.name) {
@@ -1346,6 +1422,8 @@ pub(crate) fn normalize_connection(
     let http_auth_type = input.http_auth_type.clone();
     let name = fallback_item_name(&input.name, id, &modules, secrets);
     Ok(StoredConnection {
+        ssh_jump_item_id: input.ssh_jump_item_id,
+        ssh_jump_unresolved: input.ssh_jump_unresolved,
         revision: existing.map_or(1, |old| old.revision.saturating_add(1)),
         login_uris: input.login_uris,
         item_type,
@@ -1386,6 +1464,8 @@ fn stored_from_portable(
     key: &MasterKey,
 ) -> Result<StoredConnection> {
     let input = ConnectionInput {
+        ssh_jump_item_id: portable.ssh_jump_item_id,
+        ssh_jump_unresolved: portable.ssh_jump_unresolved,
         ssh_auth_type: portable.ssh_auth_type.clone(),
         login_uris: portable.login_uris.clone(),
         item_type: portable.item_type.clone(),
@@ -1429,7 +1509,9 @@ fn same_portable_content(
     right: &StoredConnection,
     right_secrets: &SecretBundle,
 ) -> bool {
-    if left.login_uris != right.login_uris
+    if left.ssh_jump_item_id != right.ssh_jump_item_id
+        || left.ssh_jump_unresolved != right.ssh_jump_unresolved
+        || left.login_uris != right.login_uris
         || !left.modules.iter().zip(&right.modules).all(|(a,b)| a.kind == b.kind && a.name == b.name && a.value == b.value && a.agent_visible == b.agent_visible)
         || left.modules.len() != right.modules.len()
         || left.item_type() != right.item_type()
@@ -1724,6 +1806,8 @@ mod tests {
             .named_secrets
             .insert("apiCredential".into(), token.to_owned());
         ConnectionInput {
+            ssh_jump_item_id: None,
+            ssh_jump_unresolved: false,
             ssh_auth_type: String::new(),
             login_uris: Vec::new(),
             item_type: String::new(),
@@ -1765,6 +1849,8 @@ mod tests {
             .named_secrets
             .insert("username".into(), "root".into());
         ConnectionInput {
+            ssh_jump_item_id: None,
+            ssh_jump_unresolved: false,
             ssh_auth_type: String::new(),
             login_uris: Vec::new(),
             item_type: String::new(),
@@ -2403,6 +2489,8 @@ mod tests {
         let vault = Vault::open(vault_dir.clone()).unwrap();
         let saved = vault
             .save_connection(ConnectionInput {
+                ssh_jump_item_id: None,
+                ssh_jump_unresolved: false,
                 ssh_auth_type: String::new(),
                 login_uris: Vec::new(),
                 item_type: String::new(),
@@ -2475,6 +2563,8 @@ mod tests {
             .named_secrets
             .insert("username".into(), "developer@example.test".into());
         let input = |id, secrets, remove_secret_names| ConnectionInput {
+            ssh_jump_item_id: None,
+            ssh_jump_unresolved: false,
             ssh_auth_type: String::new(),
             login_uris: Vec::new(),
             item_type: String::new(),
@@ -2609,4 +2699,19 @@ fn advance_revisions(before: &VaultDocument, after: &mut VaultDocument) {
             }
         } else { item.revision = item.revision.max(1); }
     }
+}
+
+pub fn ssh_config_complete(item: &StoredConnection, secrets: &SecretBundle) -> bool {
+    !item.host.trim().is_empty() && item.port > 0 && secrets.get("username").is_some()
+        && match item.ssh_auth_type.as_str() {
+            "privateKey" => secrets.get("privateKey").is_some(),
+            "password" => secrets.get("password").is_some(),
+            _ => false,
+        }
+}
+
+pub fn ssh_endpoint_host(host: &str) -> Result<String> {
+    let host = host.trim().trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
+    anyhow::ensure!(!host.is_empty() && !host.chars().any(|ch| ch.is_control() || ch.is_whitespace()), "Invalid SSH host");
+    Ok(host)
 }
