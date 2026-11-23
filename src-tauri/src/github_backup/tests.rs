@@ -617,3 +617,19 @@ async fn description_only_remote_change_is_preserved_and_reimport_is_idempotent(
     assert_eq!(repeated.summary.merged, 1);
     assert_eq!(second.vault.list_connections().unwrap().len(), 2);
 }
+
+#[test]
+fn device_lock_release_does_not_depend_on_duplicate_descriptor_lifetime() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::open(directory.path().join("vault")).unwrap();
+    let manager = GithubBackup::new(vault).unwrap();
+    let guard = manager.lock_device().unwrap();
+    let duplicate = guard.0.try_clone().unwrap();
+    assert!(manager.lock_device().is_err());
+    drop(guard);
+    let next = manager.lock_device().expect("operation end must unlock even while a duplicate descriptor remains open");
+    drop(duplicate);
+    assert!(manager.lock_device().is_err());
+    drop(next);
+    assert!(manager.lock_device().is_ok());
+}

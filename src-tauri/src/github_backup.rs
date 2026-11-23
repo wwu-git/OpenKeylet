@@ -32,6 +32,14 @@ use std::{
 use url::Url;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
+struct DeviceLock(File);
+
+impl Drop for DeviceLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+
 const CLOUD_FILE: &str = "openkeylet.vault.json";
 const LOCAL_FILE: &str = "github-backup.json";
 const CLOUD_FORMAT: &str = "openkeylet-cloud-backup";
@@ -186,7 +194,7 @@ impl GithubBackup {
         })
     }
 
-    fn lock_device(&self) -> Result<File> {
+    fn lock_device(&self) -> Result<DeviceLock> {
         // Keep the lock file separate from the atomically replaced configuration.
         let file = OpenOptions::new()
             .create(true)
@@ -201,7 +209,7 @@ impl GithubBackup {
             }
             return Err(error).context("GITHUB_LOCAL_STATE");
         }
-        Ok(file)
+        Ok(DeviceLock(file))
     }
 
     pub fn status(&self) -> Result<BackupStatus> {
