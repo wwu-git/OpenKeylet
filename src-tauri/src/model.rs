@@ -938,6 +938,7 @@ mod tests {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SshHostTrust {
+    pub item_id: Uuid,
     pub host: String,
     pub port: u16,
     pub fingerprint: String,

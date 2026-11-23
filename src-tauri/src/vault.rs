@@ -22,7 +22,7 @@ use url::Url;
 use uuid::Uuid;
 
 const MAX_ACTIVITIES: usize = 3_000;
-const VAULT_VERSION: u8 = 13;
+const VAULT_VERSION: u8 = 14;
 #[cfg(test)]
 #[path = "vault_lifecycle_tests.rs"]
 mod lifecycle_tests;
@@ -103,7 +103,7 @@ impl Vault {
         Ok(self.read_document()?.ssh_host_trust)
     }
 
-    pub fn set_ssh_host_trust(&self, host: &str, port: u16, fingerprint: Option<&str>) -> Result<()> {
+    pub fn set_ssh_host_trust(&self, item_id: Uuid, host: &str, port: u16, fingerprint: Option<&str>) -> Result<()> {
         let host = ssh_endpoint_host(host)?;
         anyhow::ensure!(port > 0, "Invalid SSH port");
         if let Some(value) = fingerprint {
@@ -114,9 +114,10 @@ impl Vault {
             anyhow::ensure!(decoded.len() == 32, "Invalid SHA256 SSH fingerprint");
         }
         self.update_document(|document| {
-            document.ssh_host_trust.retain(|entry| entry.host != host || entry.port != port);
+            anyhow::ensure!(document.connections.iter().any(|item| item.id == item_id), "SSH project unavailable");
+            document.ssh_host_trust.retain(|entry| entry.item_id != item_id || entry.host != host || entry.port != port);
             if let Some(fingerprint) = fingerprint {
-                document.ssh_host_trust.push(crate::model::SshHostTrust { host, port, fingerprint: fingerprint.to_owned() });
+                document.ssh_host_trust.push(crate::model::SshHostTrust { item_id, host, port, fingerprint: fingerprint.to_owned() });
             }
             Ok(())
         })
@@ -176,9 +177,9 @@ impl Vault {
         let bytes = fs::read(&self.inner.vault_path).context("Could not read vault")?;
         let document: VaultDocument =
             serde_json::from_slice(&bytes).context("Invalid vault file format")?;
-        if !matches!(document.version, 7 | 8 | 9 | 10 | 11 | 12 | VAULT_VERSION) {
+        if !matches!(document.version, 7 | 8 | 9 | 10 | 11 | 12 | 13 | VAULT_VERSION) {
             bail!(
-                "OpenKeylet supports vault versions 7 through 13; current file version is {}",
+                "OpenKeylet supports vault versions 7 through 14; current file version is {}",
                 document.version
             );
         }
@@ -1115,11 +1116,9 @@ impl Vault {
         let bytes = fs::read(&self.inner.vault_path).context("Could not read vault")?;
         let mut document: VaultDocument =
             serde_json::from_slice(&bytes).context("Invalid vault file format")?;
-        if !matches!(document.version, 7 | 8 | 9 | 10 | 11 | 12 | VAULT_VERSION) {
+        if !matches!(document.version, 7 | 8 | 9 | 10 | 11 | 12 | 13 | VAULT_VERSION) {
             bail!("Unsupported vault version {}", document.version);
         }
-        // Reading older vaults is harmless; the next actual write uses v13
-        // schema so older processes cannot mistake it for their own model.
         document.version = VAULT_VERSION;
         for item in document.connections.iter_mut().chain(document.trash.iter_mut().map(|entry| &mut entry.connection)) {
             item.revision = item.revision.max(1);
@@ -2323,7 +2322,7 @@ mod tests {
         drop(vault);
 
         let error = Vault::open(vault_dir).err().expect("version 6 must fail");
-        assert!(format!("{error:#}").contains("supports vault versions 7 through 13"));
+        assert!(format!("{error:#}").contains("supports vault versions 7 through 14"));
     }
 
     #[test]

@@ -58,6 +58,7 @@ async fn dispatch() -> Result<()> {
         [command, transport] if command == "mcp" && transport == "stdio" => {
             mcp::serve_stdio(vault).await
         }
+        [command, rest @ ..] if command == "ssh-trust" => admin_cli::ssh_trust(&vault, rest).await,
         [command, rest @ ..] if command == "permissions" => admin_cli::permissions(&vault, rest),
         [command, rest @ ..] if command == "github-backup" => admin_cli::github_backup(vault, rest).await,
         [command, format] if command == "config" => {
@@ -99,7 +100,7 @@ async fn dispatch() -> Result<()> {
             Ok(())
         }
         _ => anyhow::bail!(
-            "Usage: openkeylet [gui] | mcp stdio | config <stdio-json|stdio-toml> | browser <status|enable [port]|disable|pair [port]|reset> | backup <export|import> <file> | permissions <status|enable|disable|folder add/remove NAME> | github-backup <status|connect|upload|restore|disconnect> | key migrate (macOS)"
+            "Usage: openkeylet [gui] | mcp stdio | config <stdio-json|stdio-toml> | browser <status|enable [port]|disable|pair [port]|reset> | backup <export|import> <file> | permissions <status|enable|disable|folder add/remove NAME> | github-backup <status|connect|upload|restore|disconnect> | ssh-trust <list|set ITEM_ID HOST PORT FINGERPRINT|remove ITEM_ID HOST PORT|probe ITEM_ID> | key migrate (macOS)"
         ),
     }
 }

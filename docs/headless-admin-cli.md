@@ -4,7 +4,7 @@
 
 ## 1. 范围
 
-沿用无界面版现有的 `openkeylet mcp stdio` 和保险库存储。增加两组本地管理命令，桌面界面与 CLI 共用权限配置、备份格式和后端校验。现有 `backup export/import` 继续处理本地文件。首版连接已有的私有仓库，备份和恢复由管理员手动触发。
+沿用无界面版现有的 `openkeylet mcp stdio` 和保险库存储。增加两组本地管理命令，桌面界面与 CLI 共用权限配置、备份格式和后端校验。现有 `backup export/import` 继续处理本地文件。SSH 单级跳板及本机 `ssh-trust` 指纹管理见 [SSH 跳板文档](ssh-jump.md)。首版连接已有的私有仓库，备份和恢复由管理员手动触发。
 
 Grok Bot 通过 Command 类型的自定义连接器，在其云电脑上启动对应系统与架构的 OpenKeylet 无界面二进制。连接器只运行 `mcp stdio`。验收前确认管理员有受控终端，并核对连接器和管理 CLI 使用同一个绝对数据目录。两边都通过 `OPENKEYLET_DATA_DIR` 显式指定。构建命令为 `npm run build:headless`，二进制路径为 `src-tauri/target/release/openkeylet`。
 

@@ -20,6 +20,7 @@ pub mod terminal;
 pub mod vault;
 pub mod vault_write;
 mod ssh_keys;
+pub mod ssh_transport;
 
 #[cfg(feature = "gui")]
 pub mod agent_registry;

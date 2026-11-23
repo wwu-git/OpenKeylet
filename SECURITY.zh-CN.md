@@ -45,7 +45,9 @@ OpenKeylet 不添加策略 shell。`terminal_run` 执行普通单次本地 shell
 
 ### SSH
 
-保存了密码或私钥的 item 可授予 Agent 完整 SSH 命令执行和递归 SFTP 文件/目录传输能力。主机、端口和用户名可保存为默认值，也可由 Agent 在当前调用指定；两种来源均无端口时使用 22。`ssh_run` 可将调用方文本直接写入远端进程标准输入，并在 stdin、命令或工作目录中替换 `{{openkeylet:module}}`。`secretEnv` 可向远端环境注入其他已存模块。OpenKeylet 会从返回输出中脱敏这些值。Agent 按用户任务选择上传/下载路径；默认在准备好完整临时副本后替换现有目标，包括文件转目录或目录转文件。OpenKeylet 没有 observation、diagnostic、restricted 或 execution 模式，也不固定或比较 SSH 主机指纹；使用 SSH 凭据即把本次运行目标的选择交给 Agent。
+保存了密码或私钥的 item 可授予 Agent 完整 SSH 命令执行和递归 SFTP 文件/目录传输能力。主机、端口和用户名可保存为默认值，也可由 Agent 在当前调用指定；两种来源均无端口时使用 22。`ssh_run` 可将调用方文本直接写入远端进程标准输入，并在 stdin、命令或工作目录中替换 `{{openkeylet:module}}`。`secretEnv` 可向远端环境注入其他已存模块。OpenKeylet 会从返回输出中脱敏这些值。Agent 按用户任务选择上传/下载路径；默认在准备好完整临时副本后替换现有目标，包括文件转目录或目录转文件。OpenKeylet 没有 observation、diagnostic、restricted 或 execution 模式。
+
+原有直连项目保持不校验主机指纹的兼容行为。单级跳板连接必须先校验 A 的主机指纹再使用 A 的凭据，再校验 B 的主机指纹后使用 B 的凭据。信任记录绑定项目 ID、主机和端口，只能通过客户端或本地管理 CLI 确认，不随备份迁移。目标覆盖不能继承其他地址的指纹，跳板失败不退回直连。使用 SSH 凭据仍授予调用方相应的远端命令和文件操作能力。
 
 ### API 请求
 

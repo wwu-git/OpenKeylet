@@ -253,3 +253,20 @@ mod tests {
         );
     }
 }
+
+pub(crate) async fn ssh_trust(vault: &Vault, args: &[String]) -> Result<()> {
+    let arguments = args.iter().map(String::as_str).collect::<Vec<_>>();
+    match arguments.as_slice() {
+        ["list"] => print_json(vault.ssh_host_trust()?),
+        ["set", id, host, port, fingerprint] => {
+            vault.set_ssh_host_trust(uuid::Uuid::parse_str(id).context("Expected project UUID")?, host, port.parse().context("Invalid SSH port")?, Some(fingerprint))?;
+            print_json(serde_json::json!({"status":"trusted"}))
+        }
+        ["remove", id, host, port] => {
+            vault.set_ssh_host_trust(uuid::Uuid::parse_str(id).context("Expected project UUID")?, host, port.parse().context("Invalid SSH port")?, None)?;
+            print_json(serde_json::json!({"status":"removed"}))
+        }
+        ["probe", id] => print_json(mcp_vault::ssh_transport::probe(vault, uuid::Uuid::parse_str(id).context("Expected project UUID")?).await?),
+        _ => bail!("Usage: openkeylet ssh-trust <list|set ITEM_ID HOST PORT SHA256:FINGERPRINT|remove ITEM_ID HOST PORT|probe ITEM_ID>"),
+    }
+}

@@ -14,8 +14,7 @@ use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue},
 };
 use russh::{
-    ChannelMsg, Disconnect, client,
-    keys::{PrivateKeyWithHashAlg, decode_secret_key, ssh_key},
+    ChannelMsg, Disconnect,
 };
 use russh_sftp::{client::SftpSession, protocol::OpenFlags};
 use schemars::JsonSchema;
@@ -23,10 +22,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
-    fmt::Display,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
     time::Duration,
 };
 use tokio::io::AsyncWriteExt;
@@ -735,139 +732,101 @@ async fn execute_ssh_inner(
     stdin: Option<&str>,
 ) -> Result<SshResponse> {
     let session = connect_ssh(vault, connection).await?;
-    let channel = session.channel_open_session().await?;
-    let send_task;
-    let mut reader;
-    if command.len() <= MAX_DIRECT_SSH_COMMAND_LENGTH || stdin.is_some() {
-        channel.exec(true, command).await?;
-        let (read_half, write_half) = channel.split();
-        reader = read_half;
-        send_task = stdin.map(|stdin| {
-            let input = stdin.as_bytes().to_vec();
-            tokio::spawn(async move {
-                write_half.data_bytes(input).await?;
+    let result: Result<SshResponse> = async {
+        let channel = session.channel_open_session().await?;
+        let send_task;
+        let mut reader;
+        if command.len() <= MAX_DIRECT_SSH_COMMAND_LENGTH || stdin.is_some() {
+            channel.exec(true, command).await?;
+            let (read_half, write_half) = channel.split();
+            reader = read_half;
+            send_task = stdin.map(|stdin| {
+                let input = stdin.as_bytes().to_vec();
+                tokio::spawn(async move {
+                    write_half.data_bytes(input).await?;
+                    write_half.eof().await
+                })
+            });
+        } else {
+            // A shell channel invokes the account's configured shell, so the same
+            // path works for POSIX shells and Windows OpenSSH targets.
+            channel.request_shell(true).await?;
+            let mut script = Vec::with_capacity(command.len() + 1);
+            script.extend_from_slice(command.as_bytes());
+            script.push(b'\n');
+            let (read_half, write_half) = channel.split();
+            reader = read_half;
+            send_task = Some(tokio::spawn(async move {
+                write_half.data_bytes(script).await?;
                 write_half.eof().await
-            })
-        });
-    } else {
-        // A shell channel invokes the account's configured shell, so the same
-        // path works for POSIX shells and Windows OpenSSH targets.
-        channel.request_shell(true).await?;
-        let mut script = Vec::with_capacity(command.len() + 1);
-        script.extend_from_slice(command.as_bytes());
-        script.push(b'\n');
-        let (read_half, write_half) = channel.split();
-        reader = read_half;
-        send_task = Some(tokio::spawn(async move {
-            write_half.data_bytes(script).await?;
-            write_half.eof().await
-        }));
-    }
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    let mut exit_code = None;
-    let mut signal = None;
-    while let Some(message) = reader.wait().await {
-        match message {
-            ChannelMsg::Data { data } => stdout.extend_from_slice(&data),
-            ChannelMsg::ExtendedData { data, .. } => stderr.extend_from_slice(&data),
-            ChannelMsg::ExitStatus { exit_status } => exit_code = Some(exit_status),
-            ChannelMsg::ExitSignal { signal_name, .. } => signal = Some(format!("{signal_name:?}")),
-            _ => {}
+            }));
         }
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut exit_code = None;
+        let mut signal = None;
+        while let Some(message) = reader.wait().await {
+            match message {
+                ChannelMsg::Data { data } => stdout.extend_from_slice(&data),
+                ChannelMsg::ExtendedData { data, .. } => stderr.extend_from_slice(&data),
+                ChannelMsg::ExitStatus { exit_status } => exit_code = Some(exit_status),
+                ChannelMsg::ExitSignal { signal_name, .. } => {
+                    signal = Some(format!("{signal_name:?}"))
+                }
+                _ => {}
+            }
+        }
+        if let Some(task) = send_task {
+            task.await
+                .context("SSH long command sending task ended unexpectedly")??;
+        }
+        let _ = session
+            .disconnect(Disconnect::ByApplication, "", "en")
+            .await;
+        let stdout = session.redact(String::from_utf8_lossy(&stdout).into_owned());
+        let stderr = session.redact(String::from_utf8_lossy(&stderr).into_owned());
+        Ok(SshResponse {
+            exit_code,
+            signal,
+            stdout,
+            stderr,
+            stdout_truncated: false,
+            stderr_truncated: false,
+        })
     }
-    if let Some(task) = send_task {
-        task.await
-            .context("SSH long command sending task ended unexpectedly")??;
-    }
-    let _ = session
-        .disconnect(Disconnect::ByApplication, "", "en")
-        .await;
-    let stdout = redact(
-        String::from_utf8_lossy(&stdout).into_owned(),
-        &connection.stored,
-        &connection.secrets,
-    );
-    let stderr = redact(
-        String::from_utf8_lossy(&stderr).into_owned(),
-        &connection.stored,
-        &connection.secrets,
-    );
-    Ok(SshResponse {
-        exit_code,
-        signal,
-        stdout,
-        stderr,
-        stdout_truncated: false,
-        stderr_truncated: false,
+    .await;
+    result.map_err(|error| {
+        anyhow::anyhow!(session.redact(format!("{error:#}")))
     })
 }
 
 async fn connect_ssh(
-    _vault: &Vault,
+    vault: &Vault,
     connection: &DecryptedConnection,
-) -> Result<client::Handle<SshClient>> {
-    let handler = SshClient;
-    let mut session = client::connect(
-        Arc::new(client::Config::default()),
-        (connection.stored.host.as_str(), connection.stored.port),
-        handler,
-    )
-    .await
-    .map_err(|error| anyhow::anyhow!(ssh_connect_error_message(&error)))?;
-
-    let auth = if connection.stored.ssh_auth_type == "privateKey" {
-        let username = connection
-            .secrets
-            .get("username")
-            .context("No SSH username in vault")?;
-        let private_key = connection
-            .secrets
-            .private_key
-            .as_deref()
-            .context("No SSH private key in vault")?;
-        let key = decode_secret_key(private_key, connection.secrets.passphrase.as_deref())
-            .context("Unable to parse SSH private key or incorrect passphrase")?;
-        let hash = session.best_supported_rsa_hash().await?.flatten();
-        session
-            .authenticate_publickey(username, PrivateKeyWithHashAlg::new(Arc::new(key), hash))
-            .await?
-    } else {
-        let username = connection
-            .secrets
-            .get("username")
-            .context("No SSH username in vault")?;
-        session
-            .authenticate_password(
-                username,
-                connection
-                    .secrets
-                    .password
-                    .clone()
-                    .context("No SSH password in the vault")?,
-            )
-            .await?
-    };
-    if !auth.success() {
-        bail!("SSH authentication failed");
-    }
-
-    Ok(session)
+) -> Result<crate::ssh_transport::SshConnection> {
+    crate::ssh_transport::connect(vault, connection).await
 }
 
 async fn open_sftp(
     vault: &Vault,
     connection: &DecryptedConnection,
-) -> Result<(client::Handle<SshClient>, SftpSession)> {
+) -> Result<(crate::ssh_transport::SshConnection, SftpSession)> {
     let session = connect_ssh(vault, connection).await?;
-    let channel = session.channel_open_session().await?;
-    channel
-        .request_subsystem(true, "sftp")
-        .await
-        .context("The remote does not have the SFTP subsystem enabled")?;
-    let sftp = SftpSession::new(channel.into_stream())
-        .await
-        .context("Unable to initialize the SFTP session")?;
+    let result: Result<SftpSession> = async {
+        let channel = session.channel_open_session().await?;
+        channel
+            .request_subsystem(true, "sftp")
+            .await
+            .context("The remote does not have the SFTP subsystem enabled")?;
+        let sftp = SftpSession::new(channel.into_stream())
+            .await
+            .context("Unable to initialize the SFTP session")?;
+        Ok(sftp)
+    }
+    .await;
+    let sftp = result.map_err(|error| {
+        anyhow::anyhow!(session.redact(format!("{error:#}")))
+    })?;
     Ok((session, sftp))
 }
 
@@ -897,30 +856,37 @@ pub async fn ssh_upload(
             bail!("Local upload path is not a file or directory");
         }
         let (session, sftp) = open_sftp(vault, connection).await?;
-        let remote_path = resolve_remote_path(&sftp, &remote_path).await?;
-        let (kind, stats) = if metadata.is_dir() {
-            (
-                "directory",
-                upload_local_directory(&sftp, &canonical_local, &remote_path, overwrite).await?,
-            )
-        } else {
-            (
-                "file",
-                upload_local_file(&sftp, &canonical_local, &remote_path, overwrite).await?,
-            )
-        };
-        let _ = sftp.close().await;
-        let _ = session
-            .disconnect(Disconnect::ByApplication, "", "en")
-            .await;
-        Ok(SshTransferResponse {
-            direction: "upload".to_owned(),
-            kind: kind.to_owned(),
-            local_path: canonical_local.to_string_lossy().into_owned(),
-            remote_path,
-            bytes_transferred: stats.bytes,
-            files_transferred: stats.files,
-            directories_transferred: stats.directories,
+        let result: Result<SshTransferResponse> = async {
+            let remote_path = resolve_remote_path(&sftp, &remote_path).await?;
+            let (kind, stats) = if metadata.is_dir() {
+                (
+                    "directory",
+                    upload_local_directory(&sftp, &canonical_local, &remote_path, overwrite)
+                        .await?,
+                )
+            } else {
+                (
+                    "file",
+                    upload_local_file(&sftp, &canonical_local, &remote_path, overwrite).await?,
+                )
+            };
+            let _ = sftp.close().await;
+            let _ = session
+                .disconnect(Disconnect::ByApplication, "", "en")
+                .await;
+            Ok(SshTransferResponse {
+                direction: "upload".to_owned(),
+                kind: kind.to_owned(),
+                local_path: canonical_local.to_string_lossy().into_owned(),
+                remote_path,
+                bytes_transferred: stats.bytes,
+                files_transferred: stats.files,
+                directories_transferred: stats.directories,
+            })
+        }
+        .await;
+        result.map_err(|error| {
+            anyhow::anyhow!(session.redact(format!("{error:#}")))
         })
     };
     run_optional_ssh_timeout(execution, timeout_seconds, "SSH upload").await
@@ -945,45 +911,50 @@ pub async fn ssh_download(
     let local_path = resolve_user_path(local_path)?;
     let execution = async {
         let (session, sftp) = open_sftp(vault, connection).await?;
-        let remote_path = resolve_remote_path(&sftp, &remote_path).await?;
-        let remote_metadata = sftp
-            .metadata(remote_path.clone())
-            .await
-            .context("Remote download path not found")?;
-        let (kind, stats) = if remote_metadata.file_type().is_dir() {
-            (
-                "directory",
-                download_remote_directory(&sftp, &remote_path, &local_path, overwrite).await?,
-            )
-        } else if remote_metadata.file_type().is_file() {
-            (
-                "file",
-                download_remote_file(&sftp, &remote_path, &local_path, overwrite).await?,
-            )
-        } else {
-            bail!("Remote download path is not a file or directory");
-        };
-        let _ = sftp.close().await;
-        let _ = session
-            .disconnect(Disconnect::ByApplication, "", "en")
-            .await;
-        Ok(SshTransferResponse {
-            direction: "download".to_owned(),
-            kind: kind.to_owned(),
-            local_path: tokio::fs::canonicalize(&local_path)
+        let result: Result<SshTransferResponse> = async {
+            let remote_path = resolve_remote_path(&sftp, &remote_path).await?;
+            let remote_metadata = sftp
+                .metadata(remote_path.clone())
                 .await
-                .unwrap_or(local_path)
-                .to_string_lossy()
-                .into_owned(),
-            remote_path,
-            bytes_transferred: stats.bytes,
-            files_transferred: stats.files,
-            directories_transferred: stats.directories,
+                .context("Remote download path not found")?;
+            let (kind, stats) = if remote_metadata.file_type().is_dir() {
+                (
+                    "directory",
+                    download_remote_directory(&sftp, &remote_path, &local_path, overwrite).await?,
+                )
+            } else if remote_metadata.file_type().is_file() {
+                (
+                    "file",
+                    download_remote_file(&sftp, &remote_path, &local_path, overwrite).await?,
+                )
+            } else {
+                bail!("Remote download path is not a file or directory");
+            };
+            let _ = sftp.close().await;
+            let _ = session
+                .disconnect(Disconnect::ByApplication, "", "en")
+                .await;
+            Ok(SshTransferResponse {
+                direction: "download".to_owned(),
+                kind: kind.to_owned(),
+                local_path: tokio::fs::canonicalize(&local_path)
+                    .await
+                    .unwrap_or(local_path)
+                    .to_string_lossy()
+                    .into_owned(),
+                remote_path,
+                bytes_transferred: stats.bytes,
+                files_transferred: stats.files,
+                directories_transferred: stats.directories,
+            })
+        }
+        .await;
+        result.map_err(|error| {
+            anyhow::anyhow!(session.redact(format!("{error:#}")))
         })
     };
     run_optional_ssh_timeout(execution, timeout_seconds, "SSH download").await
 }
-
 async fn upload_local_file(
     sftp: &SftpSession,
     local_path: &Path,
@@ -1873,16 +1844,6 @@ fn replace_query_pair(target: &mut Url, name: &str, value: &str) {
     pairs.append_pair(name, value);
 }
 
-struct SshClient;
-
-impl client::Handler for SshClient {
-    type Error = russh::Error;
-
-    async fn check_server_key(&mut self, _key: &ssh_key::PublicKey) -> Result<bool, Self::Error> {
-        Ok(true)
-    }
-}
-
 fn sanitize_api_body(
     mut body: String,
     truncated: bool,
@@ -1895,26 +1856,6 @@ fn sanitize_api_body(
     redact(body, connection, secrets)
 }
 
-fn ssh_connect_error_message(error: &impl Display) -> String {
-    let raw = error.to_string();
-    let normalized = raw.to_ascii_lowercase();
-    if normalized.contains("disconnected") || normalized.contains("connection closed") {
-        return "SSH handshake was closed early by the remote (credentials have not been sent); check the remote sshd, VPN/proxy route, or SSH concurrency limit".to_owned();
-    }
-    if normalized.contains("timed out")
-        || normalized.contains("timeout")
-        || normalized.contains("os error 10060")
-    {
-        return "SSH TCP connection timed out; check the target address, VPN/proxy route, and port 22".to_owned();
-    }
-    if normalized.contains("connection refused") || normalized.contains("os error 10061") {
-        return "SSH port refused the connection; the target is reachable, but sshd is not listening on that port".to_owned();
-    }
-    if normalized.contains("no common") || normalized.contains("key exchange") {
-        return format!("SSH handshake algorithms are incompatible:{raw}");
-    }
-    format!("SSH connection or handshake failed:{raw}")
-}
 
 pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
@@ -2643,13 +2584,6 @@ mod tests {
     }
 
     #[test]
-    fn ssh_connect_errors_name_the_failed_stage() {
-        assert!(ssh_connect_error_message(&"Disconnected").contains("handshake"));
-        assert!(ssh_connect_error_message(&"os error 10060").contains("TCP"));
-        assert!(ssh_connect_error_message(&"connection refused").contains("port"));
-    }
-
-    #[test]
     fn ssh_secret_environment_quotes_values_and_rejects_invalid_names() {
         let command = ssh_command_with_secret_environment(
             "printf '%s' \"$OPENKEYLET_PASSWORD\"",
@@ -2675,6 +2609,7 @@ mod tests {
 
 #[cfg(test)]
 mod oci_transport_tests {
+    use std::sync::Arc;
     use super::*;
     use crate::oci::{
         self,
