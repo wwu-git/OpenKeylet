@@ -82,11 +82,22 @@
         <strong>OpenKeylet</strong>
       </div>
       <div class="title-search" id="title-search">
-        <button id="title-search-toggle" type="button" aria-expanded="false" aria-controls="title-search-input" aria-label="Search vault items" title="Search vault items">
+        <button id="title-search-toggle" type="button" aria-expanded="false" aria-controls="title-search-input connection-filter-panel" aria-label="Search vault items" title="Search vault items">
           <svg class="search-open-glyph" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg>
           <svg class="search-close-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12m0-12L6 18"/></svg>
         </button>
         <input id="title-search-input" class="page-search-input" data-page-search="connections" type="search" placeholder="Search items…" aria-label="Search vault items" autocomplete="off" hidden />
+        <div id="connection-filter-panel" hidden>
+          <div class="connection-filter-fields">
+            <label><span id="connection-folder-filter-label">Folder</span><select id="connection-folder-filter"></select></label>
+            <label><span id="connection-status-filter-label">Status</span><select id="connection-status-filter"></select></label>
+          </div>
+          <div id="connection-filter-chips"></div>
+          <div class="connection-search-summary">
+            <span id="connection-result-count" role="status" aria-atomic="true"></span>
+            <button type="button" class="button quiet" id="connection-clear-all" data-action="clear-connection-filters" hidden>Clear all</button>
+          </div>
+        </div>
       </div>
       <div class="title-tools">
       <button class="title-switch" id="theme-toggle" type="button" role="switch" aria-checked="false" aria-label="Light mode" title="Switch to light mode">
@@ -132,20 +143,6 @@
               <button class="draft-delete-button hidden" id="delete-draft-button" type="button" aria-label="Delete draft" title="Delete draft">×</button>
             </div>
           </header>
-          <div class="connection-search-tools">
-            <div class="connection-search-summary">
-              <div id="connection-filter-chips"></div>
-              <span id="connection-result-count" role="status" aria-atomic="true"></span>
-              <button type="button" class="button quiet" id="connection-clear-all" data-action="clear-connection-filters" hidden>Clear all</button>
-            </div>
-            <div id="connection-filter-menu">
-              <button type="button" class="button quiet" id="connection-filter-toggle" aria-expanded="false" aria-controls="connection-filter-panel">Filters</button>
-              <div id="connection-filter-panel" hidden>
-                <label><span id="connection-folder-filter-label">Folder</span><select id="connection-folder-filter"></select></label>
-                <label><span id="connection-status-filter-label">Status</span><select id="connection-status-filter"></select></label>
-              </div>
-            </div>
-          </div>
           <div class="list-well"><div class="connections-grid" id="connections-list" tabindex="0" aria-label="Vault items"></div></div>
           <span id="item-reorder-status" class="module-reorder-status" aria-live="polite" aria-atomic="true"></span>
         </section>

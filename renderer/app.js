@@ -826,11 +826,13 @@ document.addEventListener('click', event => {
 
 function syncTitleSearch() {
   const open = titleSearchOpen;
-  const labels = { connections: ['搜索项目', 'Search items'], activity: ['搜索记录', 'Search activity'], settings: ['搜索设置', 'Search settings'] };
+  const labels = { connections: ['搜索和筛选项目', 'Search and filter items'], activity: ['搜索记录', 'Search activity'], settings: ['搜索设置', 'Search settings'] };
   const label = localized(...labels[activePage]);
   const control = $('#title-search');
   control.classList.toggle('is-open', open);
-  control.classList.toggle('has-query', Boolean(pageSearch[activePage]));
+  const hasFilters = Boolean(pageSearch[activePage]) || (activePage === 'connections' && [currentItemTypeFilter, currentFolderFilter, currentItemStatusFilter].some(value => value !== 'all'));
+  control.classList.toggle('has-query', hasFilters);
+  $('#connection-filter-panel').hidden = !open || activePage !== 'connections';
   $('.title-drag-region').classList.toggle('search-open', open);
   const input = $('#title-search-input');
   input.hidden = !open;
@@ -841,7 +843,7 @@ function syncTitleSearch() {
   const button = $('#title-search-toggle');
   button.setAttribute('aria-expanded', String(open));
   button.title = open ? localized('收起搜索', 'Collapse search') : label;
-  if (pageSearch[activePage] && !open) button.title += localized(' · 筛选中', ' · Filter active');
+  if (hasFilters && !open) button.title += localized(' · 筛选中', ' · Filter active');
   button.setAttribute('aria-label', button.title);
 }
 
@@ -908,8 +910,6 @@ function syncConnectionSearchControls(matchCount, editingOutsideFilters) {
   const chipList = $('#connection-filter-chips');
   const chipMarkup = chips.map(([kind, label]) => `<button type="button" class="button quiet" data-clear-item-filter="${kind}" aria-label="${escapeHtml(localized(`移除筛选：${label}`, `Remove filter: ${label}`))}">${escapeHtml(label)} <span aria-hidden="true">×</span></button>`).join('');
   if (chipList.innerHTML !== chipMarkup) chipList.innerHTML = chipMarkup;
-  const advancedCount = Number(currentFolderFilter !== 'all') + Number(currentItemStatusFilter !== 'all');
-  $('#connection-filter-toggle').textContent = localized('筛选', 'Filters') + (advancedCount ? ` (${advancedCount})` : '');
   $('#connection-result-count').textContent = localized(
     `${matchCount} / ${state.connections.length} 个项目` + (editingOutsideFilters ? ' · 保留正在编辑的项目' : ''),
     `${matchCount} / ${state.connections.length} projects` + (editingOutsideFilters ? ' · Open editor kept visible' : ''),
@@ -917,6 +917,7 @@ function syncConnectionSearchControls(matchCount, editingOutsideFilters) {
   const clearAll = $('#connection-clear-all');
   clearAll.textContent = localized('清除全部', 'Clear all');
   clearAll.hidden = !chips.length && !pageSearch.connections;
+  syncTitleSearch();
 }
 
 function matchesConnectionFilters(item, words) {
@@ -2243,7 +2244,6 @@ document.addEventListener('click', async (event) => {
     currentItemTypeFilter = 'all';
     currentFolderFilter = 'all';
     currentItemStatusFilter = 'all';
-    setConnectionFiltersOpen(false);
     syncItemTypeFilter();
     syncTitleSearch();
     renderConnections();
@@ -2341,19 +2341,6 @@ $('#connection-filter-chips').addEventListener('click', event => {
   renderConnections();
   setTitleSearchOpen(true);
 });
-function setConnectionFiltersOpen(open) {
-  $('#connection-filter-panel').hidden = !open;
-  $('#connection-filter-toggle').setAttribute('aria-expanded', String(open));
-}
-$('#connection-filter-toggle').addEventListener('click', () => {
-  setConnectionFiltersOpen($('#connection-filter-panel').hidden);
-});
-document.addEventListener('click', event => {
-  if (!$('#connection-filter-panel').hidden && !$('#connection-filter-menu').contains(event.target)) {
-    setConnectionFiltersOpen(false);
-  }
-});
-
 document.addEventListener('input', (event) => {
   if (event.target.matches('.pin-cell-input')) {
     event.target.value = event.target.value.replace(/\D/g, '').slice(-1);
@@ -2762,14 +2749,7 @@ document.addEventListener('keydown', (event) => {
     return;
   }
   if (event.key === 'Escape') {
-    const filters = $('#connection-filter-menu');
-    if (!$('#connection-filter-panel').hidden && filters.contains(event.target)) {
-      event.preventDefault();
-      setConnectionFiltersOpen(false);
-      $('#connection-filter-toggle').focus();
-      return;
-    }
-    const search = event.target.closest?.('[data-page-search]');
+    const search = event.target.closest?.('#title-search') ? $('#title-search-input') : null;
     if (search?.value) {
       const page = search.dataset.pageSearch;
       search.value = '';
@@ -2777,6 +2757,8 @@ document.addEventListener('keydown', (event) => {
       if (page === 'connections') { syncTitleSearch(); renderConnections(); }
       if (page === 'activity') { activityVisibleCount = ACTIVITY_PAGE_SIZE; renderActivity(); }
       if (page === 'settings') applySettingsSearch();
+      event.preventDefault();
+      return;
     }
     if (event.target.closest?.('#title-search')) { event.preventDefault(); setTitleSearchOpen(false); }
   }

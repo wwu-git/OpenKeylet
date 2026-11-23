@@ -91,14 +91,21 @@ try {
     await refresh();
   });
   const visible = () => page.locator('.connection-card').evaluateAll(rows => rows.map(row => row.dataset.itemId));
-  const filters = page.locator('#connection-filter-toggle');
+  const filterPanel = page.locator('#connection-filter-panel');
+  const openFilters = () => page.keyboard.press('Control+f');
+  assert.equal(await page.locator('#connection-filter-toggle, .connection-search-tools').count(), 0);
+  assert.equal(await filterPanel.isHidden(), true);
   const folder = page.locator('#connection-folder-filter');
   const status = page.locator('#connection-status-filter');
   await page.locator('[data-item-type-filter="api"]').click();
-  await filters.click();
+  await openFilters();
   await folder.selectOption({label: 'agent'});
   await status.selectOption('enabled');
-  await filters.click();
+  assert.equal(await filterPanel.isVisible(), true, 'Selecting filters keeps the shared search panel open');
+  await page.locator('#title-search-toggle').click();
+  assert.equal(await filterPanel.isHidden(), true);
+  assert.match(await page.locator('#title-search-toggle').getAttribute('aria-label'), /筛选中/);
+  assert.deepEqual(await visible(), ['exact'], 'Collapsing search preserves folder, status and type filters');
   await fillItemSearch('生产 github');
   assert.deepEqual(await visible(), ['exact']);
   assert.match(await page.locator('#connection-result-count').textContent(), /1\s*\/\s*5/);
@@ -107,20 +114,22 @@ try {
   assert.deepEqual(await projectSearch.evaluate(el => [el.selectionStart,el.selectionEnd]), [0,'生产 github'.length]);
   await projectSearch.press('Escape');
   assert.equal(await projectSearch.inputValue(), '');
+  assert.equal(await filterPanel.isVisible(), true, 'First Escape clears keywords without closing the filter panel');
   assert.deepEqual(await visible(), ['exact'], 'Clearing keywords preserves the active filters');
   await page.locator('[data-clear-item-filter="status"]').click();
   assert.equal(await projectSearch.isVisible(), true);
   assert.equal(await projectSearch.evaluate(el => document.activeElement === el), true);
   assert.deepEqual(await visible(), ['exact', 'disabled']);
-  await filters.click();
+  await openFilters();
   await status.selectOption('enabled');
-  await filters.click();
+  await openFilters();
   await page.locator('[data-item-id="exact"] .item-disclosure').click();
   await page.locator('#connection-description').fill('未保存的编辑');
   await fillItemSearch('不存在');
-  await filters.click();
+  await openFilters();
   await folder.selectOption({label: '未分组'});
   await status.selectOption('disabled');
+  await page.locator('#title-search-toggle').click();
   await page.locator('[data-item-type-filter="ssh"]').click();
   assert.equal(await page.locator('#connection-description').inputValue(), '未保存的编辑');
   assert.deepEqual(await visible(), ['exact']);
@@ -128,13 +137,16 @@ try {
   await page.locator('[data-item-id="exact"] .item-disclosure').click();
   await page.locator('#connection-modal').waitFor({state: 'hidden'});
   await page.waitForFunction(() => fixture.drafts.some(d => d.input.description === '未保存的编辑'));
+  await openFilters();
   await page.locator('#connection-clear-all').click();
   assert.equal(await projectSearch.inputValue(), '');
   assert.equal((await visible()).length, 5);
   await fillItemSearch('github');
   for (const [pageName, query] of [['activity', '独立记录'], ['settings', '安全']]) {
+    if (await projectSearch.isVisible()) await page.locator('#title-search-toggle').click();
     await page.locator(`[data-page="${pageName}"]`).click();
     await page.keyboard.press('Control+f');
+    assert.equal(await filterPanel.isHidden(), true, 'Project filters stay hidden on other pages');
     assert.equal(await projectSearch.inputValue(), '');
     await projectSearch.fill(query);
   }
@@ -143,6 +155,7 @@ try {
   assert.equal(await projectSearch.inputValue(), 'github');
   assert.equal(await projectSearch.evaluate(el => document.activeElement === el), true);
   for (const [pageName, query] of [['activity', '独立记录'], ['settings', '安全']]) {
+    if (await projectSearch.isVisible()) await page.locator('#title-search-toggle').click();
     await page.locator(`[data-page="${pageName}"]`).click();
     await page.keyboard.press('Control+f');
     assert.equal(await projectSearch.inputValue(), query);
@@ -150,6 +163,8 @@ try {
   }
   await page.locator('[data-page="connections"]').click();
   await fillItemSearch('github');
+  await folder.selectOption({label:'agent'});
+  await status.selectOption('enabled');
   for (const width of [690, 460]) {
     await page.setViewportSize({width,height:1000});
     for (const theme of ['dark', 'light']) {
@@ -158,11 +173,14 @@ try {
       assert.equal(await page.locator('[data-page-search="connections"]').count(), 1);
       assert.equal(await projectSearch.isVisible(), true);
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
-      const toolbar = await page.locator('.connection-search-tools').evaluate(el => ({width:el.clientWidth,scroll:el.scrollWidth}));
-      assert.ok(toolbar.scroll <= toolbar.width + 1, JSON.stringify(toolbar));
+      assert.equal(await filterPanel.isVisible(), true);
+      const panelBounds = await filterPanel.evaluate(el => { const rect=el.getBoundingClientRect(); return {left:rect.left,right:rect.right,bottom:rect.bottom,top:rect.top,width:el.clientWidth,scroll:el.scrollWidth}; });
+      assert.ok(panelBounds.left>=0 && panelBounds.right<=width && panelBounds.bottom<=1000 && panelBounds.scroll<=panelBounds.width+1, JSON.stringify(panelBounds));
+      assert.ok(panelBounds.top >= await projectSearch.evaluate(el=>el.getBoundingClientRect().bottom));
       await page.screenshot({path:path.join(artifacts, `single-search-${width}-${theme}.png`)});
     }
   }
+  await page.locator('#connection-clear-all').click();
   await projectSearch.press('Escape');
   await page.setViewportSize({width:690,height:1000});
   await page.evaluate(async () => {
@@ -304,14 +322,14 @@ try {
   await page.locator('[data-page="connections"]').click();
   await page.setViewportSize({width:460,height:520});
   await page.locator('#toast-region .toast').last().waitFor({state:'hidden'});
-  await filters.click();
+  await openFilters();
   assert.ok(await page.locator('#connection-filter-panel').evaluate(el => {
     const rect = el.getBoundingClientRect();
     return rect.left >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight;
   }));
-  assert.equal(await projectSearch.isHidden(), true);
+  assert.equal(await projectSearch.isVisible(), true);
   await page.screenshot({path:path.join(artifacts,'narrow-filter-panel.png')});
-  await filters.press('Escape');
+  await projectSearch.press('Escape');
   assert.equal(await page.locator('#connection-filter-panel').isHidden(), true);
   await page.keyboard.press('Control+f');
   assert.ok(await projectSearch.evaluate(el => el.getBoundingClientRect().width >= 100));
@@ -322,5 +340,5 @@ try {
   await page.screenshot({path:path.join(artifacts,"narrow-card-editor.png")});
   assert.ok(await page.evaluate(()=>document.querySelector("#connection-modal .modal-card").getBoundingClientRect().bottom<=innerHeight));
   assert.deepEqual(errors,[]);
-  console.log(JSON.stringify({ok:true,checks:["combined add/draft selector","draft preservation and recovery","card editor","encrypted field payload","one header search with Ctrl/Cmd+F and independent page queries","combined keyword, type, exact folder and enabled status filters","unsaved edits survive filtering and are saved as drafts","460px filter controls","multiline secure note","generator inserts password","backup password flow","multiple website rules","migration preview/cancel/commit","password history","trash restore and purge from settings","narrow layout"],artifacts},null,2));
+  console.log(JSON.stringify({ok:true,checks:["combined add/draft selector","draft preservation and recovery","card editor","encrypted field payload","one header search and filter panel with Ctrl/Cmd+F and independent page queries","combined keyword, type, exact folder and enabled status filters","unsaved edits survive filtering and are saved as drafts","460px filter controls","multiline secure note","generator inserts password","backup password flow","multiple website rules","migration preview/cancel/commit","password history","trash restore and purge from settings","narrow layout"],artifacts},null,2));
 } finally {await browser.close();server.close();}

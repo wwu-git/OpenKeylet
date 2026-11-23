@@ -1576,26 +1576,25 @@ html.platform-macos .nav-item small { line-height: 7px; }
 .agent-write-boundary { margin-top: 14px; line-height: 1.5; overflow-wrap: anywhere; }
 #agent-write-folders .agent-client-copy { overflow-wrap: anywhere; min-width: 0; }
 
-.connection-search-tools { position: relative; z-index: 2; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 0 13px 8px; }
-#connection-filter-menu { position: relative; flex: none; }
-#connection-filter-toggle { min-height: 36px; display: flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; }
-#connection-filter-toggle::after { content: "▾"; }
+#title-search { position: relative; }
 #connection-filter-panel {
-  display: grid; gap: 8px;
-  position: absolute; z-index: 1; right: 0; top: calc(100% + 5px); width: 220px;
-  max-width: calc(100vw - 28px); padding: 10px; border: 1px solid var(--chassis-dark);
-  border-radius: 4px; background: var(--panel); box-shadow: 0 5px 16px #0003;
+  display: grid; gap: 10px; position: absolute; z-index: 1; left: 0; top: calc(100% + 5px);
+  width: min(420px, calc(100vw - 28px)); max-height: calc(100vh - 90px); overflow: auto;
+  padding: 12px; border: 1px solid var(--chassis-dark); border-radius: 4px;
+  background: var(--panel); color: var(--ink); box-shadow: 0 5px 16px #0003;
+  -webkit-app-region: no-drag;
 }
-#connection-filter-panel[hidden] { display: none; }
+#connection-filter-panel[hidden], #connection-filter-panel [hidden] { display: none; }
+.connection-filter-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 #connection-filter-panel label { display: grid; gap: 3px; min-width: 0; }
 #connection-filter-panel select { width: 100%; min-width: 0; }
-.connection-search-summary, #connection-filter-chips { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
-.connection-search-summary { flex: 1 1 180px; min-width: 0; min-height: 36px; color: var(--muted); }
-#connection-result-count { margin-inline-start: auto; }
-#connection-filter-chips .button, #connection-clear-all { min-height: 26px; padding: 0 7px; }
-#connection-filter-chips { min-width: 0; }
-#connection-filter-chips .button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
-.connection-search-tools [hidden] { display: none; }
+.connection-search-summary, #connection-filter-chips { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; min-width: 0; }
+.connection-search-summary { justify-content: space-between; color: var(--muted); }
+#connection-filter-panel .button {
+  display: inline-flex; flex: 0 1 auto; align-items: center; justify-content: center;
+  width: auto; height: auto; min-height: 28px; max-width: 100%; padding: 3px 8px;
+  color: var(--ink); background: var(--field); white-space: normal; overflow-wrap: anywhere;
+}
 
 .ssh-route-config { min-width: 0; margin: 18px 0; padding: 16px; border: 1px solid var(--border, #70777b); border-radius: 6px; }
 .ssh-route-config p { overflow-wrap: anywhere; }
