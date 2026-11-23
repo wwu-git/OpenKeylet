@@ -38,9 +38,12 @@ try {
       if(command==="system_integration_status") return {desktopShortcut:false,launchAtLogin:false};
       if(command==="update_settings") {Object.assign(state.settings,args.patch);return state.settings;}
       if(command==="save_connection") {
+        if (fixture.failSave) throw Error("Synthetic save failure");
         fixture.saved.push(structuredClone(args.input));
-        const item = {...args.input,id:String(fixture.saved.length),updatedAt:new Date().toISOString(),capabilities:[],passkeys:[],secret:{fields:[]},modules:args.input.modules.map(m=>({...m,secret:true,configured:true,value:""}))};
-        state.connections.push(item);return item;
+        const item = {...args.input,id:args.input.id || String(fixture.saved.length),updatedAt:new Date().toISOString(),capabilities:[],passkeys:[],secret:{fields:[]},host:args.input.modules.find(m=>m.kind==='host')?.value||'',port:Number(args.input.modules.find(m=>m.kind==='port')?.value||0),baseUrl:args.input.modules.find(m=>m.kind==='url')?.value||'',modules:args.input.modules.map(m=>({...m,secret:!['host','url','port'].includes(m.kind),configured:true,value:['host','url','port'].includes(m.kind)?m.value:""}))};
+        const index = state.connections.findIndex(existing=>existing.id===item.id);
+        if (index<0) state.connections.push(item); else state.connections[index]=item;
+        return item;
       }
       if(command==="generate_password") return "Aa1!".repeat(32).slice(0,args.options.length);
       if(command==="copy_owner_value") {fixture.copies.push(args.value);return;}
@@ -187,6 +190,106 @@ try {
   await page.locator('#connection-clear-all').click();
   await projectSearch.press('Escape');
   await page.setViewportSize({width:690,height:1000});
+  await page.evaluate(async () => {
+    fixture.state.connections = [{id:'addresses',name:'Multiple addresses',itemType:'custom',enabled:true,folder:'',host:'a.example',port:22,baseUrl:'https://a.example/',updatedAt:'original',modules:[
+      {kind:'host',value:'a.example',alternateValues:['b.example'],agentVisible:true},
+      {kind:'url',value:'https://a.example/',alternateValues:['https://b.example/'],agentVisible:true},
+      {kind:'port',value:'22',agentVisible:true}
+    ]}];
+    await refresh();
+  });
+  const hostModule = page.locator('#module-list [data-kind="host"]');
+  const urlModule = page.locator('#module-list [data-kind="url"]');
+  const addressValues = module => module.locator('[data-module-value], [data-module-alternate-value]').evaluateAll(inputs=>inputs.map(input=>input.value));
+  await page.locator('[data-item-id="addresses"] .item-disclosure').click();
+  await hostModule.locator('[data-add-address]').click();
+  await hostModule.locator('[data-module-alternate-value]').last().fill('c.example');
+  await hostModule.locator('[data-default-address="1"]').click();
+  assert.deepEqual(await addressValues(hostModule), ['b.example','a.example','c.example']);
+  assert.equal(await page.locator('#ssh-trust-probe').isDisabled(), true, 'Changing the draft default disables trust actions for the saved host');
+  await hostModule.locator('[data-remove-address="0"]').click();
+  assert.deepEqual(await addressValues(hostModule), ['a.example','c.example']);
+  await hostModule.locator('[data-default-address="1"]').click();
+  await urlModule.locator('[data-add-address]').click();
+  await urlModule.locator('[data-module-alternate-value]').last().fill('https://c.example/');
+  await urlModule.locator('[data-default-address="1"]').click();
+  assert.deepEqual(await addressValues(urlModule), ['https://b.example/','https://a.example/','https://c.example/']);
+  await urlModule.locator('[data-remove-address="0"]').click();
+  assert.deepEqual(await addressValues(urlModule), ['https://a.example/','https://c.example/']);
+  await urlModule.locator('[data-default-address="1"]').click();
+  await hostModule.locator('[data-module-agent-visible]').click();
+  await hostModule.locator('[data-module-drag-handle]').press('ArrowDown');
+  assert.deepEqual(await addressValues(hostModule), ['c.example','a.example']);
+  assert.equal(await hostModule.locator('[data-module-agent-visible]').getAttribute('aria-pressed'), 'false');
+  await page.locator('[data-language="en"]').click();
+  assert.deepEqual(await addressValues(urlModule), ['https://c.example/','https://a.example/']);
+  await page.locator('[data-language="zh"]').click();
+  for (const width of [690,460]) {
+    await page.setViewportSize({width,height:1000});
+    for (const theme of ['dark','light']) {
+      if (await page.locator('html').getAttribute('data-theme') !== theme) await page.locator('#theme-toggle').click();
+      await urlModule.scrollIntoViewIfNeeded();
+      assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+      assert.equal(await page.locator('.module-address-line').evaluateAll(rows=>rows.every(row=>row.getBoundingClientRect().right<=innerWidth && row.scrollWidth<=row.clientWidth+1)),true);
+      await page.screenshot({path:path.join(artifacts,`multiple-addresses-${width}-${theme}.png`)});
+      await page.locator('#module-list').screenshot({path:path.join(artifacts,`multiple-address-modules-${width}-${theme}.png`)});
+    }
+  }
+  await page.setViewportSize({width:460,height:1000});
+  await page.locator('[data-language="en"]').click();
+  await page.evaluate(()=>{document.documentElement.dataset.textSize='large';});
+  for (const theme of ['dark','light']) {
+    if (await page.locator('html').getAttribute('data-theme') !== theme) await page.locator('#theme-toggle').click();
+    await urlModule.scrollIntoViewIfNeeded();
+    assert.equal(await page.locator('.module-addresses .small-button').evaluateAll(buttons=>buttons.every(button=>button.scrollWidth<=button.clientWidth+1 && button.scrollHeight<=button.clientHeight+1)),true);
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+    await page.screenshot({path:path.join(artifacts,`multiple-addresses-460-large-en-${theme}.png`)});
+    await page.locator('#module-list').screenshot({path:path.join(artifacts,`multiple-address-modules-460-large-en-${theme}.png`)});
+  }
+  await page.evaluate(()=>{document.documentElement.dataset.textSize='standard';});
+  await page.locator('[data-language="zh"]').click();
+  await page.setViewportSize({width:690,height:1000});
+  for (const invalid of ['', 'https://c.example/', 'file:///tmp/test']) {
+    await urlModule.locator('[data-module-alternate-value]').fill(invalid);
+    await page.locator('#save-connection-button').click();
+    assert.equal(await page.locator('#connection-modal').isVisible(),true);
+    assert.equal(await page.evaluate(()=>fixture.saved.length),0);
+    assert.equal(await page.evaluate(()=>fixture.state.connections[0].updatedAt),'original');
+  }
+  await urlModule.locator('[data-module-alternate-value]').fill('https://a.example/');
+  await page.locator('[data-item-id="addresses"] .item-disclosure').click();
+  await page.waitForFunction(()=>fixture.drafts.some(d=>d.input.id==='addresses'));
+  await page.locator('#connection-modal').waitFor({state:'hidden'});
+  assert.deepEqual(await page.evaluate(()=>fixture.state.connections[0].modules[0].alternateValues),['b.example']);
+  await page.locator('#drafts-button').click();
+  assert.deepEqual(await addressValues(hostModule),['c.example','a.example']);
+  assert.deepEqual(await addressValues(urlModule),['https://c.example/','https://a.example/']);
+  assert.equal(await hostModule.locator('[data-module-agent-visible]').getAttribute('aria-pressed'),'false');
+  await page.evaluate(()=>{fixture.failSave=true;});
+  await page.locator('#save-connection-button').click();
+  assert.equal(await page.evaluate(()=>fixture.state.connections[0].updatedAt),'original');
+  assert.equal(await page.locator('#connection-modal').isVisible(),true);
+  await page.evaluate(()=>{fixture.failSave=false;});
+  await page.locator('#save-connection-button').click();
+  await page.locator('#connection-modal').waitFor({state:'hidden'});
+  await page.locator('[data-item-id="addresses"] .item-disclosure').click();
+  assert.deepEqual(await addressValues(hostModule),['c.example','a.example']);
+  assert.deepEqual(await addressValues(urlModule),['https://c.example/','https://a.example/']);
+  await urlModule.locator('[data-module-alternate-value]').fill('https://only-other-changed.example/');
+  await page.locator('#save-connection-button').click();
+  await page.locator('#connection-modal').waitFor({state:'hidden'});
+  await fillItemSearch('only-other-changed.example');
+  assert.deepEqual(await visible(),['addresses']);
+  await projectSearch.press('Escape');
+  await projectSearch.press('Escape');
+  await page.locator('[data-item-id="addresses"] .item-disclosure').click();
+  assert.deepEqual(await addressValues(urlModule),['https://c.example/','https://only-other-changed.example/']);
+  await hostModule.locator('[data-remove-address="0"]').click();
+  await hostModule.locator('[data-remove-address="0"]').click();
+  assert.deepEqual(await addressValues(hostModule),[''], 'Removing the final address leaves one editable empty default');
+  await page.locator('[data-item-id="addresses"] .item-disclosure').click();
+  await page.locator('#connection-modal').waitFor({state:'hidden'});
+  await page.evaluate(()=>{fixture.saved=[];});
   await page.evaluate(async () => {
     fixture.state.connections = [];
     fixture.drafts = [];
@@ -344,5 +447,5 @@ try {
   await page.screenshot({path:path.join(artifacts,"narrow-card-editor.png")});
   assert.ok(await page.evaluate(()=>document.querySelector("#connection-modal .modal-card").getBoundingClientRect().bottom<=innerHeight));
   assert.deepEqual(errors,[]);
-  console.log(JSON.stringify({ok:true,checks:["combined add/draft selector","draft preservation and recovery","card editor","encrypted field payload","one header search and filter panel with Ctrl/Cmd+F and independent page queries","combined keyword, type, exact folder and enabled status filters","unsaved edits survive filtering and are saved as drafts","460px filter controls","multiline secure note","generator inserts password","backup password flow","multiple website rules","migration preview/cancel/commit","password history","trash restore and purge from settings","narrow layout"],artifacts},null,2));
+  console.log(JSON.stringify({ok:true,checks:["combined add/draft selector","draft preservation and recovery","card editor","encrypted field payload","one header search and filter panel with Ctrl/Cmd+F and independent page queries","multiple host and URL addresses, default switching, removal, drafts, failed save and address search","combined keyword, type, exact folder and enabled status filters","unsaved edits survive filtering and are saved as drafts","460px filter controls","multiline secure note","generator inserts password","backup password flow","multiple website rules","migration preview/cancel/commit","password history","trash restore and purge from settings","narrow layout"],artifacts},null,2));
 } finally {await browser.close();server.close();}

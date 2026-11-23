@@ -927,7 +927,7 @@ function matchesConnectionFilters(item, words) {
   if (currentItemStatusFilter !== 'all' && Boolean(item.enabled) !== (currentItemStatusFilter === 'enabled')) return false;
   if (!words.length) return true;
   const fields = (item.secret?.fields || []).map(field => field.name);
-  const addresses = (item.loginUris || []).map(rule => rule.uri);
+  const addresses = [...(item.loginUris || []).map(rule => rule.uri), ...(item.modules || []).filter(module => module.kind === 'host' || module.kind === 'url').flatMap(module => [module.value || '', ...(module.alternateValues || [])])];
   const searchable = normalizeSearch([
     item.name, item.description, item.folder, item.host, item.baseUrl, ...addresses,
     itemTypeLabel(item.itemType), itemDisplayType(item), ...itemCapabilities(item), itemDetail(item), itemPermission(item), ...fields,
@@ -1215,6 +1215,7 @@ function syncModuleDraft() {
       kind: row.dataset.kind,
       name: $('[data-module-name]', row)?.value ?? row.dataset.name ?? '',
       value: $('[data-module-value]', row)?.value ?? '',
+      alternateValues: $$('[data-module-alternate-value]', row).map(input => input.value),
       secretValue: $('[data-secret-value]', row)?.value ?? '',
       configured: row.dataset.configured === 'true',
       existing: row.dataset.existing === 'true',
@@ -1273,9 +1274,19 @@ function renderModules() {
         : `<div class="secret-input-control module-secret-control"><input class="input" data-secret-value type="password" autocomplete="off" value="${escapeHtml(module.secretValue || '')}" placeholder="${placeholder}" /></div>`;
       actions = `${secretActionButton('reveal')}${secretActionButton('copy')}`;
       if (module.kind === 'password') control += `<button class="small-button" type="button" data-generate-password>${localized('生成密码', 'GENERATE')}</button>`;
+    } else if (module.kind === 'host' || module.kind === 'url') {
+      const addresses = [module.value || '', ...(module.alternateValues || [])];
+      const placeholder = module.kind === 'url' ? 'https://api.example.com/v1/' : 'host.example.com';
+      control = `<div class="module-addresses">${addresses.map((address, addressIndex) => {
+        const addressLabel = localized(`${moduleLabel(module.kind)} 地址 ${addressIndex + 1}`, `${moduleLabel(module.kind)} address ${addressIndex + 1}`);
+        const defaultLabel = localized('设为默认', 'Make default');
+        const removeAddressLabel = localized(`删除${addressLabel}`, `Remove ${addressLabel}`);
+        return `<div class="module-address-line"><input class="input" ${addressIndex === 0 ? 'data-module-value' : 'data-module-alternate-value'} type="text" value="${escapeHtml(address)}" placeholder="${placeholder}" aria-label="${escapeHtml(addressLabel)}" /><button type="button" class="small-button module-address-default" data-default-address="${addressIndex}" aria-label="${escapeHtml(`${defaultLabel} ${addressLabel}`)}" aria-pressed="${addressIndex === 0}" ${addressIndex === 0 ? 'disabled' : ''}>${addressIndex === 0 ? localized('默认', 'Default') : defaultLabel}</button><button type="button" class="small-button module-address-remove" data-remove-address="${addressIndex}" aria-label="${escapeHtml(removeAddressLabel)}">×</button></div>`;
+      }).join('')}<button type="button" class="small-button module-address-add" data-add-address>${localized('添加地址', 'Add address')}</button></div>`;
+      actions = `<span class="module-action-spacer" aria-hidden="true"></span>${secretActionButton('copy', false)}`;
     } else {
       const inputType = module.kind === 'port' ? 'number' : 'text';
-      const placeholder = module.kind === 'url' ? 'api.example.com/v1/' : module.kind === 'host' ? 'host.example.com' : '22';
+      const placeholder = '22';
       control = `<input class="input" data-module-value type="${inputType}" ${module.kind === 'port' ? 'min="1" max="65535"' : ''} value="${escapeHtml(module.value || '')}" placeholder="${placeholder}" />`;
       actions = `<span class="module-action-spacer" aria-hidden="true"></span>${secretActionButton('copy', false)}`;
     }
@@ -1340,6 +1351,7 @@ function addModule(kind, options = {}) {
     kind,
     name: kind === 'customSecret' ? '' : kind,
     value: kind === 'port' ? '22' : '',
+    alternateValues: [],
     secretValue: '',
     configured: false,
     existing: false,
@@ -1525,7 +1537,7 @@ function applyTemplate(template) {
     blank: [],
   };
   value('#connection-type', template === 'blank' ? 'custom' : template);
-  currentModules = (presets[template] || []).map((kind) => ({ kind, name: kind, value: kind === 'port' ? '22' : '', secretValue: '', configured: false, existing: false, privateKeyName: '', pending: '', agentVisible: defaultModuleAgentVisible(kind) }));
+  currentModules = (presets[template] || []).map((kind) => ({ kind, name: kind, value: kind === 'port' ? '22' : '', alternateValues: [], secretValue: '', configured: false, existing: false, privateKeyName: '', pending: '', agentVisible: defaultModuleAgentVisible(kind) }));
   $('#template-picker').classList.add('hidden');
   renderModules();
 }
@@ -1636,7 +1648,7 @@ async function openEditor(item = null, draft = null) {
     currentModules = (source?.modules || []).map((module) => {
       const secretName = module.kind === 'customSecret' ? module.name : module.kind;
       const privateKeyName = draft?.input?.secrets?.privateKeyName || item?.privateKeyName || '';
-      return { ...module, secretValue: ownerValues[secretName] || '', configured: Boolean(module.configured || ownerValues[secretName]), existing: Boolean(item), privateKeyName: module.kind === 'privateKey' ? privateKeyName : '', pending: '', agentVisible: typeof module.agentVisible === 'boolean' ? module.agentVisible : defaultModuleAgentVisible(module.kind) };
+      return { ...module, alternateValues: [...(module.alternateValues || [])], secretValue: ownerValues[secretName] || '', configured: Boolean(module.configured || ownerValues[secretName]), existing: Boolean(item), privateKeyName: module.kind === 'privateKey' ? privateKeyName : '', pending: '', agentVisible: typeof module.agentVisible === 'boolean' ? module.agentVisible : defaultModuleAgentVisible(module.kind) };
     });
     renderModules();
     if (ociState) {
@@ -1706,10 +1718,31 @@ function collectModules(validate = true) {
       const normalizedName = name.toLocaleLowerCase().replace(/[\s_-]+/g, '');
       if (validate && [...Object.keys(MODULE_DEFS).map(k => k.toLowerCase()), 'token', 'apikey'].includes(normalizedName)) throw new Error(localized(`字段名与内置模块冲突：${name}`, `Field name conflicts with a built-in module: ${name}`));
     }
+    if (validate && (module.kind === 'host' || module.kind === 'url')) {
+      const addresses = [String(module.value || '').trim(), ...(module.alternateValues || []).map(address => String(address).trim())];
+      const seen = new Set();
+      for (const address of addresses) {
+        if (!address && addresses.length === 1) continue;
+        if (!address) throw new Error(localized('请填写地址，或删除空白地址行', 'Enter an address or remove the empty address row'));
+        let normalized;
+        if (module.kind === 'host') {
+          if (/\s/.test(address)) throw new Error(localized('主机地址不能包含空白字符', 'Host addresses cannot contain whitespace'));
+          normalized = address.replace(/^\[|\]$/g, '').toLowerCase();
+        } else {
+          let url;
+          try { url = new URL(address.includes('://') ? address : `https://${address}`); }
+          catch { throw new Error(localized('请输入有效的服务 URL', 'Enter a valid service URL')); }
+          if (!['http:', 'https:'].includes(url.protocol) || !url.hostname || url.username || url.password) throw new Error(localized('服务 URL 必须使用 HTTP/HTTPS，且不能包含账号密码', 'Service URLs must use HTTP/HTTPS without embedded credentials'));
+          normalized = url.href;
+        }
+        if (seen.has(normalized)) throw new Error(localized('地址不能重复', 'Addresses must be unique'));
+        seen.add(normalized);
+      }
+    }
     const uniqueName = name.toLocaleLowerCase().replace(/[\s_-]+/g, '');
     if (validate && name && secretNames.has(uniqueName)) throw new Error(localized(`字段名重复：${name}`, `Duplicate field name: ${name}`));
     if (name) secretNames.add(uniqueName);
-    modules.push({ id: module.id, kind: module.kind, name: module.kind === 'customSecret' ? name : '', value: MODULE_DEFS[module.kind]?.secret ? '' : String(module.value || '').trim(), agentVisible: Boolean(module.agentVisible) });
+    modules.push({ id: module.id, kind: module.kind, name: module.kind === 'customSecret' ? name : '', value: MODULE_DEFS[module.kind]?.secret ? '' : String(module.value || '').trim(), alternateValues: (module.alternateValues || []).map(address => String(address).trim()), agentVisible: Boolean(module.agentVisible) });
     const fieldValue = module.secretValue || '';
     if (name === 'password') secrets.password = fieldValue;
     else if (name === 'passphrase') secrets.passphrase = fieldValue;
@@ -2166,6 +2199,30 @@ document.addEventListener('click', async (event) => {
   if (copyInput || copyModule) {
     const input = copyInput ? $(`#${copyInput.dataset.copyInput}`) : $('[data-secret-value], [data-module-value]', copyModule.closest('.module-row'));
     try { await api.copyOwnerValue(input.value); toast(localized('已复制', 'Copied')); } catch (error) { toast(cleanError(error), 'error'); }
+  }
+  const addressAction = event.target.closest('[data-add-address], [data-default-address], [data-remove-address]');
+  if (addressAction) {
+    syncModuleDraft();
+    const moduleIndex = Number(addressAction.closest('.module-row').dataset.moduleIndex);
+    const module = currentModules[moduleIndex];
+    const addresses = [module.value || '', ...(module.alternateValues || [])];
+    let focusedIndex = 0;
+    if (addressAction.hasAttribute('data-add-address')) {
+      addresses.push('');
+      focusedIndex = addresses.length - 1;
+    } else if (addressAction.hasAttribute('data-default-address')) {
+      const index = Number(addressAction.dataset.defaultAddress);
+      [addresses[0], addresses[index]] = [addresses[index], addresses[0]];
+    } else {
+      const index = Number(addressAction.dataset.removeAddress);
+      addresses.splice(index, 1);
+      if (!addresses.length) addresses.push('');
+      focusedIndex = Math.min(index, addresses.length - 1);
+    }
+    [module.value, ...module.alternateValues] = addresses;
+    renderModules();
+    const row = $$('.module-row', $('#module-list'))[moduleIndex];
+    $$('[data-module-value], [data-module-alternate-value]', row)[focusedIndex]?.focus();
   }
   const toggleModuleSecret = event.target.closest('[data-toggle-module-secret]');
   if (toggleModuleSecret) {
