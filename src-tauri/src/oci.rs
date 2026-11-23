@@ -378,6 +378,62 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn oci_key_bom_import_preserves_the_signature() {
+        let pem = format!(" \n\u{feff}{}\r\nOCI_API_KEY\r\n", KEY.replace('\n', "\r\n"));
+        let credential = Credential::new(config(), &pem).unwrap();
+        let input = ApiRequestInput {
+            method: "GET".into(),
+            ..Default::default()
+        };
+        let url = Url::parse(&format!(
+            "https://{HOST}{INSTANCES_PATH}?compartmentId=ocid1.compartment.oc1..test&page=a%2Bb+c"
+        ))
+        .unwrap();
+        let (_, header) = prepare(&credential, url, &input, DATE).unwrap();
+        let signature = header
+            .to_str()
+            .unwrap()
+            .rsplit_once("signature=\"")
+            .unwrap()
+            .1
+            .trim_end_matches('"');
+        assert_eq!(
+            signature,
+            include_str!("../tests/fixtures/oci/list-instances.signature").trim()
+        );
+    }
+
+    #[test]
+    fn oci_key_errors_classify_invalid_input_without_echoing_it() {
+        for (pem, expected) in [
+            (String::new(), "OCI_KEY_EMPTY"),
+            ("OCI-KEY-ERROR-MARKER".into(), "OCI_KEY_FORMAT"),
+            (
+                "-----BEGIN ENCRYPTED PRIVATE KEY-----\nOCI-KEY-ERROR-MARKER\n-----END ENCRYPTED PRIVATE KEY-----".into(),
+                "OCI_KEY_ENCRYPTED",
+            ),
+            (
+                "-----BEGIN PRIVATE KEY-----\nOCI-KEY-ERROR-MARKER\n-----END PRIVATE KEY-----".into(),
+                "OCI_KEY_BASE64",
+            ),
+            (
+                format!("-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----", STANDARD.encode(b"OCI-KEY-ERROR-MARKER")),
+                "OCI_KEY_INVALID",
+            ),
+            (
+                "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n-----END PRIVATE KEY-----".into(),
+                "OCI_KEY_ALGORITHM",
+            ),
+            ("x".repeat(64 * 1024 + 1), "OCI_KEY_TOO_LARGE"),
+        ] {
+            let error = validate_pem(&pem).unwrap_err().to_string();
+            assert!(error.starts_with(expected), "{error}");
+            assert!(!error.contains("OCI-KEY-ERROR-MARKER"));
+            assert!(!error.contains("MC4CAQAw"));
+        }
+    }
+
+    #[test]
     fn oci_rejects_targets_options_and_keys_outside_the_first_release() {
         let config = config();
         let mut credential = Credential::new(config.clone(), KEY).unwrap();
