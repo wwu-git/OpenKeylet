@@ -17,7 +17,7 @@ const server = http.createServer(async(req,res) => {
   } catch { res.writeHead(404); res.end(); }
 });
 server.listen(0,"127.0.0.1"); await once(server,"listening");
-const browser = await chromium.launch({headless:true});
+const browser = await chromium.launch({headless:true,channel:process.env.OPENKEYLET_TEST_CHROME || undefined});
 try {
   const page = await browser.newPage({viewport:{width:690,height:1000}});
   const errors = []; page.on("pageerror",e=>errors.push(e.message));
@@ -71,9 +71,13 @@ try {
   });
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   await page.locator("#connections-list .empty-state").waitFor();
-  const projectSearch = page.locator('#connection-search');
-  const fillItemSearch = value => projectSearch.fill(value);
-  assert.equal(await projectSearch.isVisible(), true);
+  const projectSearch = page.locator('#title-search-input');
+  const fillItemSearch = async value => {
+    if (!await projectSearch.isVisible()) await page.locator('#title-search-toggle').click();
+    await projectSearch.fill(value);
+  };
+  assert.equal(await page.locator('#page-connections input[type="search"]').count(), 0);
+  assert.equal(await page.locator('[data-page-search="connections"]').count(), 1);
   await page.evaluate(async () => {
     const item = { name: 'GitHub', description: '生产', itemType: 'api', enabled: true, folder: 'agent',
       capabilities: ['http'], baseUrl: 'https://api.example.invalid', modules: [{kind: 'url', value: 'https://api.example.invalid'}] };
@@ -100,10 +104,13 @@ try {
   assert.match(await page.locator('#connection-result-count').textContent(), /1\s*\/\s*5/);
   await page.keyboard.press('Control+f');
   assert.equal(await projectSearch.evaluate(el => document.activeElement === el), true);
-  await page.locator('#connection-clear-query').click();
+  assert.deepEqual(await projectSearch.evaluate(el => [el.selectionStart,el.selectionEnd]), [0,'生产 github'.length]);
+  await projectSearch.press('Escape');
   assert.equal(await projectSearch.inputValue(), '');
   assert.deepEqual(await visible(), ['exact'], 'Clearing keywords preserves the active filters');
   await page.locator('[data-clear-item-filter="status"]').click();
+  assert.equal(await projectSearch.isVisible(), true);
+  assert.equal(await projectSearch.evaluate(el => document.activeElement === el), true);
   assert.deepEqual(await visible(), ['exact', 'disabled']);
   await filters.click();
   await status.selectOption('enabled');
@@ -122,8 +129,42 @@ try {
   await page.locator('#connection-modal').waitFor({state: 'hidden'});
   await page.waitForFunction(() => fixture.drafts.some(d => d.input.description === '未保存的编辑'));
   await page.locator('#connection-clear-all').click();
-  assert.equal(await page.locator('#connection-search').inputValue(), '');
+  assert.equal(await projectSearch.inputValue(), '');
   assert.equal((await visible()).length, 5);
+  await fillItemSearch('github');
+  for (const [pageName, query] of [['activity', '独立记录'], ['settings', '安全']]) {
+    await page.locator(`[data-page="${pageName}"]`).click();
+    await page.keyboard.press('Control+f');
+    assert.equal(await projectSearch.inputValue(), '');
+    await projectSearch.fill(query);
+  }
+  await page.locator('[data-page="connections"]').click();
+  await page.keyboard.press('Meta+f');
+  assert.equal(await projectSearch.inputValue(), 'github');
+  assert.equal(await projectSearch.evaluate(el => document.activeElement === el), true);
+  for (const [pageName, query] of [['activity', '独立记录'], ['settings', '安全']]) {
+    await page.locator(`[data-page="${pageName}"]`).click();
+    await page.keyboard.press('Control+f');
+    assert.equal(await projectSearch.inputValue(), query);
+    await projectSearch.press('Escape');
+  }
+  await page.locator('[data-page="connections"]').click();
+  await fillItemSearch('github');
+  for (const width of [690, 460]) {
+    await page.setViewportSize({width,height:1000});
+    for (const theme of ['dark', 'light']) {
+      if (await page.locator('html').getAttribute('data-theme') !== theme) await page.locator('#theme-toggle').click();
+      await page.keyboard.press('Control+f');
+      assert.equal(await page.locator('[data-page-search="connections"]').count(), 1);
+      assert.equal(await projectSearch.isVisible(), true);
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+      const toolbar = await page.locator('.connection-search-tools').evaluate(el => ({width:el.clientWidth,scroll:el.scrollWidth}));
+      assert.ok(toolbar.scroll <= toolbar.width + 1, JSON.stringify(toolbar));
+      await page.screenshot({path:path.join(artifacts, `single-search-${width}-${theme}.png`)});
+    }
+  }
+  await projectSearch.press('Escape');
+  await page.setViewportSize({width:690,height:1000});
   await page.evaluate(async () => {
     fixture.state.connections = [];
     fixture.drafts = [];
@@ -268,10 +309,12 @@ try {
     const rect = el.getBoundingClientRect();
     return rect.left >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight;
   }));
-  assert.ok(await projectSearch.evaluate(el => el.getBoundingClientRect().width >= 100));
+  assert.equal(await projectSearch.isHidden(), true);
   await page.screenshot({path:path.join(artifacts,'narrow-filter-panel.png')});
   await filters.press('Escape');
   assert.equal(await page.locator('#connection-filter-panel').isHidden(), true);
+  await page.keyboard.press('Control+f');
+  assert.ok(await projectSearch.evaluate(el => el.getBoundingClientRect().width >= 100));
   await page.screenshot({path:path.join(artifacts,"narrow-vault.png")});
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
   await page.locator("#add-connection-button").click();
@@ -279,5 +322,5 @@ try {
   await page.screenshot({path:path.join(artifacts,"narrow-card-editor.png")});
   assert.ok(await page.evaluate(()=>document.querySelector("#connection-modal .modal-card").getBoundingClientRect().bottom<=innerHeight));
   assert.deepEqual(errors,[]);
-  console.log(JSON.stringify({ok:true,checks:["combined add/draft selector","draft preservation and recovery","card editor","encrypted field payload","combined keyword, type, exact folder and enabled status filters","unsaved edits survive filtering and are saved as drafts","460px filter controls","multiline secure note","generator inserts password","backup password flow","multiple website rules","migration preview/cancel/commit","password history","trash restore and purge from settings","narrow layout"],artifacts},null,2));
+  console.log(JSON.stringify({ok:true,checks:["combined add/draft selector","draft preservation and recovery","card editor","encrypted field payload","one header search with Ctrl/Cmd+F and independent page queries","combined keyword, type, exact folder and enabled status filters","unsaved edits survive filtering and are saved as drafts","460px filter controls","multiline secure note","generator inserts password","backup password flow","multiple website rules","migration preview/cancel/commit","password history","trash restore and purge from settings","narrow layout"],artifacts},null,2));
 } finally {await browser.close();server.close();}

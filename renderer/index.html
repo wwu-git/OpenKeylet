@@ -133,23 +133,17 @@
             </div>
           </header>
           <div class="connection-search-tools">
-            <div class="connection-search-row">
-              <div class="connection-search-field">
-                <input id="connection-search" type="search" autocomplete="off" aria-label="Search projects" />
-                <button type="button" class="button quiet" id="connection-clear-query" aria-label="Clear search" hidden>×</button>
-              </div>
-              <div id="connection-filter-menu">
-                <button type="button" class="button quiet" id="connection-filter-toggle" aria-expanded="false" aria-controls="connection-filter-panel">Filters</button>
-                <div id="connection-filter-panel" hidden>
-                  <label><span id="connection-folder-filter-label">Folder</span><select id="connection-folder-filter"></select></label>
-                  <label><span id="connection-status-filter-label">Status</span><select id="connection-status-filter"></select></label>
-                </div>
-              </div>
-            </div>
             <div class="connection-search-summary">
               <div id="connection-filter-chips"></div>
               <span id="connection-result-count" role="status" aria-atomic="true"></span>
               <button type="button" class="button quiet" id="connection-clear-all" data-action="clear-connection-filters" hidden>Clear all</button>
+            </div>
+            <div id="connection-filter-menu">
+              <button type="button" class="button quiet" id="connection-filter-toggle" aria-expanded="false" aria-controls="connection-filter-panel">Filters</button>
+              <div id="connection-filter-panel" hidden>
+                <label><span id="connection-folder-filter-label">Folder</span><select id="connection-folder-filter"></select></label>
+                <label><span id="connection-status-filter-label">Status</span><select id="connection-status-filter"></select></label>
+              </div>
             </div>
           </div>
           <div class="list-well"><div class="connections-grid" id="connections-list" tabindex="0" aria-label="Vault items"></div></div>

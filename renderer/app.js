@@ -835,7 +835,7 @@ function syncTitleSearch() {
   const input = $('#title-search-input');
   input.hidden = !open;
   input.dataset.pageSearch = activePage;
-  input.placeholder = `${label}…`;
+  input.placeholder = activePage === 'connections' ? localized('搜索项目名、主机或公开用途…', 'Search names, hosts, or descriptions…') : `${label}…`;
   input.setAttribute('aria-label', label);
   if (input.value !== pageSearch[activePage]) input.value = pageSearch[activePage];
   const button = $('#title-search-toggle');
@@ -872,13 +872,6 @@ function syncActivityFilterControl() {
 }
 
 function syncConnectionSearchControls(matchCount, editingOutsideFilters) {
-  const search = $('#connection-search');
-  search.placeholder = localized('搜索项目名、主机或公开用途…', 'Search names, hosts, or descriptions…');
-  search.setAttribute('aria-label', localized('搜索项目', 'Search projects'));
-  if (search.value !== pageSearch.connections) search.value = pageSearch.connections;
-  const clearQuery = $('#connection-clear-query');
-  clearQuery.hidden = !pageSearch.connections;
-  clearQuery.setAttribute('aria-label', localized('清除关键词', 'Clear search'));
   $('#connection-folder-filter-label').textContent = localized('文件夹', 'Folder');
   $('#connection-status-filter-label').textContent = localized('启用状态', 'Status');
 
@@ -2120,7 +2113,7 @@ $('#migration-confirm').onclick = async () => {
 
 document.addEventListener('click', async (event) => {
   if (event.target.closest('#title-search-toggle')) setTitleSearchOpen(!titleSearchOpen);
-  else if (titleSearchOpen && !event.target.closest('#title-search')) setTitleSearchOpen(false, false);
+  else if (titleSearchOpen && !event.target.closest('#title-search, [data-clear-item-filter], [data-action="clear-connection-filters"]')) setTitleSearchOpen(false, false);
   const filterButton = event.target.closest('.filter-strip button');
   if (filterButton && !switchSelectionPending) await selectFilterButton(filterButton);
   const languageButton = event.target.closest('[data-language]');
@@ -2254,7 +2247,7 @@ document.addEventListener('click', async (event) => {
     syncItemTypeFilter();
     syncTitleSearch();
     renderConnections();
-    $('#connection-search').focus();
+    setTitleSearchOpen(true);
   }
   if (action?.dataset.action === 'clear-activity-filters') {
     currentActivityFilter = 'all';
@@ -2331,17 +2324,6 @@ document.addEventListener('click', async (event) => {
   }
 });
 
-$('#connection-search').addEventListener('input', event => {
-  pageSearch.connections = event.target.value;
-  syncTitleSearch();
-  renderConnections();
-});
-$('#connection-clear-query').addEventListener('click', () => {
-  pageSearch.connections = '';
-  syncTitleSearch();
-  renderConnections();
-  $('#connection-search').focus();
-});
 $('#connection-folder-filter').addEventListener('change', event => {
   currentFolderFilter = event.target.value;
   renderConnections();
@@ -2357,7 +2339,7 @@ $('#connection-filter-chips').addEventListener('click', event => {
   if (kind === 'folder') currentFolderFilter = 'all';
   if (kind === 'status') currentItemStatusFilter = 'all';
   renderConnections();
-  $('#connection-search').focus();
+  setTitleSearchOpen(true);
 });
 function setConnectionFiltersOpen(open) {
   $('#connection-filter-panel').hidden = !open;
@@ -2773,11 +2755,6 @@ document.addEventListener('keydown', (event) => {
   const pageSearchAvailable = (inlineEditorItemId || $('#connection-modal').classList.contains('hidden')) && $('#owner-lock-layer').classList.contains('hidden') && !githubBackup.isOpen();
   if (pageSearchAvailable && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f' && !event.altKey) {
     event.preventDefault();
-    if (activePage === 'connections') {
-      $('#connection-search').focus();
-      $('#connection-search').select();
-      return;
-    }
     setTitleSearchOpen(true);
     const search = $(`[data-page-search="${activePage}"]`);
     search?.focus();
@@ -2790,11 +2767,6 @@ document.addEventListener('keydown', (event) => {
       event.preventDefault();
       setConnectionFiltersOpen(false);
       $('#connection-filter-toggle').focus();
-      return;
-    }
-    if (event.target.id === 'connection-search' && pageSearch.connections) {
-      event.preventDefault();
-      $('#connection-clear-query').click();
       return;
     }
     const search = event.target.closest?.('[data-page-search]');

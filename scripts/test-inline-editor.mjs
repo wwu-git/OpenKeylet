@@ -598,7 +598,7 @@ try {
   await page.locator('#title-search-toggle').click();
   assert.equal(await search.isHidden(), true);
   assert.equal(await page.locator('.connection-card').count(), 1, 'Collapsing search keeps its query');
-  const projectSearch = page.locator('#connection-search');
+  const projectSearch = page.locator('#title-search-input');
   await page.keyboard.press('Control+f');
   assert.equal(await projectSearch.evaluate(el => document.activeElement === el), true);
   assert.equal(await projectSearch.inputValue(), 'server');

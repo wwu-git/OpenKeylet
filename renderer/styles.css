@@ -1576,17 +1576,7 @@ html.platform-macos .nav-item small { line-height: 7px; }
 .agent-write-boundary { margin-top: 14px; line-height: 1.5; overflow-wrap: anywhere; }
 #agent-write-folders .agent-client-copy { overflow-wrap: anywhere; min-width: 0; }
 
-.connection-search-tools { position: relative; z-index: 2; padding: 0 13px 8px; }
-.connection-search-row { display: flex; align-items: center; gap: 8px; }
-.connection-search-field { position: relative; flex: 1; min-width: 0; }
-#connection-search {
-  width: 100%; min-width: 0; height: 36px; padding: 0 35px 0 10px;
-  border: 1px solid var(--chassis-dark); border-radius: 4px;
-  background: var(--panel); color: var(--ink); font: inherit; user-select: text;
-}
-#connection-search::placeholder { color: var(--muted); }
-#connection-search::-webkit-search-cancel-button { display: none; }
-#connection-clear-query { position: absolute; right: 3px; top: 3px; min-height: 30px; padding: 0 8px; }
+.connection-search-tools { position: relative; z-index: 2; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 0 13px 8px; }
 #connection-filter-menu { position: relative; flex: none; }
 #connection-filter-toggle { min-height: 36px; display: flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; }
 #connection-filter-toggle::after { content: "▾"; }
@@ -1600,7 +1590,7 @@ html.platform-macos .nav-item small { line-height: 7px; }
 #connection-filter-panel label { display: grid; gap: 3px; min-width: 0; }
 #connection-filter-panel select { width: 100%; min-width: 0; }
 .connection-search-summary, #connection-filter-chips { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
-.connection-search-summary { min-height: 24px; margin-top: 5px; color: var(--muted); }
+.connection-search-summary { flex: 1 1 180px; min-width: 0; min-height: 36px; color: var(--muted); }
 #connection-result-count { margin-inline-start: auto; }
 #connection-filter-chips .button, #connection-clear-all { min-height: 26px; padding: 0 7px; }
 #connection-filter-chips { min-width: 0; }
