@@ -28,6 +28,8 @@ pub struct LoginRule {
 #[derive(Clone, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateInput {
+    /// Existing enabled direct SSH project ID. Omit for direct connection.
+    pub ssh_jump_item_id: Option<String>,
     pub name: String,
     pub item_type: String,
     pub folder: String,
@@ -42,6 +44,9 @@ pub struct CreateInput {
 #[derive(Clone, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateInput {
+    /// Omit to preserve the route, null to clear it, or an existing direct SSH project ID.
+    #[serde(default, deserialize_with = "nullable_jump_id")]
+    pub ssh_jump_item_id: Option<Option<String>>,
     pub id: String,
     pub expected_revision: u64,
     pub name: Option<String>,
@@ -56,6 +61,14 @@ pub struct UpdateInput {
     #[serde(default)]
     pub modules: Vec<ModulePatch>,
 }
+fn nullable_jump_id<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
+fn jump_id(value: Option<String>) -> Result<Option<Uuid>> {
+    value.map(|id| Uuid::parse_str(&id).map_err(|_| anyhow::anyhow!("Invalid SSH jump project ID"))).transpose()
+}
+
 #[derive(Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WriteOutput {
@@ -120,6 +133,7 @@ impl Vault {
             modules:["host","port","username","password","privateKey","passphrase","url","apiCredential","totp","customSecret"].map(str::to_owned).to_vec(),
             ssh_auth_types:vec!["password".into(),"privateKey".into()], http_auth_types:vec!["bearer".into(),"apiKey".into(),"basic".into()],
             rules:vec![
+                "sshJumpItemId selects an existing enabled direct SSH project. Update omits it to preserve or uses null to clear. Single-hop only; host trust is device-local and cannot be modified through MCP.".into(),
                 "Create requires name, itemType, folder and modules; update requires item ID and expectedRevision. Omitted fields are preserved.".into(),
                 "New modules require kind and value; updates require module ID. port is an integer 1..65535; other values are strings. customSecret also requires a unique name.".into(),
                 "SSH requires username plus password/privateKey and explicit sshAuthType. API requires url plus explicit httpAuthType: bearer/apiKey use apiCredential; basic uses username/password; apiKey also requires authHeader.".into(),
@@ -134,6 +148,7 @@ impl Vault {
         self.update_document_with_result(|document| {
             authorize(&document.settings, request.folder.trim())?;
             let mut input: ConnectionInput=serde_json::from_value(serde_json::json!({"name":request.name,"itemType":request.item_type,"folder":request.folder.trim(),"description":request.description.unwrap_or_default(),"enabled":request.enabled.unwrap_or(true)}))?;
+            input.ssh_jump_item_id = jump_id(request.ssh_jump_item_id)?;
             set_auth(&mut input,request.ssh_auth_type,request.http_auth_type,request.auth_header)?;
             if let Some(rules)=request.login_uris { input.login_uris=login_rules(rules)?; }
             apply_modules(&mut input, &request.modules, false)?;
@@ -176,6 +191,10 @@ impl Vault {
             let mut input: ConnectionInput =
                 serde_json::from_value(serde_json::to_value(existing.portable())?)?;
             input.secrets = secrets.clone();
+            if let Some(value) = request.ssh_jump_item_id {
+                input.ssh_jump_item_id = jump_id(value)?;
+                input.ssh_jump_unresolved = false;
+            }
             if let Some(v) = request.name {
                 input.name = v;
             }

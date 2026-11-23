@@ -137,7 +137,9 @@ impl server::Handler for TestHandler {
     ) -> Result<()> {
         session.channel_success(channel)?;
         if command != b"hold" {
-            let output = if command == b"redaction" {
+            let output = if self.server.forward_port.is_some() {
+                b"jump-A".to_vec()
+            } else if command == b"redaction" {
                 b"jumpsecret jump anVtcA== jump%2B%2F".to_vec()
             } else {
                 b"target-B jump-simulated-password".to_vec()

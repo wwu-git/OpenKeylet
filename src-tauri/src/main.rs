@@ -35,7 +35,7 @@ async fn dispatch() -> Result<()> {
         }
         #[cfg(not(feature = "gui"))]
         anyhow::bail!(
-            "This is the headless version of OpenKeylet; use the mcp stdio, config, browser, backup, permissions, or github-backup subcommand"
+            "This is the headless version of OpenKeylet; use the mcp stdio, config, browser, backup, permissions, github-backup, or ssh-trust subcommand"
         );
     }
 

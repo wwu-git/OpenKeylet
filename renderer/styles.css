@@ -1606,3 +1606,13 @@ html.platform-macos .nav-item small { line-height: 7px; }
 #connection-filter-chips { min-width: 0; }
 #connection-filter-chips .button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .connection-search-tools [hidden] { display: none; }
+
+.ssh-route-config { min-width: 0; margin: 18px 0; padding: 16px; border: 1px solid var(--border, #70777b); border-radius: 6px; }
+.ssh-route-config p { overflow-wrap: anywhere; }
+.ssh-route-config .field { min-width: 0; }
+.ssh-route-config details { margin-top: 12px; }
+.ssh-route-config .button-row { flex-wrap: wrap; }
+.ssh-trust-confirm { display: flex; align-items: flex-start; gap: 8px; margin: 12px 0; }
+.ssh-trust-confirm input { flex: 0 0 auto; margin-top: 4px; }
+@media (max-width: 600px) { .ssh-route-config .field-grid { grid-template-columns: minmax(0, 1fr); } }
+#ssh-route-config .small-button { width: auto; height: auto; min-height: 36px; flex: 0 0 auto; padding: 6px 12px; white-space: nowrap; line-height: 1.4; }

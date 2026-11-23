@@ -193,6 +193,9 @@ function updateSettings(patch) {
   return operation;
 }
 
+let editorJumpSelection = "";
+let editorSshRouteMode = "direct";
+
 const api = {
   state: () => invoke('get_state'),
   ownerStatus: () => invoke('owner_status'),
@@ -215,6 +218,9 @@ const api = {
   history: (id) => invoke('owner_password_history', { id }),
   clearHistory: (id, expectedUpdatedAt) => invoke('owner_clear_password_history', { id, expectedUpdatedAt }),
   test: (id) => invoke('test_connection', { id }),
+  sshTrust: () => invoke('ssh_host_trust'),
+  probeSshHost: (id) => invoke('probe_ssh_host', { id }),
+  setSshTrust: (id, host, port, fingerprint) => invoke('set_ssh_host_trust', { id, host, port, fingerprint }),
   settings: updateSettings,
   systemIntegration: () => invoke('system_integration_status'),
   setDesktopShortcut: (enabled) => invoke('set_desktop_shortcut', { enabled }),
@@ -1227,6 +1233,7 @@ function syncModuleDraft() {
 }
 
 function renderModules() {
+  renderSshRoute();
   finishModulePointerDrag(false);
   const container = $('#module-list');
   if (!currentModules.length) {
@@ -1353,6 +1360,105 @@ function addModule(kind, options = {}) {
   const row = $$('.module-row').at(-1);
   ($('[data-module-name]', row) || $('[data-secret-value]', row) || $('[data-module-value]', row))?.focus();
 }
+
+function sshJumpCandidate(item) {
+  const configured = kind => item.modules?.some(module => module.kind === kind && (module.configured || module.value));
+  const mode = item.sshAuthType || 'password';
+  return item.id !== editorExistingItem?.id && item.enabled && !item.sshJumpItemId && !item.sshJumpUnresolved
+    && item.host && item.port > 0 && configured('username') && configured(mode);
+}
+
+function selectedSshJumpId() {
+  return editorSshRouteMode === 'jump' ? editorJumpSelection.replace(/^unresolved:/, '') || null : null;
+}
+
+function sshTrustReady() {
+  if (!editorExistingItem) return false;
+  if (editorSshRouteMode === 'jump' && !state.connections.some(item => item.id === editorJumpSelection && sshJumpCandidate(item))) return false;
+  const host = currentModules.find(module => module.kind === 'host')?.value?.trim() || '';
+  const port = Number(currentModules.find(module => module.kind === 'port')?.value || 22);
+  return host === editorExistingItem.host && port === editorExistingItem.port
+    && selectedSshJumpId() === (editorExistingItem.sshJumpItemId || null)
+    && !editorJumpSelection.startsWith('unresolved:') && !editorExistingItem.sshJumpUnresolved;
+}
+
+function renderSshRoute() {
+  const show = value('#connection-type') === 'ssh' || currentModules.some(module => module.kind === 'host') || editorSshRouteMode === 'jump';
+  $('#ssh-route-config').classList.toggle('hidden', !show);
+  $('#ssh-route-legend').textContent = localized('SSH 连接', 'SSH connection');
+  $('#ssh-route-mode-label').textContent = localized('连接方式', 'Connection method');
+  $('#ssh-route-mode option[value="direct"]').textContent = localized('直接连接', 'Direct');
+  $('#ssh-route-mode option[value="jump"]').textContent = localized('通过跳板项目', 'Through a jump project');
+  value('#ssh-route-mode', editorSshRouteMode);
+  $('#ssh-jump-label').textContent = localized('跳板项目', 'Jump project');
+  $('#ssh-jump-field').classList.toggle('hidden', editorSshRouteMode !== 'jump');
+  const select = $('#ssh-jump-item');
+  select.replaceChildren(new Option(localized('请选择已有项目', 'Select an existing project'), ''));
+  const candidates = state.connections.filter(sshJumpCandidate);
+  for (const item of candidates) select.add(new Option(`${item.name} · ${item.host}:${item.port}`, item.id));
+  if (editorJumpSelection && !candidates.some(item => item.id === editorJumpSelection)) select.add(new Option(localized('跳板不可用，请重新选择', 'Jump unavailable. Select again.'), editorJumpSelection));
+  select.value = editorJumpSelection;
+  const jump = candidates.find(item => item.id === editorJumpSelection);
+  $('#ssh-route-path').textContent = editorSshRouteMode === 'jump'
+    ? localized(`本机 → ${jump?.name || '跳板不可用'} → ${value('#connection-name') || '目标项目'}`, `Local → ${jump?.name || 'Jump unavailable'} → ${value('#connection-name') || 'Target'}`)
+    : localized('从本机直接连接目标。', 'Connect directly from this machine.');
+  $('#ssh-trust-summary').textContent = localized('本机主机身份信任', 'Local host identity');
+  $('#ssh-trust-note').textContent = sshTrustReady()
+    ? localized(`以下操作立即应用到已保存的 ${editorExistingItem.host}:${editorExistingItem.port}，不随项目取消撤销，也不随备份迁移。请先从可信来源核对指纹。`, `These actions immediately affect saved ${editorExistingItem.host}:${editorExistingItem.port}. Closing the editor does not undo them. Trust is device-local. Verify the fingerprint against a trusted source.`)
+    : localized('请先保存项目的主机、端口和跳板配置，再管理主机信任。', 'Save the host, port, and jump configuration before managing trust.');
+  $('#ssh-trust-fingerprint-label').textContent = localized('SHA256 主机指纹', 'SHA256 host fingerprint');
+  $('#ssh-trust-verified-label').textContent = localized('我已通过可信来源核对该指纹。', 'I verified this fingerprint against a trusted source.');
+  $('#ssh-trust-probe').textContent = localized('读取候选指纹', 'Read candidate fingerprint');
+  $('#ssh-trust-save').textContent = localized('确认并保存本机信任', 'Confirm and save local trust');
+  $('#ssh-trust-remove').textContent = localized('移除本机信任', 'Remove local trust');
+  for (const id of ['ssh-trust-probe','ssh-trust-save','ssh-trust-remove']) $(`#${id}`).disabled = !sshTrustReady();
+}
+
+async function refreshSshTrust() {
+  if (!sshTrustReady()) return;
+  const id = editorExistingItem.id;
+  const entries = await api.sshTrust();
+  if (editorExistingItem?.id !== id) return;
+  const entry = entries.find(entry => entry.itemId === id && entry.host === editorExistingItem.host.trim().replace(/^\[|\]$/g, '').toLowerCase() && entry.port === editorExistingItem.port);
+  $('#ssh-trust-status').textContent = entry ? localized(`已信任 ${entry.fingerprint}`, `Trusted ${entry.fingerprint}`) : localized('尚未信任。跳板连接会在认证前拒绝。', 'Not trusted. Jump connections stop before authentication.');
+}
+
+$('#ssh-route-mode').addEventListener('change', () => { editorSshRouteMode = value('#ssh-route-mode'); renderSshRoute(); });
+$('#ssh-jump-item').addEventListener('change', () => { editorJumpSelection = value('#ssh-jump-item'); renderSshRoute(); });
+$('#connection-form').addEventListener('input', event => {
+  if (event.target.closest('#module-list') || event.target.id === 'connection-name') { syncModuleDraft(); renderSshRoute(); }
+});
+$('#connection-type').addEventListener('change', renderSshRoute);
+$('#ssh-trust-details').addEventListener('toggle', () => { if ($('#ssh-trust-details').open) void refreshSshTrust().catch(error => toast(cleanError(error), 'error')); });
+$('#ssh-trust-probe').addEventListener('click', async () => {
+  try {
+    if (!sshTrustReady()) return;
+    const savedItem = editorExistingItem;
+    const result = await api.probeSshHost(savedItem.id);
+    if (editorExistingItem !== savedItem || !sshTrustReady()) return;
+    value('#ssh-trust-fingerprint', result.fingerprint);
+    $('#ssh-trust-verified').checked = false;
+    $('#ssh-trust-status').textContent = localized('候选指纹尚未验证，读取操作不会自动信任。', 'Candidate fingerprint is unverified. Reading it does not establish trust.');
+  } catch (error) { toast(cleanError(error), 'error'); }
+});
+$('#ssh-trust-fingerprint').addEventListener('input', () => { $('#ssh-trust-verified').checked = false; });
+$('#ssh-trust-save').addEventListener('click', async () => {
+  try {
+    if (!sshTrustReady()) return;
+    if (!$('#ssh-trust-verified').checked) throw new Error(localized('请先从可信来源核对指纹并勾选确认。', 'Verify the fingerprint against a trusted source and check the confirmation.'));
+    await api.setSshTrust(editorExistingItem.id, editorExistingItem.host, editorExistingItem.port, value('#ssh-trust-fingerprint').trim());
+    $('#ssh-trust-verified').checked = false;
+    await refreshSshTrust();
+    toast(localized('已保存本机信任。项目修改仍需点击保存。', 'Local trust saved. Item changes still require Save.'));
+  } catch (error) { toast(cleanError(error), 'error'); }
+});
+$('#ssh-trust-remove').addEventListener('click', async () => {
+  try {
+    if (!sshTrustReady()) return;
+    await api.setSshTrust(editorExistingItem.id, editorExistingItem.host, editorExistingItem.port, null);
+    await refreshSshTrust();
+  } catch (error) { toast(cleanError(error), 'error'); }
+});
 
 function renderOciKeyStatus() {
   $('#oci-key-status').textContent = ociEditor?.pendingId
@@ -1515,6 +1621,12 @@ async function openEditor(item = null, draft = null) {
     removedSecretFields = new Set();
     editorExistingItem = item;
     editorSourceInput = source;
+    editorJumpSelection = source?.sshJumpUnresolved ? `unresolved:${source?.sshJumpItemId || ''}` : source?.sshJumpItemId || '';
+    editorSshRouteMode = source?.sshJumpItemId || source?.sshJumpUnresolved ? 'jump' : 'direct';
+    $('#ssh-trust-details').open = false;
+    $('#ssh-trust-fingerprint').value = '';
+    $('#ssh-trust-verified').checked = false;
+    $('#ssh-trust-status').textContent = '';
     editorOpenedFromDraft = Boolean(draft);
     currentDraftId = draft?.id || '';
     value('#connection-id', item?.id);
@@ -1633,6 +1745,8 @@ function serializeItem(validate = true) {
     name,
     description: value('#connection-description'),
     enabled: $('#connection-enabled').checked,
+    sshJumpItemId: editorSshRouteMode === 'jump' ? (editorJumpSelection.replace(/^unresolved:/, '') || null) : null,
+    sshJumpUnresolved: editorSshRouteMode === 'jump' && (!editorJumpSelection || editorJumpSelection.startsWith('unresolved:')),
     sshAuthType: editorSourceInput?.sshAuthType || '',
     httpAuthType: editorSourceInput?.httpAuthType || 'auto',
     authHeader: editorSourceInput?.authHeader || '',

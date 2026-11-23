@@ -2704,7 +2704,7 @@ pub fn ssh_config_complete(item: &StoredConnection, secrets: &SecretBundle) -> b
     !item.host.trim().is_empty() && item.port > 0 && secrets.get("username").is_some()
         && match item.ssh_auth_type.as_str() {
             "privateKey" => secrets.get("privateKey").is_some(),
-            "password" => secrets.get("password").is_some(),
+            "" | "password" => secrets.get("password").is_some(),
             _ => false,
         }
 }

@@ -315,6 +315,8 @@ impl VaultMcp {
                     actions.push("http_send".to_owned());
                 }
                 Ok(ItemOutput {
+                    ssh_jump_item_id: decrypted.stored.ssh_jump_item_id.map(|id|id.to_string()),
+                    ssh_jump_unresolved: decrypted.stored.ssh_jump_unresolved,
                     id: decrypted.stored.id.to_string(),
                     revision: decrypted.stored.revision,
                     name: decrypted.stored.name,
@@ -867,6 +869,8 @@ struct ItemsSearchOutput {
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct ItemOutput {
+    ssh_jump_item_id: Option<String>,
+    ssh_jump_unresolved: bool,
     id: String,
     revision: u64,
     name: String,
@@ -1323,14 +1327,14 @@ impl VaultMcp {
         into_tool_result(self.vault.write_capabilities().map_err(|_| "Could not read write permissions".to_owned()))
     }
 
-    #[tool(name = "items_create", description = "Create a project in an authorized folder. Call vault_write_capabilities for fields. Requires name, itemType, folder and modules. SSH needs host, username, password/privateKey and sshAuthType; API needs url, httpAuthType and credentials. Module values are strings except integer port. customSecret stores extra named values only. New secrets are hidden. Encrypted SSH keys require passphrase in this request. No OCI creation. Returns IDs and revision only; never repeat secrets in chat.",
+    #[tool(name = "items_create", description = "Create a project in an authorized folder. Call vault_write_capabilities for fields. Requires name, itemType, folder and modules. Optional sshJumpItemId selects an existing enabled direct SSH project; trust records are local and cannot be written here. SSH needs host, username, password/privateKey and sshAuthType; API needs url, httpAuthType and credentials. Module values are strings except integer port. customSecret stores extra named values only. New secrets are hidden. Encrypted SSH keys require passphrase in this request. No OCI creation. Returns IDs and revision only; never repeat secrets in chat.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<crate::vault_write::WriteOutput>(),
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false))]
     async fn items_create(&self, Parameters(WriteRequest(input)): Parameters<WriteRequest<crate::vault_write::CreateInput>>) -> CallToolResult {
         into_tool_result(self.vault.agent_create(input).map_err(|e|e.to_string()))
     }
 
-    #[tool(name = "items_update", description = "Patch a project by id and expectedRevision. Update modules by stable id; omit id and provide kind/name/value to add. Omitted fields remain unchanged. Targets and authentication can change. Moves require both folders authorized. Cannot change visibility, delete, or change OCI signing fields/derived URL; OCI supports metadata and ordinary attached modules only. A conflict requires re-query, never replay automatically. Encrypted replacement SSH keys require passphrase; unencrypted replacements clear old passphrase. No secret values returned.",
+    #[tool(name = "items_update", description = "Patch a project by id and expectedRevision. Update modules by stable id; omit id and provide kind/name/value to add. Omitted fields remain unchanged. Targets and authentication can change. sshJumpItemId selects an existing direct SSH project; null clears it and omission preserves it. Host trust cannot be changed. Moves require both folders authorized. Cannot change visibility, delete, or change OCI signing fields/derived URL; OCI supports metadata and ordinary attached modules only. A conflict requires re-query, never replay automatically. Encrypted replacement SSH keys require passphrase; unencrypted replacements clear old passphrase. No secret values returned.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<crate::vault_write::WriteOutput>(),
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false))]
     async fn items_update(&self, Parameters(WriteRequest(input)): Parameters<WriteRequest<crate::vault_write::UpdateInput>>) -> CallToolResult {

@@ -388,6 +388,24 @@ async fn save_oci_connection(
 }
 
 #[tauri::command]
+async fn ssh_host_trust(runtime: State<'_, AppRuntime>) -> Result<Vec<crate::model::SshHostTrust>, String> {
+    require_owner_unlocked(&runtime).await?;
+    runtime.vault.ssh_host_trust().map_err(command_error)
+}
+
+#[tauri::command]
+async fn set_ssh_host_trust(runtime: State<'_, AppRuntime>, id: Uuid, host: String, port: u16, fingerprint: Option<String>) -> Result<(), String> {
+    require_owner_unlocked(&runtime).await?;
+    runtime.vault.set_ssh_host_trust(id, &host, port, fingerprint.as_deref()).map_err(command_error)
+}
+
+#[tauri::command]
+async fn probe_ssh_host(runtime: State<'_, AppRuntime>, id: Uuid) -> Result<crate::ssh_transport::SshHostProbe, String> {
+    require_owner_unlocked(&runtime).await?;
+    crate::ssh_transport::probe(&runtime.vault, id).await.map_err(command_error)
+}
+
+#[tauri::command]
 async fn save_connection(
     app: AppHandle,
     runtime: State<'_, AppRuntime>,
@@ -1437,6 +1455,9 @@ pub fn run_gui() -> Result<()> {
             delete_editor_draft,
             copy_owner_value,
             save_connection,
+            ssh_host_trust,
+            set_ssh_host_trust,
+            probe_ssh_host,
             oci_regions,
             oci_editor_state,
             stage_oci_key,

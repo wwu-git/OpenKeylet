@@ -186,3 +186,31 @@ fn duplicate_snapshot_ids_reject_without_partial_writes() {
     assert!(dest.merge_backup_entries(entries, vec![trash]).is_err());
     assert!(dest.list_connections().unwrap().is_empty());
 }
+
+#[test]
+fn legacy_password_jump_without_explicit_auth_mode_remains_usable() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open(dir.path().into()).unwrap();
+    let a = vault.save_connection(input("legacy A")).unwrap();
+    vault
+        .update_document(|document| {
+            document
+                .connections
+                .iter_mut()
+                .find(|item| item.id == a.id)
+                .unwrap()
+                .ssh_auth_type
+                .clear();
+            Ok(())
+        })
+        .unwrap();
+    let mut b = input("B");
+    b.ssh_jump_item_id = Some(a.id);
+    let saved = vault.save_connection(b).unwrap();
+    assert!(
+        vault
+            .ssh_jump_connection(&vault.get_connection(saved.id).unwrap())
+            .unwrap()
+            .is_some()
+    );
+}

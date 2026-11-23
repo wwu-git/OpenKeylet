@@ -584,3 +584,27 @@ async fn saved_ssh_credentials_authenticate_using_selected_mode_on_loopback() {
     assert_eq!(*seen.lock().unwrap(), vec!["privateKey", "password"]);
     task.abort();
 }
+
+#[test]
+fn agent_jump_route_patch_preserves_clears_and_checks_revision_and_scope() {
+    let (_dir, vault) = fixture();
+    allow(&vault, &["Agent"]);
+    let a = create(&vault, "jump A", "Agent").unwrap();
+    vault.change_write_permissions(crate::vault::WritePermissionChange::AddFolder("Other")).unwrap();
+    let a = update(&vault, &a, json!({"folder":"Other"})).unwrap();
+    vault.change_write_permissions(crate::vault::WritePermissionChange::RemoveFolder("Other")).unwrap();
+    let b = vault.agent_create(serde_json::from_value(json!({"name":"target B","itemType":"ssh","folder":"Agent","sshAuthType":"password","sshJumpItemId":a.id,"modules":[{"kind":"host","value":"private.test.invalid"},{"kind":"port","value":22},{"kind":"username","value":"target-user"},{"kind":"password","value":"target-simulated-password"}]})).unwrap()).unwrap();
+    let b_id = Uuid::parse_str(&b.id).unwrap();
+    assert_eq!(vault.get_connection(b_id).unwrap().stored.ssh_jump_item_id, Some(Uuid::parse_str(&a.id).unwrap()));
+    let b = update(&vault, &b, json!({"description":"route preserved"})).unwrap();
+    assert!(vault.get_connection(b_id).unwrap().stored.ssh_jump_item_id.is_some());
+    assert!(update(&vault, &b, json!({"sshJumpItemId":b.id})).is_err());
+    assert_eq!(vault.get_connection(b_id).unwrap().stored.revision, b.revision);
+    let cleared = update(&vault, &b, json!({"sshJumpItemId":null})).unwrap();
+    assert!(vault.get_connection(b_id).unwrap().stored.ssh_jump_item_id.is_none());
+    assert!(update(&vault, &b, json!({"sshJumpItemId":a.id})).is_err());
+    assert_eq!(vault.get_connection(b_id).unwrap().stored.revision, cleared.revision);
+    vault.change_write_permissions(crate::vault::WritePermissionChange::Enable(false)).unwrap();
+    assert!(update(&vault, &cleared, json!({"sshJumpItemId":a.id})).is_err());
+    assert!(serde_json::from_value::<UpdateInput>(json!({"id":b.id,"expectedRevision":cleared.revision,"sshHostTrust":[]})).is_err());
+}
