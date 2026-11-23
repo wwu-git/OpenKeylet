@@ -186,8 +186,23 @@ function applyLanguage() {
   syncTitleSearch();
 }
 
+const ociKeyErrorMessages = {
+  OCI_KEY_EMPTY: ['请输入完整的 RSA 私钥。', 'Enter the complete RSA private key.'],
+  OCI_KEY_FORMAT: ['请导入完整的 RSA PEM 私钥，包含首尾标记。暂不支持 OpenSSH 格式。', 'Import a complete RSA PEM private key, including its header and footer. OpenSSH format is not supported.'],
+  OCI_KEY_ENCRYPTED: ['暂不支持加密私钥，请导入未加密的 RSA PEM 私钥。', 'Encrypted private keys are not supported. Import an unencrypted RSA PEM.'],
+  OCI_KEY_BASE64: ['PEM 正文不是有效的 Base64，请完整复制原始密钥。', 'The PEM body is not valid Base64. Copy the complete original key.'],
+  OCI_KEY_ALGORITHM: ['OCI 签名需要使用受支持算法的 RSA 私钥。', 'OCI signing requires an RSA key with a supported algorithm.'],
+  OCI_KEY_TOO_SMALL: ['RSA 密钥参数低于支持的最低要求，请使用至少 2048 位的密钥。', 'RSA key parameters are below the supported minimum. Use a key of at least 2048 bits.'],
+  OCI_KEY_UNSUPPORTED: ['RSA 密钥参数或版本不受支持，请重新下载 OCI API 签名密钥。', 'The RSA key parameters or version are not supported. Download the OCI API signing key again.'],
+  OCI_KEY_INVALID: ['私钥未通过 RSA 校验，请重新下载原始 OCI API 签名密钥。', 'The private key could not pass RSA validation. Download the original OCI API signing key again.'],
+  OCI_KEY_TOO_LARGE: ['签名私钥超过 64 KiB 大小限制。', 'The signing key exceeds the 64 KiB limit.'],
+};
+
 function publicMessage(value, fallback = localized('操作失败', 'Operation failed')) {
   const raw = String(value || '').replace(/^Error:\s*/, '');
+  const code = raw.split(':', 1)[0];
+  const ociMessage = Object.hasOwn(ociKeyErrorMessages, code) ? ociKeyErrorMessages[code] : null;
+  if (ociMessage) return localized(...ociMessage);
   if (language !== 'en' || !HAN_TEXT.test(raw)) return raw || fallback;
   return fallback;
 }

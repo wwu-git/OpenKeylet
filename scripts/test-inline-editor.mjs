@@ -81,6 +81,7 @@ try {
       if (command === 'stage_oci_key') {
         (fixture.ociSources ??= []).push({source:args.source,hasText:typeof args.text==='string'});
         if (fixture.cancelOciFile && args.source==='file') return null;
+        if (fixture.ociKeyError) throw Error(fixture.ociKeyError);
         if (fixture.rejectOciKey) throw Error('Invalid RSA PEM');
         const id = `test-oci-key-${fixture.ociSequence=(fixture.ociSequence||0)+1}`;
         if (fixture.deferOciKey) return new Promise(resolve=>{fixture.resolveOciKey=()=>{fixture.pendingOciKey=id;resolve(id);};});
@@ -257,6 +258,32 @@ try {
     await page.waitForFunction(()=>fixture.pendingOciKey===null);
     assert.equal(await page.locator('#oci-key-clipboard').isEnabled(),true);
     assert.match(await page.locator('#oci-key-status').innerText(),/NOT IMPORTED|No signing|not imported/);
+    for (const language of ['en','zh']) {
+      await page.locator(`[data-language="${language}"]`).evaluate(button=>button.click());
+      for (const source of ['clipboard','input']) {
+        await page.evaluate(()=>{
+          document.querySelector('#toast-region').replaceChildren();
+          fixture.ociKeyError='OCI_KEY_ALGORITHM: OCI signing requires an RSA key with a supported algorithm';
+        });
+        await chooseSource(source);
+        if (source==='input') {
+          await input.fill('SYNTHETIC-ERROR-INPUT');
+          await page.locator('#oci-key-input-confirm').click();
+        }
+        const expected = language==='zh' ? 'OCI 签名需要使用受支持算法的 RSA 私钥。' : 'OCI signing requires an RSA key with a supported algorithm.';
+        await page.locator('#toast-region .toast').filter({hasText:expected}).waitFor();
+        const displayed = await page.locator('#toast-region').innerText();
+        assert.ok(!displayed.includes('OCI_KEY_'));
+        assert.ok(!displayed.includes('SYNTHETIC-ERROR-INPUT'));
+        assert.equal(await page.evaluate(()=>fixture.pendingOciKey),null);
+        if (source==='input') {
+          assert.equal(await input.inputValue(),'SYNTHETIC-ERROR-INPUT');
+          assert.equal(await save.isDisabled(),true);
+          await page.locator('#oci-key-input-cancel').click();
+        }
+      }
+    }
+    await page.evaluate(()=>{fixture.ociKeyError=null;document.querySelector('#toast-region').replaceChildren();});
     for (const width of [690,460]) {
       await page.setViewportSize({width,height:1000});
       for (const language of ['en','zh']) {

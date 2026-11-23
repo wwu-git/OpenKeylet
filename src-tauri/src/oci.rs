@@ -187,10 +187,23 @@ pub(crate) fn validate_pem(pem: &str) -> Result<()> {
 }
 
 fn parse_key(pem: &str) -> Result<RsaKeyPair> {
-    let error =
-        || anyhow!("Expected an unencrypted RSA private key in PEM format (at least 2048 bits)");
-    ensure!(pem.len() <= 64 * 1024, "OCI signing key file is too large");
+    ensure!(
+        pem.len() <= 64 * 1024,
+        "OCI_KEY_TOO_LARGE: The signing key exceeds the 64 KiB limit"
+    );
     let pem = pem.trim();
+    let pem = pem.strip_prefix('\u{feff}').unwrap_or(pem).trim();
+    ensure!(
+        !pem.is_empty(),
+        "OCI_KEY_EMPTY: Enter the complete RSA private key"
+    );
+    ensure!(
+        !pem.starts_with("-----BEGIN ENCRYPTED PRIVATE KEY-----")
+            && !pem
+                .lines()
+                .any(|line| line.trim().eq_ignore_ascii_case("Proc-Type: 4,ENCRYPTED")),
+        "OCI_KEY_ENCRYPTED: Encrypted private keys are not supported; import an unencrypted RSA PEM"
+    );
     // Oracle's downloadable API keys may include this marker after the PEM.
     let pem = pem.strip_suffix("\nOCI_API_KEY").map_or(pem, str::trim_end);
     for (label, pkcs8) in [("PRIVATE KEY", true), ("RSA PRIVATE KEY", false)] {
@@ -199,16 +212,25 @@ fn parse_key(pem: &str) -> Result<RsaKeyPair> {
             .and_then(|body| body.strip_suffix(&format!("-----END {label}-----")))
         {
             let data = Zeroizing::new(data.split_ascii_whitespace().collect::<String>());
-            let der = Zeroizing::new(STANDARD.decode(data.as_bytes()).map_err(|_| error())?);
+            let der = Zeroizing::new(STANDARD.decode(data.as_bytes()).map_err(|_| {
+                anyhow!("OCI_KEY_BASE64: The PEM body is not valid Base64; copy the complete original key")
+            })?);
             return (if pkcs8 {
                 RsaKeyPair::from_pkcs8(&der)
             } else {
                 RsaKeyPair::from_der(&der)
             })
-            .map_err(|_| error());
+            .map_err(|rejected| {
+                anyhow!(match rejected.to_string().as_str() {
+                    "WrongAlgorithm" => "OCI_KEY_ALGORITHM: OCI signing requires an RSA key with a supported algorithm",
+                    "TooSmall" => "OCI_KEY_TOO_SMALL: RSA key parameters are below the supported minimum; use a key of at least 2048 bits",
+                    "TooLarge" | "VersionNotSupported" | "PrivateModulusLenNotMultipleOf512Bits" => "OCI_KEY_UNSUPPORTED: The RSA key parameters or version are not supported",
+                    _ => "OCI_KEY_INVALID: The private key could not pass RSA validation; download the original API signing key again",
+                })
+            });
         }
     }
-    Err(error())
+    bail!("OCI_KEY_FORMAT: Import a complete RSA PEM private key; OpenSSH format is not supported")
 }
 
 pub(crate) fn validate_request(
@@ -379,7 +401,10 @@ pub(crate) mod tests {
 
     #[test]
     fn oci_key_bom_import_preserves_the_signature() {
-        let pem = format!(" \n\u{feff}{}\r\nOCI_API_KEY\r\n", KEY.replace('\n', "\r\n"));
+        let pem = format!(
+            " \n\u{feff}{}\r\nOCI_API_KEY\r\n",
+            KEY.replace('\n', "\r\n")
+        );
         let credential = Credential::new(config(), &pem).unwrap();
         let input = ApiRequestInput {
             method: "GET".into(),
