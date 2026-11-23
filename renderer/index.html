@@ -277,7 +277,22 @@
                 <label class="field"><span id="oci-user-label">User OCID</span><input class="input" id="oci-user" required maxlength="256" autocomplete="off" /></label>
                 <label class="field"><span id="oci-fingerprint-label">Public key fingerprint</span><input class="input" id="oci-fingerprint" required maxlength="47" autocomplete="off" /></label>
               </div>
-              <button type="button" class="button quiet" id="oci-import-key">Import RSA signing key</button>
+              <details class="key-source-menu" id="oci-key-source-menu">
+                <summary class="button quiet" id="oci-import-key">Add RSA signing key</summary>
+                <div class="key-source-options">
+                  <button type="button" id="oci-key-file" data-stage-oci-key="file">Import key file</button>
+                  <button type="button" id="oci-key-clipboard" data-stage-oci-key="clipboard">Paste key from clipboard</button>
+                  <button type="button" id="oci-key-input" data-stage-oci-key="input">Enter key manually</button>
+                </div>
+              </details>
+              <div id="oci-key-input-panel" hidden>
+                <label class="field"><span id="oci-key-input-label">RSA private key PEM</span><textarea class="input textarea" id="oci-key-text" rows="6" maxlength="65536" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea></label>
+                <p id="oci-key-input-help">Unencrypted RSA PEM, at least 2048 bits. Imported only after confirmation.</p>
+                <div class="button-row">
+                  <button type="button" class="button quiet" id="oci-key-input-confirm">Import key</button>
+                  <button type="button" class="button quiet" id="oci-key-input-cancel">Cancel input</button>
+                </div>
+              </div>
               <p id="oci-key-status" role="status"></p>
               <p id="oci-key-note">Keep your original PEM. Signing keys are excluded from backups.</p>
             </fieldset>

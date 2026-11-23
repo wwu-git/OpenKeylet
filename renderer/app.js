@@ -138,7 +138,14 @@ const staticCopy = [
   ['#oci-tenancy-label', 'text', '租户 OCID', 'Tenancy OCID'],
   ['#oci-user-label', 'text', '用户 OCID', 'User OCID'],
   ['#oci-fingerprint-label', 'text', '公钥指纹', 'Public key fingerprint'],
-  ['#oci-import-key', 'text', '导入 RSA 签名私钥', 'Import RSA signing key'],
+  ['#oci-import-key', 'text', '添加 RSA 签名私钥', 'Add RSA signing key'],
+  ['#oci-key-file', 'text', '导入密钥文件', 'Import key file'],
+  ['#oci-key-clipboard', 'text', '从剪贴板粘贴密钥', 'Paste key from clipboard'],
+  ['#oci-key-input', 'text', '手动输入密钥', 'Enter key manually'],
+  ['#oci-key-input-label', 'text', 'RSA 私钥 PEM', 'RSA private key PEM'],
+  ['#oci-key-input-help', 'text', '未加密的 RSA PEM，至少 2048 位。确认导入后才会暂存。', 'Unencrypted RSA PEM, at least 2048 bits. Imported only after confirmation.'],
+  ['#oci-key-input-confirm', 'text', '确认导入', 'Import key'],
+  ['#oci-key-input-cancel', 'text', '取消输入', 'Cancel input'],
   ['#oci-key-note', 'text', '请保管原始 PEM。签名私钥不随备份导出。', 'Keep your original PEM. Signing keys are excluded from backups.'],
   ['[data-item-template="blank"] > span', 'html', '空白<small>从零添加模块</small>', 'BLANK<small>START WITH NO MODULES</small>'],
   ['#connection-enabled-label', 'text', '启用此项目', 'ENABLE ITEM'],
@@ -264,6 +271,7 @@ let editorDrafts = [];
 let currentDraftId = '';
 let removedSecretFields = new Set();
 let ociEditor = null;
+let ociKeyStaging = null;
 let ociRegions;
 let editorExistingItem = null;
 let editorSourceInput = null;
@@ -1474,6 +1482,19 @@ function renderOciKeyStatus() {
       : localized('尚未导入签名私钥', 'No signing key imported');
 }
 
+function clearOciKeyInput() {
+  $('#oci-key-text').value = '';
+  $('#oci-key-input-panel').hidden = true;
+  $('#oci-key-source-menu').open = false;
+}
+
+function syncOciKeyControls() {
+  const busy = Boolean(ociKeyStaging);
+  $$('[data-stage-oci-key], #oci-key-input-confirm, #oci-key-input-cancel, #oci-key-text').forEach(control => { control.disabled = busy; });
+  $('#oci-import-key').setAttribute('aria-disabled', String(busy));
+  $('#save-connection-button').disabled = Boolean(ociEditor) && (busy || !$('#oci-key-input-panel').hidden);
+}
+
 function updateOciUrl() {
   const region = $('#oci-region').value;
   $('#oci-url').value = region ? `https://iaas.${region}.oraclecloud.com/20160918/` : '';
@@ -1498,6 +1519,7 @@ async function showOciEditor(existing = null) {
     renderOciKeyStatus();
     $('#oci-config').classList.remove('hidden');
     $('#oci-config').disabled = false;
+    syncOciKeyControls();
     currentModules = currentModules.filter(module => module.kind !== 'url');
     renderModules();
     $('#module-menu [data-add-module="url"]').classList.add('hidden');
@@ -1514,6 +1536,8 @@ async function showOciEditor(existing = null) {
 function clearOciEditor() {
   if (ociEditor?.pendingId) void invoke('discard_oci_key', { id: ociEditor.pendingId }).catch(() => {});
   ociEditor = null;
+  clearOciKeyInput();
+  syncOciKeyControls();
   $('#oci-config').classList.add('hidden');
   $('#oci-config').disabled = true;
   $('#module-menu [data-add-module="url"]').classList.remove('hidden');
@@ -2822,25 +2846,61 @@ document.addEventListener('keydown', (event) => {
 });
 
 $('#oci-region').addEventListener('change', updateOciUrl);
-$('#oci-import-key').addEventListener('click', async () => {
+async function stageOciKey(source) {
   const editor = ociEditor;
-  const button = $('#oci-import-key');
-  button.disabled = true;
+  if (!editor || ociKeyStaging) return;
+  if (source !== 'input') clearOciKeyInput();
+  ociKeyStaging = editor;
+  syncOciKeyControls();
   try {
-    const id = await invoke('stage_oci_key');
+    const text = source === 'input' ? $('#oci-key-text').value : null;
+    const id = await invoke('stage_oci_key', { source, text });
     if (!id) return;
     if (ociEditor !== editor) {
       await invoke('discard_oci_key', { id });
       return;
     }
     editor.pendingId = id;
+    clearOciKeyInput();
     renderOciKeyStatus();
   } catch (error) { toast(cleanError(error), 'error'); }
-  finally { button.disabled = false; }
+  finally {
+    if (ociKeyStaging === editor) ociKeyStaging = null;
+    if (ociEditor) syncOciKeyControls();
+  }
+}
+
+$('#oci-import-key').addEventListener('click', event => {
+  if (ociKeyStaging) event.preventDefault();
+});
+$$('[data-stage-oci-key]').forEach(button => button.addEventListener('click', () => {
+  if (!ociEditor || ociKeyStaging) return;
+  $('#oci-key-source-menu').open = false;
+  if (button.dataset.stageOciKey === 'input') {
+    $('#oci-key-input-panel').hidden = false;
+    syncOciKeyControls();
+    $('#oci-key-text').focus();
+  } else void stageOciKey(button.dataset.stageOciKey);
+}));
+$('#oci-key-input-confirm').addEventListener('click', () => { void stageOciKey('input'); });
+$('#oci-key-input-cancel').addEventListener('click', () => {
+  clearOciKeyInput();
+  syncOciKeyControls();
+  $('#oci-import-key').focus();
+});
+$('#oci-key-input-panel').addEventListener('keydown', event => {
+  if (event.key !== 'Escape') return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (!ociKeyStaging) $('#oci-key-input-cancel').click();
 });
 
 $('#connection-form').addEventListener('submit', async (event) => {
   event.preventDefault();
+  if (ociEditor && (ociKeyStaging || !$('#oci-key-input-panel').hidden)) {
+    toast(localized('请先确认导入或取消密钥输入', 'Import the key or cancel key input before saving'), 'error');
+    return;
+  }
   const button = $('#save-connection-button');
   button.disabled = true;
   try {

@@ -319,25 +319,62 @@ async fn oci_editor_state(
 async fn stage_oci_key(
     app: AppHandle,
     runtime: State<'_, AppRuntime>,
+    source: Option<OciKeySource>,
+    text: Option<String>,
 ) -> Result<Option<Uuid>, String> {
     use std::io::Read;
+    let mut text = zeroize::Zeroizing::new(text);
     require_owner_unlocked(&runtime).await?;
-    let Some(file) = app.dialog().file().blocking_pick_file() else {
-        return Ok(None);
+    let source = source.unwrap_or_default();
+    if !matches!(source, OciKeySource::Input) && text.is_some() {
+        return Err("Key text is only accepted for manual input".to_owned());
+    }
+    let pem = match source {
+        OciKeySource::File => {
+            let Some(file) = app.dialog().file().blocking_pick_file() else {
+                return Ok(None);
+            };
+            let path = file.into_path().map_err(command_error)?;
+            let mut pem = zeroize::Zeroizing::new(String::new());
+            std::fs::File::open(path)
+                .map_err(command_error)?
+                .take(64 * 1024 + 1)
+                .read_to_string(&mut pem)
+                .map_err(|_| "Unable to read OCI signing key file".to_owned())?;
+            pem
+        }
+        OciKeySource::Clipboard => zeroize::Zeroizing::new(
+            app.clipboard()
+                .read_text()
+                .map_err(|_| "Unable to read OCI signing key from clipboard".to_owned())?,
+        ),
+        OciKeySource::Input => zeroize::Zeroizing::new(
+            text.take()
+                .ok_or_else(|| "Enter the OCI signing key".to_owned())?,
+        ),
     };
-    let path = file.into_path().map_err(command_error)?;
-    let mut pem = zeroize::Zeroizing::new(String::new());
-    std::fs::File::open(path)
-        .map_err(command_error)?
-        .take(64 * 1024 + 1)
-        .read_to_string(&mut pem)
-        .map_err(|_| "Unable to read OCI signing key file".to_owned())?;
-    crate::oci::validate_pem(&pem).map_err(command_error)?;
     let mut pending = runtime.pending_oci_key.lock().await;
     require_owner_unlocked(&runtime).await?;
+    replace_pending_oci_key(&mut pending, pem).map(Some)
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum OciKeySource {
+    #[default]
+    File,
+    Clipboard,
+    Input,
+}
+
+fn replace_pending_oci_key(
+    pending: &mut Option<(Uuid, zeroize::Zeroizing<String>)>,
+    pem: zeroize::Zeroizing<String>,
+) -> Result<Uuid, String> {
+    crate::oci::validate_pem(&pem).map_err(command_error)?;
     let id = Uuid::new_v4();
     *pending = Some((id, pem));
-    Ok(Some(id))
+    Ok(id)
 }
 
 #[tauri::command]
@@ -1560,6 +1597,109 @@ mod tests {
         assert!(should_hide_on_close("tray", true));
         assert!(!should_hide_on_close("tray", false));
         assert!(!should_hide_on_close("exit", true));
+    }
+}
+
+#[cfg(test)]
+mod oci_key_tests {
+    use super::*;
+
+    #[test]
+    fn oci_key_sources_have_explicit_wire_names_and_file_default() {
+        for (name, expected) in [
+            ("file", OciKeySource::File),
+            ("clipboard", OciKeySource::Clipboard),
+            ("input", OciKeySource::Input),
+        ] {
+            let source: OciKeySource = serde_json::from_value(serde_json::json!(name)).unwrap();
+            assert_eq!(
+                std::mem::discriminant(&source),
+                std::mem::discriminant(&expected)
+            );
+        }
+        assert!(matches!(OciKeySource::default(), OciKeySource::File));
+        assert!(serde_json::from_value::<OciKeySource>(serde_json::json!("generate")).is_err());
+    }
+
+    #[test]
+    fn invalid_oci_input_does_not_replace_a_staged_key() {
+        let mut pending = None;
+        let first = replace_pending_oci_key(
+            &mut pending,
+            zeroize::Zeroizing::new(crate::oci::tests::KEY.into()),
+        )
+        .unwrap();
+        let ssh = PendingPrivateKey::generate().unwrap();
+        for text in [String::new(), "INVALID-OCI-INPUT-MARKER".into(), ssh.text.to_string(), "-----BEGIN ENCRYPTED PRIVATE KEY-----\nINVALID-OCI-INPUT-MARKER\n-----END ENCRYPTED PRIVATE KEY-----".into(), "x".repeat(64 * 1024 + 1)] {
+            let error = replace_pending_oci_key(&mut pending, zeroize::Zeroizing::new(text)).unwrap_err();
+            assert!(!error.contains("INVALID-OCI-INPUT-MARKER"));
+            assert!(pending.as_ref().is_some_and(|(id, _)| *id == first));
+        }
+        let replacement = replace_pending_oci_key(
+            &mut pending,
+            zeroize::Zeroizing::new(format!(
+                "{}\nOCI_API_KEY",
+                crate::oci::tests::KEY.trim_end()
+            )),
+        )
+        .unwrap();
+        assert_ne!(replacement, first);
+        assert!(pending.as_ref().is_some_and(|(id, _)| *id == replacement));
+    }
+
+    #[test]
+    fn staged_oci_replacement_is_not_saved_on_cancel_or_validation_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = Vault::open(directory.path().into()).unwrap();
+        let mut input: ConnectionInput =
+            serde_json::from_value(serde_json::json!({"name":"OCI source test","itemType":"api"}))
+                .unwrap();
+        let saved = vault
+            .save_oci_connection(
+                input.clone(),
+                None,
+                crate::oci::tests::config(),
+                Some(crate::oci::tests::KEY),
+                None,
+            )
+            .unwrap();
+        input.id = Some(saved.id);
+        let before = std::fs::read(directory.path().join("vault.json")).unwrap();
+        let mut pending = None;
+        replace_pending_oci_key(
+            &mut pending,
+            zeroize::Zeroizing::new(crate::oci::tests::KEY.into()),
+        )
+        .unwrap();
+        assert!(
+            vault
+                .save_oci_connection(
+                    input,
+                    Some("stale"),
+                    crate::oci::tests::config(),
+                    pending.as_ref().map(|(_, pem)| pem.as_str()),
+                    None
+                )
+                .is_err()
+        );
+        assert!(pending.is_some());
+        pending.take();
+        assert!(std::fs::read(directory.path().join("vault.json")).unwrap() == before);
+        assert!(
+            vault
+                .get_connection(saved.id)
+                .unwrap()
+                .secrets
+                .oci
+                .as_ref()
+                .unwrap()
+                .is_configured()
+        );
+        assert!(
+            !serde_json::to_string(&saved)
+                .unwrap()
+                .contains("BEGIN PRIVATE KEY")
+        );
     }
 }
 
