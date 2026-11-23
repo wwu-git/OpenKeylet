@@ -74,6 +74,42 @@ try {
   });
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   await page.locator("#connections-list .empty-state").waitFor();
+  await page.locator('[data-page="settings"]').click();
+  const manualConfig = page.locator('.manual-mcp-config');
+  await manualConfig.locator('summary').click();
+  await page.locator('.manual-config-steps b .lettering-ink').first().waitFor();
+  const manualCopy = {
+    zh: ['打开目标 Agent 的 MCP 配置', '按配置格式复制 JSON 或 TOML', '粘贴保存并重新启动 Agent'],
+    en: ['Open the target agent MCP configuration', 'Copy JSON or TOML to match its config format', 'Paste, save, and restart the agent'],
+  };
+  for (const width of [690, 460]) {
+    await page.setViewportSize({width,height:1000});
+    const size = width === 460 ? 'large' : 'standard';
+    await page.evaluate(size => {document.documentElement.dataset.textSize=size;}, size);
+    for (const theme of ['dark','light']) {
+      if (await page.locator('html').getAttribute('data-theme') !== theme) await page.locator('#theme-toggle').click();
+      for (const locale of ['en','zh']) {
+        await page.locator(`[data-language="${locale}"]`).click();
+        await page.locator('.manual-config-steps b .lettering-ink').first().waitFor();
+        await manualConfig.screenshot({path:path.join(artifacts,`manual-config-${width}-${size}-${locale}-${theme}.png`)});
+        assert.deepEqual(await page.locator('.manual-config-steps > div > b').allTextContents(), ['1','2','3'], 'Manual setup step numbers survive lettering and language switches');
+        assert.deepEqual(await page.locator('.manual-config-steps > div > span').allTextContents(), manualCopy[locale]);
+        const rows = await page.locator('.manual-config-steps > div').evaluateAll(rows=>rows.map(row=>{
+          const bounds = el => {const r=el.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom};};
+          return {row:bounds(row),number:bounds(row.querySelector(':scope > b')),text:bounds(row.querySelector(':scope > span'))};
+        }));
+        for (const [index,{row,number,text}] of rows.entries()) {
+          assert.ok(number.right<=text.left && number.bottom<=row.bottom+1 && text.bottom<=row.bottom+1, JSON.stringify(rows[index]));
+          if (index) assert.ok(row.top>=rows[index-1].row.bottom-1, JSON.stringify(rows));
+        }
+        assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+      }
+    }
+  }
+  await page.evaluate(()=>{document.documentElement.dataset.textSize='standard';});
+  await page.setViewportSize({width:690,height:1000});
+  await manualConfig.locator('summary').click();
+  await page.locator('[data-page="connections"]').click();
   const projectSearch = page.locator('#title-search-input');
   const fillItemSearch = async value => {
     if (!await projectSearch.isVisible()) await page.locator('#title-search-toggle').click();
