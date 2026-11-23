@@ -1584,7 +1584,6 @@ html.platform-macos .nav-item small { line-height: 7px; }
   background: var(--panel); color: var(--ink); box-shadow: 0 5px 16px #0003;
   -webkit-app-region: no-drag;
 }
-#connection-filter-panel[hidden], #connection-filter-panel [hidden] { display: none; }
 .connection-filter-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 #connection-filter-panel label { display: grid; gap: 3px; min-width: 0; }
 #connection-filter-panel select { width: 100%; min-width: 0; }
@@ -1595,6 +1594,7 @@ html.platform-macos .nav-item small { line-height: 7px; }
   width: auto; height: auto; min-height: 28px; max-width: 100%; padding: 3px 8px;
   color: var(--ink); background: var(--field); white-space: normal; overflow-wrap: anywhere;
 }
+#connection-filter-panel[hidden], #connection-filter-panel [hidden] { display: none; }
 
 .ssh-route-config { min-width: 0; margin: 18px 0; padding: 16px; border: 1px solid var(--border, #70777b); border-radius: 6px; }
 .ssh-route-config p { overflow-wrap: anywhere; }

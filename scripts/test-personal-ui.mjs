@@ -95,6 +95,9 @@ try {
   const openFilters = () => page.keyboard.press('Control+f');
   assert.equal(await page.locator('#connection-filter-toggle, .connection-search-tools').count(), 0);
   assert.equal(await filterPanel.isHidden(), true);
+  await openFilters();
+  assert.equal(await page.locator('#connection-clear-all').isHidden(), true, 'Clear all stays hidden without active search or filters');
+  await page.locator('#title-search-toggle').click();
   const folder = page.locator('#connection-folder-filter');
   const status = page.locator('#connection-status-filter');
   await page.locator('[data-item-type-filter="api"]').click();
@@ -139,6 +142,7 @@ try {
   await page.waitForFunction(() => fixture.drafts.some(d => d.input.description === '未保存的编辑'));
   await openFilters();
   await page.locator('#connection-clear-all').click();
+  assert.equal(await page.locator('#connection-clear-all').isHidden(), true, 'Clear all hides after resetting every search condition');
   assert.equal(await projectSearch.inputValue(), '');
   assert.equal((await visible()).length, 5);
   await fillItemSearch('github');
