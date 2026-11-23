@@ -142,6 +142,8 @@ pub struct SecretProfile {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ItemModule {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternate_values: Vec<String>,
     #[serde(default)]
     pub id: Uuid,
     pub kind: String,
@@ -195,6 +197,8 @@ impl ItemModule {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicItemModule {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternate_values: Vec<String>,
     #[serde(default)]
     pub id: Uuid,
     pub kind: String,
@@ -628,6 +632,7 @@ impl StoredConnection {
                 .map(|module| {
                     let secret = module.is_secret();
                     PublicItemModule {
+                        alternate_values: module.alternate_values.clone(),
                         id: module.id,
                         kind: module.kind.clone(),
                         name: module.name.clone(),
@@ -890,6 +895,7 @@ mod tests {
             "customSecret",
         ] {
             let module = ItemModule {
+                alternate_values: Vec::new(),
                 id: uuid::Uuid::nil(),
                 kind: kind.to_owned(),
                 name: String::new(),
@@ -902,6 +908,7 @@ mod tests {
 
         for kind in ["host", "port", "url"] {
             let module = ItemModule {
+                alternate_values: Vec::new(),
                 id: uuid::Uuid::nil(),
                 kind: kind.to_owned(),
                 name: String::new(),
@@ -916,6 +923,7 @@ mod tests {
     #[test]
     fn explicit_agent_visibility_overrides_the_module_default() {
         let visible_secret = ItemModule {
+            alternate_values: Vec::new(),
             id: uuid::Uuid::nil(),
             kind: "password".to_owned(),
             name: String::new(),
@@ -923,6 +931,7 @@ mod tests {
             agent_visible: Some(true),
         };
         let hidden_public_value = ItemModule {
+            alternate_values: Vec::new(),
             id: uuid::Uuid::nil(),
             kind: "host".to_owned(),
             name: String::new(),

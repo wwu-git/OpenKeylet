@@ -42,7 +42,7 @@ const MAX_DIRECT_SSH_COMMAND_LENGTH: usize = 16_384;
 #[serde(rename_all = "camelCase")]
 pub struct ApiRequestInput {
     #[schemars(
-        description = "Absolute request URL, saved-service-relative path, or empty to use the saved service URL."
+        description = "Absolute request URL to select a target, default-service-relative path, or empty to use the default service URL. Other saved addresses are never tried automatically."
     )]
     pub url: String,
     #[serde(default = "default_method")]

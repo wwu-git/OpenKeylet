@@ -18,6 +18,8 @@ pub struct ModulePatch {
     pub name: Option<String>,
     /// Text value, or an integer for port. Hidden values must not be repeated in chat.
     pub value: Option<serde_json::Value>,
+    /// Other host or service URL addresses. Omit to preserve; an empty list clears them.
+    pub alternate_values: Option<Vec<String>>,
 }
 #[derive(Clone, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -135,6 +137,7 @@ impl Vault {
             rules:vec![
                 "sshJumpItemId selects an existing enabled direct SSH project. Update omits it to preserve or uses null to clear. Single-hop only; host trust is device-local and cannot be modified through MCP.".into(),
                 "Create requires name, itemType, folder and modules; update requires item ID and expectedRevision. Omitted fields are preserved.".into(),
+                "Host and url modules use value as the default address and alternateValues as other addresses. Omitted alternateValues is preserved; [] clears it. To switch defaults, submit the new value and remaining addresses together. No automatic failover. SSH addresses share the project port and credentials.".into(),
                 "New modules require kind and value; updates require module ID. port is an integer 1..65535; other values are strings. customSecret also requires a unique name.".into(),
                 "SSH requires username plus password/privateKey and explicit sshAuthType. API requires url plus explicit httpAuthType: bearer/apiKey use apiCredential; basic uses username/password; apiKey also requires authHeader.".into(),
                 "New secrets are hidden. Cannot change visibility, delete items/modules, or configure write permissions. Never repeat submitted secrets.".into(),
@@ -339,6 +342,7 @@ fn apply_modules(input: &mut ConnectionInput, patches: &[ModulePatch], oci: bool
                 "Custom field requires a name"
             );
             input.modules.push(ItemModule {
+                alternate_values: Vec::new(),
                 id: Uuid::new_v4(),
                 kind: kind.into(),
                 name: patch
@@ -360,6 +364,10 @@ fn apply_modules(input: &mut ConnectionInput, patches: &[ModulePatch], oci: bool
             !oci || module.kind != "url",
             "OCI URL is derived from its region"
         );
+        if let Some(addresses) = &patch.alternate_values {
+            ensure!(matches!(module.kind.as_str(), "host" | "url"), "Only host and url modules support other addresses");
+            module.alternate_values = addresses.clone();
+        }
         if let Some(name) = &patch.name {
             ensure!(
                 name == &module.name || module.kind == "customSecret",

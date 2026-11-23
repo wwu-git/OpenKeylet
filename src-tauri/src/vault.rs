@@ -22,13 +22,16 @@ use url::Url;
 use uuid::Uuid;
 
 const MAX_ACTIVITIES: usize = 3_000;
-const VAULT_VERSION: u8 = 14;
+const VAULT_VERSION: u8 = 15;
 #[cfg(test)]
 #[path = "vault_lifecycle_tests.rs"]
 mod lifecycle_tests;
 #[cfg(test)]
 #[path = "ssh_jump_tests.rs"]
 mod ssh_jump_tests;
+#[cfg(test)]
+#[path = "multi_address_tests.rs"]
+mod multi_address_tests;
 
 #[derive(Clone)]
 pub struct Vault {
@@ -177,9 +180,9 @@ impl Vault {
         let bytes = fs::read(&self.inner.vault_path).context("Could not read vault")?;
         let document: VaultDocument =
             serde_json::from_slice(&bytes).context("Invalid vault file format")?;
-        if !matches!(document.version, 7 | 8 | 9 | 10 | 11 | 12 | 13 | VAULT_VERSION) {
+        if !matches!(document.version, 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | VAULT_VERSION) {
             bail!(
-                "OpenKeylet supports vault versions 7 through 14; current file version is {}",
+                "OpenKeylet supports vault versions 7 through 15; current file version is {}",
                 document.version
             );
         }
@@ -563,6 +566,9 @@ impl Vault {
                     bail!("Create a separate OCI Compute project");
                 }
                 config.validate()?;
+                if input.modules.iter().any(|module| module.kind == "url" && !module.alternate_values.is_empty()) {
+                    bail!("OCI URL is derived from its region and cannot have other addresses");
+                }
                 let base = config.base_url()?;
                 if let Some(key) = key {
                     secrets.oci = Some(crate::oci::Credential::new(config, key)?);
@@ -1116,7 +1122,7 @@ impl Vault {
         let bytes = fs::read(&self.inner.vault_path).context("Could not read vault")?;
         let mut document: VaultDocument =
             serde_json::from_slice(&bytes).context("Invalid vault file format")?;
-        if !matches!(document.version, 7 | 8 | 9 | 10 | 11 | 12 | 13 | VAULT_VERSION) {
+        if !matches!(document.version, 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | VAULT_VERSION) {
             bail!("Unsupported vault version {}", document.version);
         }
         document.version = VAULT_VERSION;
@@ -1231,6 +1237,9 @@ fn normalize_modules(modules: Vec<ItemModule>) -> Result<Vec<ItemModule>> {
         {
             bail!("Unsupported module:{}", module.kind);
         }
+        if !module.alternate_values.is_empty() && !matches!(module.kind.as_str(), "host" | "url") {
+            bail!("Only host and url modules support other addresses");
+        }
         if module.agent_visible.is_none() {
             module.agent_visible = Some(!module_kind_has_plaintext_reveal(&module.kind));
         }
@@ -1263,6 +1272,21 @@ fn normalize_modules(modules: Vec<ItemModule>) -> Result<Vec<ItemModule>> {
                 module.value = port.to_string();
             }
         }
+        if matches!(module.kind.as_str(), "host" | "url") {
+            if !module.alternate_values.is_empty() && module.value.is_empty() {
+                bail!("A default address is required when other addresses are saved");
+            }
+            let mut addresses = std::collections::HashSet::new();
+            let has_alternates = !module.alternate_values.is_empty();
+            for address in std::iter::once(&mut module.value).chain(module.alternate_values.iter_mut()) {
+                if address.trim().is_empty() {
+                    if !has_alternates { continue; }
+                    bail!("Address cannot be empty");
+                }
+                *address = normalize_module_address(&module.kind, address)?;
+                if !addresses.insert(address.clone()) { bail!("Duplicate address"); }
+            }
+        }
         if let Some(name) = module.secret_name() {
             if secret_names
                 .iter()
@@ -1275,6 +1299,17 @@ fn normalize_modules(modules: Vec<ItemModule>) -> Result<Vec<ItemModule>> {
         output.push(module);
     }
     Ok(output)
+}
+
+fn normalize_module_address(kind: &str, address: &str) -> Result<String> {
+    if kind == "host" { return ssh_endpoint_host(address); }
+    let normalized = api_catalog::normalize_base_url(address, "")?;
+    let parsed = Url::parse(&normalized).context("Invalid API URL")?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none()
+        || !parsed.username().is_empty() || parsed.password().is_some() {
+        bail!("API URL must use HTTP/HTTPS and must not include an account or password in the address");
+    }
+    Ok(normalized)
 }
 
 fn module_value<'a>(modules: &'a [ItemModule], kind: &str) -> Option<&'a str> {
@@ -1319,6 +1354,7 @@ fn push_module(modules: &mut Vec<ItemModule>, kind: &str, name: &str, value: &st
         return;
     }
     modules.push(ItemModule {
+        alternate_values: Vec::new(),
         id: uuid::Uuid::nil(),
         kind: kind.to_owned(),
         name: name.to_owned(),
@@ -1368,6 +1404,9 @@ pub(crate) fn normalize_connection(
     now: String,
 ) -> Result<StoredConnection> {
     crate::login_uri::validate(&input.login_uris)?;
+    if input.http_auth_type == crate::oci::AUTH_MODE && input.modules.iter().any(|module| module.kind == "url" && !module.alternate_values.is_empty()) {
+        bail!("OCI URL is derived from its region and cannot have other addresses");
+    }
     let modules = normalize_modules(input.modules)?;
     let item_type = crate::item_types::normalize(&input.item_type, &modules)?;
 
@@ -1511,7 +1550,16 @@ fn same_portable_content(
     if left.ssh_jump_item_id != right.ssh_jump_item_id
         || left.ssh_jump_unresolved != right.ssh_jump_unresolved
         || left.login_uris != right.login_uris
-        || !left.modules.iter().zip(&right.modules).all(|(a,b)| a.kind == b.kind && a.name == b.name && a.value == b.value && a.agent_visible == b.agent_visible)
+        || !left.modules.iter().zip(&right.modules).all(|(a,b)| {
+            let equal_value = |left: &str, right: &str| {
+                left == right || matches!(a.kind.as_str(), "host" | "url")
+                    && normalize_module_address(&a.kind, left).ok().zip(normalize_module_address(&a.kind, right).ok()).is_some_and(|(left, right)| left == right)
+            };
+            a.kind == b.kind && a.name == b.name && equal_value(&a.value, &b.value)
+                && a.alternate_values.len() == b.alternate_values.len()
+                && a.alternate_values.iter().zip(&b.alternate_values).all(|(a,b)| equal_value(a,b))
+                && a.agent_visible == b.agent_visible
+        })
         || left.modules.len() != right.modules.len()
         || left.item_type() != right.item_type()
         || left.folder != right.folder
@@ -1625,6 +1673,9 @@ fn merge_secret_bundle(current: &mut SecretBundle, next: &SecretBundle) {
 }
 
 fn prepare_auto_api(input: &mut ConnectionInput, secrets: &mut SecretBundle) -> Result<()> {
+    if input.modules.iter().any(|module| !module.alternate_values.is_empty() && module.value.trim().is_empty()) {
+        bail!("A default address is required when other addresses are saved");
+    }
     if input.http_auth_type != "auto" {
         return Ok(());
     }
@@ -1760,6 +1811,7 @@ mod tests {
     fn module_normalization_preserves_editor_order() {
         let modules = vec![
             ItemModule {
+                alternate_values: Vec::new(),
                 id: uuid::Uuid::nil(),
                 kind: "url".to_owned(),
                 name: String::new(),
@@ -1767,6 +1819,7 @@ mod tests {
                 agent_visible: None,
             },
             ItemModule {
+                alternate_values: Vec::new(),
                 id: uuid::Uuid::nil(),
                 kind: "password".to_owned(),
                 name: String::new(),
@@ -1774,6 +1827,7 @@ mod tests {
                 agent_visible: None,
             },
             ItemModule {
+                alternate_values: Vec::new(),
                 id: uuid::Uuid::nil(),
                 kind: "host".to_owned(),
                 name: String::new(),
@@ -2037,6 +2091,7 @@ mod tests {
         input.name = "unfinished-draft-name-7129".to_owned();
         input.description = "unfinished-draft-note-7129".to_owned();
         input.modules = vec![ItemModule {
+            alternate_values: Vec::new(),
             id: uuid::Uuid::nil(),
             kind: "password".to_owned(),
             name: String::new(),
@@ -2180,6 +2235,7 @@ mod tests {
         mixed.http_auth_type = "auto".to_owned();
         mixed.modules = vec![
             ItemModule {
+                alternate_values: Vec::new(),
                 id: uuid::Uuid::nil(),
                 kind: "host".into(),
                 name: String::new(),
@@ -2187,6 +2243,7 @@ mod tests {
                 agent_visible: None,
             },
             ItemModule {
+                alternate_values: Vec::new(),
                 id: uuid::Uuid::nil(),
                 kind: "port".into(),
                 name: String::new(),
@@ -2194,6 +2251,7 @@ mod tests {
                 agent_visible: None,
             },
             ItemModule {
+                alternate_values: Vec::new(),
                 id: uuid::Uuid::nil(),
                 kind: "username".into(),
                 name: String::new(),
@@ -2201,6 +2259,7 @@ mod tests {
                 agent_visible: None,
             },
             ItemModule {
+                alternate_values: Vec::new(),
                 id: uuid::Uuid::nil(),
                 kind: "password".into(),
                 name: String::new(),
@@ -2208,6 +2267,7 @@ mod tests {
                 agent_visible: None,
             },
             ItemModule {
+                alternate_values: Vec::new(),
                 id: uuid::Uuid::nil(),
                 kind: "apiCredential".into(),
                 name: String::new(),
@@ -2233,6 +2293,7 @@ mod tests {
         draft.secrets = SecretBundle::default();
         draft.modules = vec![
             ItemModule {
+                alternate_values: Vec::new(),
                 id: uuid::Uuid::nil(),
                 kind: "host".into(),
                 name: String::new(),
@@ -2240,6 +2301,7 @@ mod tests {
                 agent_visible: None,
             },
             ItemModule {
+                alternate_values: Vec::new(),
                 id: uuid::Uuid::nil(),
                 kind: "port".into(),
                 name: String::new(),
@@ -2247,6 +2309,7 @@ mod tests {
                 agent_visible: None,
             },
             ItemModule {
+                alternate_values: Vec::new(),
                 id: uuid::Uuid::nil(),
                 kind: "username".into(),
                 name: String::new(),
@@ -2267,6 +2330,7 @@ mod tests {
         let mut missing_name = ssh_input(None);
         missing_name.name.clear();
         missing_name.modules = vec![ItemModule {
+            alternate_values: Vec::new(),
             id: uuid::Uuid::nil(),
             kind: "password".into(),
             name: String::new(),
@@ -2322,7 +2386,7 @@ mod tests {
         drop(vault);
 
         let error = Vault::open(vault_dir).err().expect("version 6 must fail");
-        assert!(format!("{error:#}").contains("supports vault versions 7 through 14"));
+        assert!(format!("{error:#}").contains("supports vault versions 7 through 15"));
     }
 
     #[test]

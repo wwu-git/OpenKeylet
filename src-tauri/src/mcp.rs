@@ -298,6 +298,7 @@ impl VaultMcp {
                             name: module.name.clone(),
                             configured,
                             agent_visible,
+                            alternate_values: if agent_visible && !module.is_secret() { Some(module.alternate_values.clone()) } else { None },
                             value,
                         })
                     })
@@ -888,6 +889,8 @@ struct ItemModuleOutput {
     agent_visible: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    alternate_values: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -914,7 +917,7 @@ struct SshRunInput {
     item: String,
     #[serde(default)]
     #[schemars(
-        description = "Optional SSH host override. Omit it to use the host saved in the OpenKeylet project."
+        description = "Optional SSH host override, including another saved address. Omit it to use the default host. Other addresses are never tried automatically."
     )]
     host: Option<String>,
     #[serde(default)]
@@ -963,7 +966,7 @@ struct SshUploadInput {
     item: String,
     #[serde(default)]
     #[schemars(
-        description = "Optional SSH host override. Omit it to use the host saved in the OpenKeylet project."
+        description = "Optional SSH host override, including another saved address. Omit it to use the default host. Other addresses are never tried automatically."
     )]
     host: Option<String>,
     #[serde(default)]
@@ -1005,7 +1008,7 @@ struct SshDownloadInput {
     item: String,
     #[serde(default)]
     #[schemars(
-        description = "Optional SSH host override. Omit it to use the host saved in the OpenKeylet project."
+        description = "Optional SSH host override, including another saved address. Omit it to use the default host. Other addresses are never tried automatically."
     )]
     host: Option<String>,
     #[serde(default)]
@@ -1327,14 +1330,14 @@ impl VaultMcp {
         into_tool_result(self.vault.write_capabilities().map_err(|_| "Could not read write permissions".to_owned()))
     }
 
-    #[tool(name = "items_create", description = "Create a project in an authorized folder. Call vault_write_capabilities for fields. Requires name, itemType, folder and modules. Optional sshJumpItemId selects an existing enabled direct SSH project; trust records are local and cannot be written here. SSH needs host, username, password/privateKey and sshAuthType; API needs url, httpAuthType and credentials. Module values are strings except integer port. customSecret stores extra named values only. New secrets are hidden. Encrypted SSH keys require passphrase in this request. No OCI creation. Returns IDs and revision only; never repeat secrets in chat.",
+    #[tool(name = "items_create", description = "Create a project in an authorized folder. Call vault_write_capabilities for fields. Requires name, itemType, folder and modules. Optional sshJumpItemId selects an existing enabled direct SSH project; trust records are local and cannot be written here. SSH needs host, username, password/privateKey and sshAuthType; API needs url, httpAuthType and credentials. Module value is the default address for host/url; alternateValues lists other addresses. Module values are strings except integer port. customSecret stores extra named values only. New secrets are hidden. Encrypted SSH keys require passphrase in this request. No OCI creation. Returns IDs and revision only; never repeat secrets in chat.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<crate::vault_write::WriteOutput>(),
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false))]
     async fn items_create(&self, Parameters(WriteRequest(input)): Parameters<WriteRequest<crate::vault_write::CreateInput>>) -> CallToolResult {
         into_tool_result(self.vault.agent_create(input).map_err(|e|e.to_string()))
     }
 
-    #[tool(name = "items_update", description = "Patch a project by id and expectedRevision. Update modules by stable id; omit id and provide kind/name/value to add. Omitted fields remain unchanged. Targets and authentication can change. sshJumpItemId selects an existing direct SSH project; null clears it and omission preserves it. Host trust cannot be changed. Moves require both folders authorized. Cannot change visibility, delete, or change OCI signing fields/derived URL; OCI supports metadata and ordinary attached modules only. A conflict requires re-query, never replay automatically. Encrypted replacement SSH keys require passphrase; unencrypted replacements clear old passphrase. No secret values returned.",
+    #[tool(name = "items_update", description = "Patch a project by id and expectedRevision. Update modules by stable id; omit id and provide kind/name/value to add. Omitted fields remain unchanged. Targets and authentication can change. For host/url, value is the default and alternateValues lists other addresses; omit the list to preserve it or use [] to clear it. Switch defaults by submitting both fields. sshJumpItemId selects an existing direct SSH project; null clears it and omission preserves it. Host trust cannot be changed. Moves require both folders authorized. Cannot change visibility, delete, or change OCI signing fields/derived URL; OCI supports metadata and ordinary attached modules only. A conflict requires re-query, never replay automatically. Encrypted replacement SSH keys require passphrase; unencrypted replacements clear old passphrase. No secret values returned.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<crate::vault_write::WriteOutput>(),
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false))]
     async fn items_update(&self, Parameters(WriteRequest(input)): Parameters<WriteRequest<crate::vault_write::UpdateInput>>) -> CallToolResult {
@@ -1919,7 +1922,7 @@ impl VaultMcp {
 
     #[tool(
         name = "ssh_upload",
-        description = "Upload one local file or directory through OpenKeylet SFTP. The project only needs a saved password or private key; host, port, and username may be supplied at runtime, while saved values remain defaults and port 22 is the fallback. Directories are copied recursively. remotePath is optional and defaults to the local source name in the SSH login directory. Missing parents are created and an existing destination is replaced by default, even when its file/directory kind changed. For a saved jump route, call this tool with target project B directly. OpenKeylet automatically routes through jump project A and authenticates A and B with their own credentials. If either host fingerprint is missing or mismatched, stop and ask the user to verify it against a trusted source and confirm it through the OpenKeylet client or local ssh-trust CLI before retrying. Never auto-trust keys or bypass the route with a direct or nested ssh connection.",
+        description = "Upload one local file or directory through OpenKeylet SFTP. The project only needs a saved password or private key; host, port, and username may be supplied at runtime, while saved values remain defaults and port 22 is the fallback. host selects an explicit address; alternateValues are never tried automatically. Directories are copied recursively. remotePath is optional and defaults to the local source name in the SSH login directory. Missing parents are created and an existing destination is replaced by default, even when its file/directory kind changed. For a saved jump route, call this tool with target project B directly. OpenKeylet automatically routes through jump project A and authenticates A and B with their own credentials. If either host fingerprint is missing or mismatched, stop and ask the user to verify it against a trusted source and confirm it through the OpenKeylet client or local ssh-trust CLI before retrying. Never auto-trust keys or bypass the route with a direct or nested ssh connection.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<SshTransferResponse>(),
         annotations(title = "Upload a path over SSH", read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = true)
     )]
@@ -1957,7 +1960,7 @@ impl VaultMcp {
 
     #[tool(
         name = "ssh_download",
-        description = "Download one remote file or directory through OpenKeylet SFTP. The project only needs a saved password or private key; host, port, and username may be supplied at runtime, while saved values remain defaults and port 22 is the fallback. Directories are copied recursively. localPath is optional and defaults to the remote source name in the MCP working directory. Missing parents are created and an existing destination is replaced by default, even when its file/directory kind changed. For a saved jump route, call this tool with target project B directly. OpenKeylet automatically routes through jump project A and authenticates A and B with their own credentials. If either host fingerprint is missing or mismatched, stop and ask the user to verify it against a trusted source and confirm it through the OpenKeylet client or local ssh-trust CLI before retrying. Never auto-trust keys or bypass the route with a direct or nested ssh connection.",
+        description = "Download one remote file or directory through OpenKeylet SFTP. The project only needs a saved password or private key; host, port, and username may be supplied at runtime, while saved values remain defaults and port 22 is the fallback. host selects an explicit address; alternateValues are never tried automatically. Directories are copied recursively. localPath is optional and defaults to the remote source name in the MCP working directory. Missing parents are created and an existing destination is replaced by default, even when its file/directory kind changed. For a saved jump route, call this tool with target project B directly. OpenKeylet automatically routes through jump project A and authenticates A and B with their own credentials. If either host fingerprint is missing or mismatched, stop and ask the user to verify it against a trusted source and confirm it through the OpenKeylet client or local ssh-trust CLI before retrying. Never auto-trust keys or bypass the route with a direct or nested ssh connection.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<SshTransferResponse>(),
         annotations(title = "Download a path over SSH", read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = true)
     )]
@@ -1998,7 +2001,7 @@ impl VaultMcp {
 
     #[tool(
         name = "http_send",
-        description = "Send an HTTP request using any enabled OpenKeylet project that contains a configured secret, without returning hidden plaintext. Omit item when this MCP session already selected a compatible project or exactly one compatible project exists; otherwise pass its name or a natural phrase containing it. Built-in API/Basic authentication is injected automatically. OCI Compute projects only support signed GET ListInstances, require compartmentId, and may use page and limit. For any other scheme, write a module directly as {{openkeylet:password}} or {{openkeylet:service token}} inside URL, header, query, JSON/text body, or form values; OpenKeylet resolves it locally. secretBindings is needed only for optional short aliases. A saved service URL is only a default; any HTTP/HTTPS URL and method may be used, redirects cross origins, and large responses may stream to saveResponseTo.",
+        description = "Send an HTTP request using any enabled OpenKeylet project that contains a configured secret, without returning hidden plaintext. Omit item when this MCP session already selected a compatible project or exactly one compatible project exists; otherwise pass its name or a natural phrase containing it. Built-in API/Basic authentication is injected automatically. OCI Compute projects only support signed GET ListInstances, require compartmentId, and may use page and limit. For any other scheme, write a module directly as {{openkeylet:password}} or {{openkeylet:service token}} inside URL, header, query, JSON/text body, or form values; OpenKeylet resolves it locally. secretBindings is needed only for optional short aliases. The module value is the default service URL and alternateValues lists other saved addresses. Empty or relative url uses the default; an absolute url selects a target. No address failover occurs. Any HTTP/HTTPS URL and method may be used, redirects cross origins, and large responses may stream to saveResponseTo.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<ApiResponse>(),
         annotations(title = "Send an authenticated API request", read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = true)
     )]
@@ -2050,7 +2053,7 @@ impl ServerHandler for VaultMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("openkeylet", env!("CARGO_PKG_VERSION")).with_title("OpenKeylet"))
             .with_instructions(
-            "OpenKeylet lets agents use locally saved credentials without receiving hidden plaintext. An explicit item or unique items_search result becomes the current project; later compatible actions may omit item, and a terminal keeps its own binding. When the user names a project and the action is clear, call it directly. Use items_search only for discovery, selection, inspection, or genuine ambiguity. credential_fill understands common module phrases and may infer a sole secret; omit target to use the current running OpenKeylet terminal, otherwise a connected browser or foreground control, and use submit=true to complete the login. terminal_start makes the opened PTY current, so terminal_write, terminal_read, terminal_stop, and terminal credential fills should omit sessionId unless deliberately switching among multiple terminals. Use terminal_run for one-shot local commands and PTY tools only for persistent interaction. Direct {{openkeylet:module}} placeholders work in commands, stdin, paths, terminal input, SSH, and HTTP values; OpenKeylet substitutes and redacts them locally. terminal_run.stdin and ssh_run.stdin pass scripts, JSON, or other text without shell escaping or temporary files. A password or private-key project can use SSH without saved target metadata: pass host, optional port, and username at runtime; saved values are defaults and port 22 is the fallback. For a saved SSH jump route, call ssh_run, ssh_upload, or ssh_download with target project B directly. OpenKeylet automatically routes through jump project A and authenticates each endpoint with its own credentials. items_search exposes the saved route; items_create/items_update configure sshJumpItemId under the existing write permissions and revision rules. If either host fingerprint is missing or mismatched, stop and ask the user to verify it against a trusted source and confirm it through the OpenKeylet client or local ssh-trust CLI, confirming A before probing B when needed. Never auto-trust keys or bypass the route with a direct or nested ssh connection. Use secretEnv only when a program needs an environment variable, and HTTP secretBindings only for aliases. Never ask the user to reveal a hidden value. terminal_read.until waits without polling and has no deadline unless waitSeconds is supplied. For vault writing, consult vault_write_capabilities, then items_create/items_update. Writing requires desktop folder authorization, uses stable project/module IDs and expectedRevision, and cannot change visibility. Never echo submitted secrets. OpenKeylet has no observation, diagnostic, restricted, or execution modes.",
+            "OpenKeylet lets agents use locally saved credentials without receiving hidden plaintext. An explicit item or unique items_search result becomes the current project; later compatible actions may omit item, and a terminal keeps its own binding. When the user names a project and the action is clear, call it directly. Use items_search only for discovery, selection, inspection, or genuine ambiguity. credential_fill understands common module phrases and may infer a sole secret; omit target to use the current running OpenKeylet terminal, otherwise a connected browser or foreground control, and use submit=true to complete the login. terminal_start makes the opened PTY current, so terminal_write, terminal_read, terminal_stop, and terminal credential fills should omit sessionId unless deliberately switching among multiple terminals. Use terminal_run for one-shot local commands and PTY tools only for persistent interaction. Direct {{openkeylet:module}} placeholders work in commands, stdin, paths, terminal input, SSH, and HTTP values; OpenKeylet substitutes and redacts them locally. terminal_run.stdin and ssh_run.stdin pass scripts, JSON, or other text without shell escaping or temporary files. Host and service URL modules may save other addresses in alternateValues; value is the default. Omitted SSH host or HTTP URL uses that default, relative HTTP paths use the default service URL, and explicit host or absolute URL selects another target. Addresses share project credentials and SSH port; there is no automatic failover. A password or private-key project can use SSH without saved target metadata: pass host, optional port, and username at runtime; saved values are defaults and port 22 is the fallback. For a saved SSH jump route, call ssh_run, ssh_upload, or ssh_download with target project B directly. OpenKeylet automatically routes through jump project A and authenticates each endpoint with its own credentials. items_search exposes the saved route; items_create/items_update configure sshJumpItemId under the existing write permissions and revision rules. If either host fingerprint is missing or mismatched, stop and ask the user to verify it against a trusted source and confirm it through the OpenKeylet client or local ssh-trust CLI, confirming A before probing B when needed. Never auto-trust keys or bypass the route with a direct or nested ssh connection. Use secretEnv only when a program needs an environment variable, and HTTP secretBindings only for aliases. Never ask the user to reveal a hidden value. terminal_read.until waits without polling and has no deadline unless waitSeconds is supplied. For vault writing, consult vault_write_capabilities, then items_create/items_update. Writing requires desktop folder authorization, uses stable project/module IDs and expectedRevision, and cannot change visibility. Never echo submitted secrets. OpenKeylet has no observation, diagnostic, restricted, or execution modes.",
         )
     }
 
@@ -2375,6 +2378,7 @@ mod tests {
                 id: None,
                 modules: vec![
                     ItemModule {
+                        alternate_values: Vec::new(),
                         id: uuid::Uuid::nil(),
                         kind: "username".into(),
                         name: String::new(),
@@ -2382,6 +2386,7 @@ mod tests {
                         agent_visible: Some(true),
                     },
                     ItemModule {
+                        alternate_values: Vec::new(),
                         id: uuid::Uuid::nil(),
                         kind: "password".into(),
                         name: String::new(),
@@ -2389,6 +2394,7 @@ mod tests {
                         agent_visible: Some(false),
                     },
                     ItemModule {
+                        alternate_values: Vec::new(),
                         id: uuid::Uuid::nil(),
                         kind: "totp".into(),
                         name: String::new(),
@@ -2396,6 +2402,7 @@ mod tests {
                         agent_visible: Some(true),
                     },
                     ItemModule {
+                        alternate_values: Vec::new(),
                         id: uuid::Uuid::nil(),
                         kind: "host".into(),
                         name: String::new(),
@@ -2403,6 +2410,7 @@ mod tests {
                         agent_visible: Some(true),
                     },
                     ItemModule {
+                        alternate_values: Vec::new(),
                         id: uuid::Uuid::nil(),
                         kind: "port".into(),
                         name: String::new(),
@@ -2527,6 +2535,7 @@ mod tests {
                 id: None,
                 modules: vec![
                     ItemModule {
+                        alternate_values: Vec::new(),
                         id: uuid::Uuid::nil(),
                         kind: "apiCredential".into(),
                         name: String::new(),
@@ -2534,6 +2543,7 @@ mod tests {
                         agent_visible: Some(false),
                     },
                     ItemModule {
+                        alternate_values: Vec::new(),
                         id: uuid::Uuid::nil(),
                         kind: "url".into(),
                         name: String::new(),
@@ -2780,6 +2790,7 @@ mod tests {
                 id: None,
                 modules: vec![
                     ItemModule {
+                        alternate_values: Vec::new(),
                         id: uuid::Uuid::nil(),
                         kind: "customSecret".into(),
                         name: "service password".into(),
@@ -2787,6 +2798,7 @@ mod tests {
                         agent_visible: Some(false),
                     },
                     ItemModule {
+                        alternate_values: Vec::new(),
                         id: uuid::Uuid::nil(),
                         kind: "totp".into(),
                         name: String::new(),
@@ -2922,6 +2934,7 @@ mod tests {
                 favorite: false,
                 id: None,
                 modules: vec![ItemModule {
+                    alternate_values: Vec::new(),
                     id: uuid::Uuid::nil(),
                     kind: "password".into(),
                     name: String::new(),
@@ -2992,6 +3005,7 @@ mod tests {
                 id: None,
                 modules: vec![
                     ItemModule {
+                        alternate_values: Vec::new(),
                         id: uuid::Uuid::nil(),
                         kind: "username".into(),
                         name: String::new(),
@@ -2999,6 +3013,7 @@ mod tests {
                         agent_visible: Some(false),
                     },
                     ItemModule {
+                        alternate_values: Vec::new(),
                         id: uuid::Uuid::nil(),
                         kind: "password".into(),
                         name: String::new(),
@@ -3569,4 +3584,24 @@ mod tests {
         assert_eq!(result.is_error, Some(true));
         assert!(result.structured_content.is_none());
     }
+    #[test]
+    fn ssh_address_defaults_and_explicit_targets_preserve_the_project_port() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = Vault::open(directory.path().into()).unwrap();
+        let input = serde_json::from_value(serde_json::json!({"name":"multi-host","itemType":"ssh","modules":[
+            {"kind":"host","value":"a.example","alternateValues":["b.example"]},
+            {"kind":"port","value":"2222"},{"kind":"password"},{"kind":"username"}],
+            "secrets":{"password":"mock-only","namedSecrets":{"username":"mock-user"}}
+        })).unwrap();
+        vault.save_connection(input).unwrap();
+        let mcp = VaultMcp::new(vault);
+        let default = mcp.prepare_ssh_connection("multi-host", None, None, None).unwrap();
+        assert_eq!(default.stored.host, "a.example");
+        assert_eq!(default.stored.port, 2222);
+        let explicit = mcp.prepare_ssh_connection("multi-host", Some("b.example"), None, None).unwrap();
+        assert_eq!(explicit.stored.host, "b.example");
+        assert_eq!(explicit.stored.port, 2222);
+        assert_eq!(explicit.secrets.get("password"), Some("mock-only"));
+    }
+
 }

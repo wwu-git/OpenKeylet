@@ -214,10 +214,14 @@ fn oci_ordinary_patch_preserves_signing_data() {
     let after = vault.get_connection(output.id.parse().unwrap()).unwrap();
     assert_eq!(serde_json::to_value(&after.secrets.oci).unwrap(), config);
     assert_eq!(after.stored.base_url, before.stored.base_url);
+    let mut invalid: ConnectionInput = serde_json::from_value(serde_json::to_value(after.stored.portable()).unwrap()).unwrap();
+    invalid.modules[0].alternate_values = vec!["https://other.invalid/".into()];
+    assert!(vault.save_oci_connection(invalid, None, crate::oci::tests::config(), None, None).is_err());
     for patch in [
         json!({"httpAuthType":"bearer"}),
         json!({"itemType":"ssh"}),
         json!({"modules":[{"id":after.stored.modules[0].id,"value":"https://evil.invalid"}]}),
+        json!({"modules":[{"id":after.stored.modules[0].id,"alternateValues":["https://other.invalid/"]}]}),
     ] {
         assert!(update(&vault, &next, patch).is_err());
     }
@@ -445,6 +449,7 @@ fn manual_credential_removal_can_switch_ssh_mode() {
         serde_json::from_value(serde_json::to_value(old.stored.portable()).unwrap()).unwrap();
     input.modules.retain(|m| m.kind != "password");
     input.modules.push(ItemModule {
+        alternate_values: Vec::new(),
         id: Uuid::new_v4(),
         kind: "privateKey".into(),
         name: "privateKey".into(),
@@ -485,7 +490,8 @@ async fn saved_ssh_credentials_authenticate_using_selected_mode_on_loopback() {
     use std::sync::{Arc, Mutex};
     #[derive(Clone)]
     struct TestServer {
-        seen: Arc<Mutex<Vec<&'static str>>>,
+        seen: Arc<Mutex<Vec<(&'static str, &'static str)>>>,
+        endpoint: &'static str,
         public: russh::keys::ssh_key::PublicKey,
     }
     impl server::Server for TestServer {
@@ -502,7 +508,7 @@ async fn saved_ssh_credentials_authenticate_using_selected_mode_on_loopback() {
             password: &str,
         ) -> Result<server::Auth, Self::Error> {
             if user == "deploy" && password == "synthetic-secret" {
-                self.seen.lock().unwrap().push("password");
+                self.seen.lock().unwrap().push((self.endpoint, "password"));
                 Ok(server::Auth::Accept)
             } else {
                 Ok(server::Auth::reject())
@@ -514,7 +520,7 @@ async fn saved_ssh_credentials_authenticate_using_selected_mode_on_loopback() {
             key: &russh::keys::ssh_key::PublicKey,
         ) -> Result<server::Auth, Self::Error> {
             if user == "deploy" && key == &self.public {
-                self.seen.lock().unwrap().push("privateKey");
+                self.seen.lock().unwrap().push((self.endpoint, "privateKey"));
                 Ok(server::Auth::Accept)
             } else {
                 Ok(server::Auth::reject())
@@ -550,12 +556,15 @@ async fn saved_ssh_credentials_authenticate_using_selected_mode_on_loopback() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let mut server = TestServer {
         seen: seen.clone(),
+        endpoint: "a",
         public: parsed.public_key().clone(),
     };
+    let other_public = parsed.public_key().clone();
     let config = Arc::new(server::Config {
         keys: vec![parsed],
         ..Default::default()
     });
+    let other_config = config.clone();
     let task = tokio::spawn(async move {
         server.run_on_socket(config, &listener).await.unwrap();
     });
@@ -581,7 +590,24 @@ async fn saved_ssh_credentials_authenticate_using_selected_mode_on_loopback() {
         assert_eq!(result.stdout, "synthetic-ok");
         assert_eq!(result.exit_code, Some(0));
     }
-    assert_eq!(*seen.lock().unwrap(), vec!["privateKey", "password"]);
+    assert_eq!(*seen.lock().unwrap(), vec![("a", "privateKey"), ("a", "password")]);
+    let listener = match tokio::net::TcpListener::bind(("::1", port)).await {
+        Ok(listener) => listener,
+        Err(error) => { eprintln!("IPv6 multi-host case skipped: {error}"); task.abort(); return; }
+    };
+    let mut other_server = TestServer { seen: seen.clone(), endpoint: "b", public: other_public };
+    let other_task = tokio::spawn(async move { other_server.run_on_socket(other_config, &listener).await.unwrap(); });
+    let current = vault.get_connection(first.id.parse().unwrap()).unwrap();
+    let host = current.stored.modules.iter().find(|module| module.kind == "host").unwrap().id;
+    let token: WriteOutput = current.stored.public(Some(&current.secrets)).into();
+    update(&vault, &token, json!({"modules":[{"id":host,"value":"::1","alternateValues":["127.0.0.1"]}]})).unwrap();
+    let mut current = vault.get_connection(first.id.parse().unwrap()).unwrap();
+    let result = crate::executor::execute_ssh(&vault, &current, "synthetic-command", None, Some(10), &Default::default(), None).await.unwrap();
+    assert_eq!(result.stdout, "synthetic-ok");
+    current.stored.host = "127.0.0.1".into();
+    crate::executor::execute_ssh(&vault, &current, "synthetic-command", None, Some(10), &Default::default(), None).await.unwrap();
+    assert_eq!(*seen.lock().unwrap(), vec![("a", "privateKey"), ("a", "password"), ("b", "password"), ("a", "password")]);
+    other_task.abort();
     task.abort();
 }
 
@@ -607,4 +633,24 @@ fn agent_jump_route_patch_preserves_clears_and_checks_revision_and_scope() {
     vault.change_write_permissions(crate::vault::WritePermissionChange::Enable(false)).unwrap();
     assert!(update(&vault, &cleared, json!({"sshJumpItemId":a.id})).is_err());
     assert!(serde_json::from_value::<UpdateInput>(json!({"id":b.id,"expectedRevision":cleared.revision,"sshHostTrust":[]})).is_err());
+}
+
+#[test]
+fn address_patch_preserves_omitted_values_clears_lists_and_rejects_stale_revisions() {
+    let (_dir, vault) = fixture();
+    allow(&vault, &["Agent"]);
+    let first = vault.agent_create(serde_json::from_value(json!({"name":"multi","itemType":"ssh","folder":"Agent","sshAuthType":"password","modules":[
+        {"kind":"host","value":"a.example","alternateValues":["b.example"]},
+        {"kind":"port","value":22},{"kind":"username","value":"mock"},{"kind":"password","value":"mock-secret"}
+    ]})).unwrap()).unwrap();
+    let host_id = &first.module_ids[0];
+    let second = update(&vault, &first, json!({"description":"keeps addresses"})).unwrap();
+    assert_eq!(vault.list_connections().unwrap()[0].modules[0].alternate_values, ["b.example"]);
+    let third = update(&vault, &second, json!({"modules":[{"id":host_id,"value":"b.example","alternateValues":["a.example"]}]})).unwrap();
+    let saved = vault.list_connections().unwrap().remove(0);
+    assert_eq!(saved.host, "b.example");
+    assert_eq!(saved.modules[0].alternate_values, ["a.example"]);
+    assert!(update(&vault, &second, json!({"modules":[{"id":host_id,"alternateValues":[]}]})).is_err());
+    update(&vault, &third, json!({"modules":[{"id":host_id,"alternateValues":[]}]})).unwrap();
+    assert!(vault.list_connections().unwrap()[0].modules[0].alternate_values.is_empty());
 }

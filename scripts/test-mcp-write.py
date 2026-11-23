@@ -15,14 +15,16 @@ binary = Path(sys.argv[1] if len(sys.argv) > 1 else "src-tauri/target/debug/open
 seen = []
 class Endpoint(BaseHTTPRequestHandler):
     def do_GET(self):
-        seen.append({name.lower():value for name,value in self.headers.items()})
-        self.send_response(200)
+        seen.append(dict({name.lower():value for name,value in self.headers.items()}, _port=self.server.server_port, _path=self.path))
+        self.send_response(503 if self.path.startswith("/fail") else 200)
         self.end_headers()
         self.wfile.write(b'{"ok":true}')
     def log_message(self, *_):
         pass
 server = ThreadingHTTPServer(("127.0.0.1", 0), Endpoint)
 threading.Thread(target=server.serve_forever, daemon=True).start()
+other_server = ThreadingHTTPServer(("127.0.0.1", 0), Endpoint)
+threading.Thread(target=other_server.serve_forever, daemon=True).start()
 try:
     with tempfile.TemporaryDirectory(prefix="openkeylet-write-stdio-") as directory:
         env = dict(os.environ, OPENKEYLET_DATA_DIR=directory, NO_PROXY="127.0.0.1,localhost")
@@ -56,7 +58,11 @@ try:
             rpc("initialize", {"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"isolated-write-test","version":"1"}})
             process.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
             process.stdin.flush()
-            names = {t["name"] for t in rpc("tools/list", {})["result"]["tools"]}
+            tools = rpc("tools/list", {})["result"]["tools"]
+            names = {t["name"] for t in tools}
+            for item in tools:
+                if item["name"] in ("items_create", "items_update"):
+                    assert "alternateValues" in json.dumps(item["inputSchema"])
             assert {"vault_write_capabilities", "items_create", "items_update"} <= names
             assert not data(tool("vault_write_capabilities", {}))["enabled"]
             payload = {"name":"synthetic-api","folder":"Agent","itemType":"api","httpAuthType":"bearer",
@@ -96,6 +102,36 @@ try:
                 else:
                     expected = "Basic " + base64.b64encode(b"test-user:test-password").decode()
                     assert seen[-1]["authorization"] == expected
+            address_a = f"http://127.0.0.1:{server.server_port}/v1/"
+            address_b = f"http://127.0.0.1:{other_server.server_port}/v2/"
+            multi = data(tool("items_create", dict(payload, name="synthetic-multi-route", modules=[
+                {"kind":"url", "value":address_a, "alternateValues":[address_b]},
+                {"kind":"apiCredential", "value":"mock-route-token"}])))
+            route = data(tool("items_search", {"query":"synthetic-multi-route"}))["items"][0]
+            url_module = next(m for m in route["modules"] if m["kind"] == "url")
+            assert url_module["value"] == address_a and url_module["alternateValues"] == [address_b]
+            before_requests = len(seen)
+            data(tool("http_send", {"item":"synthetic-multi-route", "timeoutSeconds":5}))
+            assert len(seen) == before_requests + 1 and seen[-1]["_port"] == server.server_port
+            multi = data(tool("items_update", {"id":multi["id"], "expectedRevision":multi["revision"], "modules":[
+                {"id":url_module["id"], "value":address_b, "alternateValues":[address_a]}]}))
+            data(tool("http_send", {"item":"synthetic-multi-route", "url":"health", "timeoutSeconds":5}))
+            assert seen[-1]["_port"] == other_server.server_port and seen[-1]["_path"] == "/v2/health"
+            data(tool("http_send", {"item":"synthetic-multi-route", "url":address_a, "timeoutSeconds":5}))
+            assert seen[-1]["_port"] == server.server_port
+            multi = data(tool("items_update", {"id":multi["id"], "expectedRevision":multi["revision"], "modules":[
+                {"id":url_module["id"], "value":f"http://127.0.0.1:{server.server_port}/fail", "alternateValues":[address_b]}]}))
+            before_requests = len(seen)
+            data(tool("http_send", {"item":"synthetic-multi-route", "timeoutSeconds":5}))
+            assert len(seen) == before_requests + 1 and seen[-1]["_port"] == server.server_port
+            document = json.loads(path.read_text())
+            local = next(item for item in document["connections"] if str(item["id"]) == multi["id"])
+            next(module for module in local["modules"] if module["kind"] == "url")["agentVisible"] = False
+            path.write_text(json.dumps(document))
+            hidden = data(tool("items_search", {"query":"synthetic-multi-route"}))["items"][0]
+            hidden_module = next(m for m in hidden["modules"] if m["kind"] == "url")
+            assert "value" not in hidden_module and "alternateValues" not in hidden_module
+            assert address_b not in json.dumps(hidden)
             assert tool("items_update", patch).get("isError")
             bad = {"id":created["id"],"expectedRevision":updated["revision"],"folder":"Personal"}
             before = path.read_bytes()
@@ -109,7 +145,7 @@ try:
             unchanged = data(tool("items_search", {"query":"synthetic-api"}))["items"][0]
             assert unchanged["revision"] == updated["revision"]
             assert "replacement-token" not in path.read_text()
-            print("PASS: real MCP stdio discovery, default deny, create/update, hidden search, HTTP Bearer/API Key/Basic use and token replacement, version conflict, move denial, rollback, sanitized schema errors, immediate revocation, encrypted persistence")
+            print("PASS: real MCP stdio discovery, default deny, create/update, hidden search, HTTP Bearer/API Key/Basic use and token replacement, multi-address default/relative/explicit routing without failover, hidden address lists, version conflict, move denial, rollback, sanitized schema errors, immediate revocation, encrypted persistence")
         finally:
             process.terminate()
             try:
@@ -120,3 +156,5 @@ try:
 finally:
     server.shutdown()
     server.server_close()
+    other_server.shutdown()
+    other_server.server_close()

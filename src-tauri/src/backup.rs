@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::{fs, io::Write, path::Path};
 use zeroize::{Zeroize, Zeroizing};
 
-const BACKUP_VERSION: u8 = 8;
+const BACKUP_VERSION: u8 = 9;
 const PASSWORD_BACKUP_AAD: &[u8] = b"openkeylet/password-backup/v1";
 
 #[derive(Serialize, Deserialize)]
@@ -98,7 +98,8 @@ fn backup_aad(version: u8) -> Result<&'static [u8]> {
         5 => Ok(b"kru/backup/v5"),
         6 => Ok(b"kru/backup/v6"),
         7 => Ok(b"kru/backup/v7"),
-        BACKUP_VERSION => Ok(b"kru/backup/v8"),
+        8 => Ok(b"kru/backup/v8"),
+        BACKUP_VERSION => Ok(b"kru/backup/v9"),
         _ => bail!("Unsupported backup file version"),
     }
 }
@@ -195,7 +196,7 @@ pub(crate) fn cloud_snapshot(vault: &Vault) -> Result<Zeroizing<Vec<u8>>> {
 pub(crate) fn inspect_cloud_snapshot(plain: &[u8]) -> Result<(String, usize)> {
     let payload: BackupPayload = serde_json::from_slice(plain)?;
     if payload.format != "mcp-vault-portable"
-        || !matches!(payload.version, 4 | 5 | 6 | 7 | BACKUP_VERSION)
+        || !matches!(payload.version, 4 | 5 | 6 | 7 | 8 | BACKUP_VERSION)
     {
         bail!("Unsupported cloud backup content version");
     }
@@ -316,7 +317,7 @@ fn merge_backup_payload(vault: &Vault, plain: &[u8], version: u8) -> Result<Impo
     let payload: BackupPayload =
         serde_json::from_slice(plain).context("Backup contents are corrupted")?;
     if payload.format != "mcp-vault-portable"
-        || !matches!(payload.version, 4 | 5 | 6 | 7 | BACKUP_VERSION)
+        || !matches!(payload.version, 4 | 5 | 6 | 7 | 8 | BACKUP_VERSION)
         || version != payload.version
     {
         bail!("Unsupported backup content version");
@@ -361,13 +362,13 @@ mod tests {
         );
     }
     #[test]
-    fn older_untyped_v4_and_v5_backups_import_without_a_password() {
+    fn older_v4_v5_and_v8_backups_import_without_a_password() {
         let d = tempdir().unwrap();
         let source = Vault::open(d.path().join("source")).unwrap();
         source
             .save_connection(input(Uuid::new_v4(), "Legacy API", "legacy-marker"))
             .unwrap();
-        for version in [4, 5] {
+        for version in [4, 5, 8] {
             let mut payload = serde_json::to_value(backup_payload(&source).unwrap()).unwrap();
             payload["version"] = serde_json::json!(version);
             let metadata = payload["connections"][0]["connection"]
