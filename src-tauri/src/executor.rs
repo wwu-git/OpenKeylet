@@ -1812,16 +1812,14 @@ pub async fn test_connection(vault: &Vault, connection: &DecryptedConnection) ->
         let result = execute_ssh(
             vault,
             &testable,
-            "printf 'mcp-vault-ok'",
+            "echo mcp-vault-ok",
             None,
             Some(30),
             &HashMap::new(),
             None,
         )
         .await?;
-        if result.stdout != "mcp-vault-ok" {
-            bail!("VPS returned an unexpected result:{}", result.stderr);
-        }
+        validate_ssh_connection_test(&result)?;
         Ok("SSH connection successful".to_owned())
     } else if connection.stored.test_target(&connection.secrets) == Some("http") {
         let mut base = Url::parse(&connection.stored.base_url).context("Invalid API URL")?;
@@ -1852,6 +1850,16 @@ pub async fn test_connection(vault: &Vault, connection: &DecryptedConnection) ->
     } else {
         bail!("This project has no connection target that can be tested automatically")
     }
+}
+
+fn validate_ssh_connection_test(result: &SshResponse) -> Result<()> {
+    if result.exit_code.is_some_and(|code| code != 0)
+        || result.signal.is_some()
+        || result.stdout.trim_end_matches(['\r', '\n']) != "mcp-vault-ok"
+    {
+        bail!("SSH connection test failed: {}", result.stderr.trim());
+    }
+    Ok(())
 }
 
 fn oci_check_request(connection: &DecryptedConnection) -> Result<ApiRequestInput> {
@@ -2075,6 +2083,49 @@ mod tests {
     use chrono::Utc;
     use tempfile::tempdir;
     use uuid::Uuid;
+
+    #[test]
+    fn ssh_connection_test_accepts_windows_and_unix_line_endings() {
+        for stdout in ["mcp-vault-ok", "mcp-vault-ok\n", "mcp-vault-ok\r\n"] {
+            for exit_code in [Some(0), None] {
+                let result = SshResponse {
+                    exit_code,
+                    signal: None,
+                    stdout: stdout.into(),
+                    stderr: String::new(),
+                    stdout_truncated: false,
+                    stderr_truncated: false,
+                };
+                assert!(validate_ssh_connection_test(&result).is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn ssh_connection_test_rejects_failure_status_signal_and_unexpected_output() {
+        for (exit_code, signal, stdout) in [
+            (Some(1), None, "mcp-vault-ok\n"),
+            (Some(0), Some("TERM"), "mcp-vault-ok\n"),
+            (None, Some("TERM"), "mcp-vault-ok\n"),
+            (Some(0), None, "unexpected\n"),
+            (Some(0), None, ""),
+            (Some(0), None, " mcp-vault-ok\n"),
+            (Some(0), None, "mcp-vault-ok \n"),
+        ] {
+            let result = SshResponse {
+                exit_code,
+                signal: signal.map(str::to_owned),
+                stdout: stdout.into(),
+                stderr: "check failed\r\n".into(),
+                stdout_truncated: false,
+                stderr_truncated: false,
+            };
+            assert_eq!(
+                validate_ssh_connection_test(&result).unwrap_err().to_string(),
+                "SSH connection test failed: check failed"
+            );
+        }
+    }
 
     fn stored(base_url: String) -> StoredConnection {
         StoredConnection {

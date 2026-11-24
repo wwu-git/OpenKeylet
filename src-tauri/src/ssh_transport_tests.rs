@@ -137,7 +137,9 @@ impl server::Handler for TestHandler {
     ) -> Result<()> {
         session.channel_success(channel)?;
         if command != b"hold" {
-            let output = if self.server.forward_port.is_some() {
+            let output = if command == b"echo mcp-vault-ok" {
+                b"mcp-vault-ok\r\n".to_vec()
+            } else if self.server.forward_port.is_some() {
                 b"jump-A".to_vec()
             } else if command == b"redaction" {
                 b"jumpsecret jump anVtcA== jump%2B%2F".to_vec()
@@ -320,6 +322,23 @@ impl Fixture {
         .await
         .expect("A and B connections must close");
     }
+}
+
+#[tokio::test]
+async fn jump_connection_check_accepts_windows_line_endings_and_uses_target_route() {
+    let fixture = Fixture::new(true).await;
+    let target = fixture.vault.get_connection(fixture.target).unwrap();
+    assert_eq!(
+        executor::test_connection(&fixture.vault, &target).await.unwrap(),
+        "SSH connection successful"
+    );
+    assert!(fixture.a.auth.load(Ordering::SeqCst) > 0);
+    assert!(fixture.b.auth.load(Ordering::SeqCst) > 0);
+    fixture.closed().await;
+    assert_eq!(
+        *fixture.a.forwards.lock().unwrap(),
+        vec![("private.test.invalid".into(), u32::from(fixture.b_port))]
+    );
 }
 
 #[cfg(unix)]
