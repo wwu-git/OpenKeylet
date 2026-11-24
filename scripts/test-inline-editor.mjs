@@ -153,7 +153,42 @@ try {
   const row = id => page.locator(`.connection-card[data-item-id="${id}"]`);
   const toggle = id => row(id).locator('.item-disclosure');
   const editor = page.locator('#connection-modal');
-  if (process.argv.includes('--key-actions')) {
+  if (process.argv.includes('--field-labels')) {
+    const results = [];
+    for (const mode of ['modal', 'inline']) for (const width of [690, 460]) for (const size of ['standard', 'large']) for (const language of ['zh', 'en']) {
+      await page.setViewportSize({width, height: 900});
+      await page.locator('[data-page="settings"]').click();
+      await page.locator('#text-size').selectOption(size);
+      await page.locator(language === 'zh' ? '[data-language="zh"]' : '[data-language="en"]').click();
+      await page.locator('[data-page="connections"]').click();
+      if (mode === 'modal') await page.locator('#add-connection-button').click();
+      else await toggle('alpha').click();
+      await page.waitForFunction(() => !document.querySelector('#connection-modal').classList.contains('is-folding'));
+      await editor.locator('.identity-grid').scrollIntoViewIfNeeded();
+      const labels = await editor.locator('.identity-grid > .field > span, .vault-metadata > .field > span').evaluateAll(elements => elements.map(element => {
+        const bounds = element.getBoundingClientRect();
+        const control = element.parentElement.querySelector('input, select').getBoundingClientRect();
+        const css = getComputedStyle(element);
+        const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+        const glyphs = [];
+        while (walker.nextNode()) {
+          if (!walker.currentNode.textContent.trim()) continue;
+          const range = document.createRange(); range.selectNodeContents(walker.currentNode);
+          glyphs.push(...[...range.getClientRects()].filter(rect => rect.width && rect.height));
+        }
+        return {text: element.textContent.trim(), height: bounds.height, fontSize: parseFloat(css.fontSize), lineHeight: parseFloat(css.lineHeight), glyphClipped: css.overflow === 'hidden' && glyphs.some(rect => rect.top < bounds.top - 0.5 || rect.bottom > bounds.bottom + 0.5), overlapsControl: glyphs.some(rect => rect.bottom > control.top - 1), fitsWidth: element.scrollWidth <= element.clientWidth + 1};
+      }));
+      const result = {mode, width, size, language, labels}; results.push(result);
+      await fs.writeFile(path.join(artifacts, 'field-labels.json'), JSON.stringify(results, null, 2));
+      assert.ok(labels.length === 4 && labels.every(label => !label.glyphClipped && !label.overlapsControl && label.fitsWidth && label.lineHeight >= label.fontSize * 1.2), `Field labels must remain complete and above inputs: ${JSON.stringify(result)}`);
+      if (mode === 'modal' && language === 'zh') await editor.locator('.identity-grid').screenshot({path: path.join(artifacts, `field-labels-${width}-${size}.png`)});
+      await editor.locator('.modal-footer [data-close-modal]').click();
+      await editor.waitFor({state: 'hidden'});
+      await page.evaluate(async () => { fixture.drafts = []; await refreshDrafts(); });
+    }
+    assert.deepEqual(errors, []);
+    console.log(JSON.stringify({passed: true, cases: results.length, artifacts}));
+  } else if (process.argv.includes('--key-actions')) {
     const keyRow=()=>editor.locator('[data-kind="privateKey"]');
     const checkActions=async label=>{
       await page.waitForFunction(()=>!document.querySelector('#connection-modal').classList.contains('is-folding'));
