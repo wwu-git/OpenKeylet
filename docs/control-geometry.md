@@ -86,3 +86,5 @@ Run the same script with `--grid-editor` to check expanded editor height,
 following-card placement and footer access with 81 simulated items.
 The `--editor-footer` check verifies full button containment and corner hit
 testing in list, grid and new-item editors, including narrow windows and large text.
+The `--key-actions` check verifies single-line private key action labels in
+configured and pending states, plus public-key copy and replacement cancellation.

@@ -86,6 +86,15 @@ html[lang] .modal-card .field > span {
 
 #connection-modal .template-grid button { height: auto; }
 #connection-modal .module-key-control > span { font-size: var(--reading-help); }
+#connection-modal .module-control > :is([data-cancel-pending-key], [data-copy-public-key]) {
+  width: auto;
+  height: auto;
+  min-height: var(--reading-control);
+  flex: 0 0 auto;
+  padding: 5px 8px;
+  margin: 4px 4px 4px 0;
+  white-space: nowrap;
+}
 .key-source-options { max-width: min(320px, 74vw); min-width: 170px; }
 .key-source-options > button { white-space: normal; }
 .desktop-option > :is(#text-size, #item-layout) { min-height: var(--reading-control); }

@@ -156,6 +156,8 @@ try {
   if (process.argv.includes('--key-actions')) {
     const keyRow=()=>editor.locator('[data-kind="privateKey"]');
     const checkActions=async label=>{
+      await page.waitForFunction(()=>!document.querySelector('#connection-modal').classList.contains('is-folding'));
+      await page.locator('#toast-region').evaluate(region=>region.replaceChildren());
       for (const button of await keyRow().locator('[data-copy-public-key], [data-cancel-pending-key]').all()) {
         await button.scrollIntoViewIfNeeded();
         const geometry=await button.evaluate(button=>{
@@ -163,10 +165,12 @@ try {
           const range=document.createRange();
           range.selectNodeContents(button.querySelector('.lettering-ink')||button);
           const lines=[...range.getClientRects()].filter(r=>r.width&&r.height).map(r=>Math.round(r.top));
-          return {text:button.textContent,lines:[...new Set(lines)],width:r.width,height:r.height,inside:r.left>=parent.left-1&&r.right<=parent.right+1,overflow:button.scrollWidth>button.clientWidth+1};
+          const hit=[[r.left+2,r.top+2],[r.right-2,r.top+2],[r.left+2,r.bottom-2],[r.right-2,r.bottom-2]].every(([x,y])=>button.contains(document.elementFromPoint(x,y)));
+          return {text:button.textContent,lines:[...new Set(lines)],width:r.width,height:r.height,inside:r.left>=parent.left-1&&r.right<=parent.right+1,overflow:button.scrollWidth>button.clientWidth+1,hit};
         });
         assert.equal(geometry.lines.length,1,`Private key action label must use one line: ${JSON.stringify({label,...geometry})}`);
         assert.equal(geometry.inside&&!geometry.overflow,true,JSON.stringify({label,...geometry}));
+        assert.equal(geometry.hit,true,`Private key action corners must be clickable: ${JSON.stringify({label,...geometry})}`);
         await button.click({trial:true});
       }
     };
@@ -197,9 +201,9 @@ try {
       await keyRow().locator('[data-stage-key="generate"]').click();
       await keyRow().locator('[data-cancel-pending-key]').waitFor();
       await checkActions(`${mode}-${width}-${size}-${language}-pending`);
+      if (width===460&&size==='large'&&language==='zh') await keyRow().screenshot({path:path.join(artifacts,`key-actions-${mode}.png`)});
       await keyRow().locator('[data-copy-public-key]').click();
       assert.deepEqual(await page.evaluate(()=>fixture.publicKeyCopy),{pendingId:'staged-key',itemId:mode==='modal'?null:'beta'});
-      if (width===460&&size==='large'&&language==='zh') await keyRow().screenshot({path:path.join(artifacts,`key-actions-${mode}.png`)});
       await keyRow().locator('[data-cancel-pending-key]').click();
       assert.equal(await keyRow().locator('[data-cancel-pending-key]').count(),0);
       assert.equal(await keyRow().locator('[data-secret-value]').inputValue(),original,'Cancel replacement preserves the original private key');
