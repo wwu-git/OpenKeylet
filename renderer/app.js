@@ -133,6 +133,17 @@ const staticCopy = [
   ['[data-item-template="ssh"] > span', 'html', 'SSH<small>主机 + 端口 + 账号 + 密码</small>', 'SSH<small>HOST + PORT + USER + PASSWORD</small>'],
   ['[data-item-template="api"] > span', 'html', 'API<small>API 凭据</small>', 'API<small>API CREDENTIAL</small>'],
   ['[data-item-template="oci"] > span', 'html', 'OCI API<small>本地签名代执行，接口和操作由 Agent 决定</small>', 'OCI API<small>Local signing; the agent chooses API operations</small>'],
+  ['#api-service-title', 'text', '选择服务', 'Choose a service'],
+  ['#api-service-modal [data-close-service-picker]', 'aria-label', '关闭', 'Close'],
+  ['#api-service-list', 'aria-label', '服务目录', 'Services'],
+  ['#api-service-search-label', 'text', '搜索服务', 'Search services'],
+  ['#api-service-category-label', 'text', '分类', 'Category'],
+  ['#api-service-target-label', 'text', '目标地址', 'Target address'],
+  ['#api-service-current-label', 'text', '当前地址', 'Current address'],
+  ['#api-service-preview-label', 'text', '填入地址预览', 'Address preview'],
+  ['#api-service-refresh-target', 'text', '重新选择目标地址', 'Refresh target addresses'],
+  ['#api-service-cancel', 'text', '取消', 'Cancel'],
+  ['#api-service-add', 'text', '新增地址', 'Add as another address'],
   ['#http-auth-label', 'text', 'HTTP 认证', 'HTTP authentication'],
   ['#oci-bindings-summary', 'text', 'OCI 签名模块', 'OCI signing modules'],
   ['#oci-bindings-note', 'text', '选择用于签名的模块。删除或清空必需模块后，项目可以保存，调用时会提示配置不完整。', 'Choose the modules used for signing. Missing modules can be saved; requests report incomplete configuration.'],
@@ -174,6 +185,7 @@ function applyLanguage() {
   syncSettingsFilterControl();
   syncTitleSearch();
   renderHttpAuthentication();
+  if (apiServicePicker) renderApiServicePicker();
 }
 
 const ociKeyErrorMessages = {
@@ -282,6 +294,9 @@ let currentSettingsFilter = 'all';
 let titleSearchOpen = false;
 let creationMode = 'add';
 let currentModules = [];
+let apiServiceCatalog;
+let apiServicePicker = null;
+let itemEditorGeneration = 0;
 let editorDrafts = [];
 let currentDraftId = '';
 let removedSecretFields = new Set();
@@ -1319,7 +1334,7 @@ function renderModules() {
         const defaultLabel = localized('设为默认', 'Make default');
         const removeAddressLabel = localized(`删除${addressLabel}`, `Remove ${addressLabel}`);
         return `<div class="module-address-line"><input class="input" ${addressIndex === 0 ? 'data-module-value' : 'data-module-alternate-value'} type="text" value="${escapeHtml(address)}" placeholder="${placeholder}" aria-label="${escapeHtml(addressLabel)}" /><button type="button" class="small-button module-address-default" data-default-address="${addressIndex}" aria-label="${escapeHtml(`${defaultLabel} ${addressLabel}`)}" aria-pressed="${addressIndex === 0}" ${addressIndex === 0 ? 'disabled' : ''}>${addressIndex === 0 ? localized('默认', 'Default') : defaultLabel}</button><button type="button" class="small-button module-address-remove" data-remove-address="${addressIndex}" aria-label="${escapeHtml(removeAddressLabel)}">×</button></div>`;
-      }).join('')}<button type="button" class="small-button module-address-add" data-add-address>${localized('添加地址', 'Add address')}</button></div>`;
+      }).join('')}<div class="module-address-buttons"><button type="button" class="small-button module-address-add" data-add-address>${localized('添加地址', 'Add address')}</button>${module.kind === 'url' ? `<button type="button" class="small-button" data-select-api-service>${localized('选择服务', 'Choose service')}</button>` : ''}</div></div>`;
       actions = `<span class="module-action-spacer" aria-hidden="true"></span>${secretActionButton('copy', false)}`;
     } else {
       const inputType = module.kind === 'port' ? 'number' : 'text';
@@ -1337,6 +1352,135 @@ function renderModules() {
   if (editorHttpAuthType === 'oci-signature' && !ociRegionOptions.length && !ociRegionLoading) {
     ociRegionLoading = invoke('oci_regions').then(regions => { ociRegionOptions = regions; $$('[data-fill-oci-region]').forEach(select => { select.innerHTML = ociRegionChoices(); }); }).catch(error => toast(cleanError(error), 'error')).finally(() => { ociRegionLoading = null; });
   }
+}
+
+const API_SERVICE_CATEGORIES = [
+  ['', '全部服务', 'All services'], ['ai', 'AI 服务', 'AI services'],
+  ['developer', '开发工具', 'Developer tools'], ['cloud', '云服务', 'Cloud services'], ['payments', '支付', 'Payments'],
+];
+
+function moduleAddresses(module) {
+  return [module.value || '', ...(module.alternateValues || [])];
+}
+
+function closeApiServicePicker(restoreFocus = true) {
+  const picker = apiServicePicker;
+  apiServicePicker = null;
+  $('#api-service-modal').classList.add('hidden');
+  if (restoreFocus && picker?.generation === itemEditorGeneration) {
+    const button = $$('[data-select-api-service]', $('#module-list')).find(button => button.closest('.module-row').dataset.moduleId === picker.moduleId);
+    button?.focus({ preventScroll: true });
+  }
+}
+
+async function openApiServicePicker(button) {
+  syncModuleDraft();
+  const module = currentModules.find(module => module.id === button.closest('.module-row').dataset.moduleId && module.kind === 'url');
+  if (!module) return;
+  const picker = { moduleId: module.id, generation: itemEditorGeneration, addresses: moduleAddresses(module), target: 0, entry: null, parameters: {}, query: '', category: '', catalog: null };
+  apiServicePicker = picker;
+  $('#api-service-search').value = '';
+  $('#api-service-modal').classList.remove('hidden');
+  renderApiServicePicker();
+  $('#api-service-search').focus();
+  try {
+    apiServiceCatalog ||= invoke('api_service_catalog').catch(error => { apiServiceCatalog = null; throw error; });
+    const catalog = await apiServiceCatalog;
+    if (apiServicePicker !== picker || picker.generation !== itemEditorGeneration) return;
+    picker.catalog = catalog;
+    renderApiServicePicker();
+  } catch (error) {
+    if (apiServicePicker === picker) $('#api-service-list').textContent = publicMessage(error, localized('无法读取服务目录，请关闭后重试。', 'Unable to load services. Close and try again.'));
+  }
+}
+
+function renderApiServicePicker() {
+  const picker = apiServicePicker;
+  if (!picker) return;
+  $('#api-service-category').innerHTML = API_SERVICE_CATEGORIES.map(([id, zh, en]) => `<option value="${id}" ${picker.category === id ? 'selected' : ''}>${localized(zh, en)}</option>`).join('');
+  const query = picker.query.trim().toLocaleLowerCase();
+  const entries = (picker.catalog || []).filter(entry => (!picker.category || entry.category === picker.category) && `${entry.name} ${entry.urlTemplate} ${entry.requirements}`.toLocaleLowerCase().includes(query));
+  $('#api-service-list').innerHTML = picker.catalog
+    ? entries.map(entry => `<button class="button quiet api-service-option" type="button" data-api-service="${escapeHtml(entry.id)}" aria-pressed="${picker.entry?.id === entry.id}"><strong>${escapeHtml(entry.name)}</strong><small>${escapeHtml(entry.urlTemplate)}</small></button>`).join('') || `<p>${localized('没有匹配的服务。', 'No matching services.')}</p>`
+    : `<p>${localized('正在读取本机服务目录…', 'Loading local services…')}</p>`;
+  const entry = picker.entry;
+  $('#api-service-selection').classList.toggle('hidden', !entry);
+  if (entry) {
+    const hint = entry.authMode === 'external'
+      ? localized('仅填写地址。OpenKeylet 尚未内置该服务的请求签名。', 'Address only. Native request signing is not implemented for this service.')
+      : entry.authMode === 'oci-signature' && editorHttpAuthType !== 'oci-signature'
+        ? localized('此服务需要 OCI 签名认证。填写地址不会配置认证或私钥。', 'This service needs OCI signing. Filling the address does not configure authentication or keys.')
+        : localized('仅填写服务地址，不更改凭据、认证或可见性。', 'Only fills the address. Credentials, authentication and visibility stay unchanged.');
+    $('#api-service-requirements').textContent = `${hint} ${entry.requirements}`;
+    $('#api-service-parameters').innerHTML = entry.parameters.map(name => `<label class="field"><span>${escapeHtml(name === 'region' ? localized('区域', 'Region') : name === 'workspace-id' ? localized('工作区 ID', 'Workspace ID') : name)}</span><input class="input" data-api-service-parameter="${escapeHtml(name)}" value="${escapeHtml(picker.parameters[name] || '')}" maxlength="120" autocomplete="off" /></label>`).join('');
+    $('#api-service-target').innerHTML = picker.addresses.map((address, index) => `<option value="${index}" ${picker.target === index ? 'selected' : ''}>${index === 0 ? localized('默认地址', 'Default address') : localized(`地址 ${index + 1}`, `Address ${index + 1}`)} · ${escapeHtml(address || localized('空地址', 'Empty address'))}</option>`).join('');
+  }
+  renderApiServicePreview();
+}
+
+function apiServicePreview() {
+  const picker = apiServicePicker;
+  if (!picker?.entry) return { error: '' };
+  let candidate = picker.entry.urlTemplate;
+  for (const name of picker.entry.parameters) {
+    const parameter = (picker.parameters[name] || '').trim();
+    if (!parameter) return { error: localized('请先填写完整的地址参数。', 'Complete the address parameters first.') };
+    if (!/^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/.test(parameter)) return { error: localized('地址参数须为 1 至 63 位字母、数字或连字符，首尾不能是连字符。', 'Use 1 to 63 letters, numbers or hyphens, starting and ending with a letter or number.') };
+    candidate = candidate.split(`<${name}>`).join(parameter);
+  }
+  let url;
+  try {
+    url = new URL(candidate);
+    if (/[<>]/.test(candidate) || !['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.hash) throw Error();
+  } catch { return { error: localized('服务地址不完整或无效。', 'The service address is incomplete or invalid.') }; }
+  if (editorHttpAuthType === 'oci-signature') {
+    const region = currentModules.find(module => module.id === editorOciBindings?.region)?.secretValue?.trim();
+    if (!region) return { error: localized('请先填写当前绑定的 OCI 区域模块。', 'Fill the currently bound OCI region module first.') };
+    const suffix = [`.${region}.oraclecloud.com`, `.${region}.oci.oraclecloud.com`].find(suffix => url.hostname.endsWith(suffix));
+    const prefix = suffix ? url.hostname.slice(0, -suffix.length) : '';
+    if (url.protocol !== 'https:' || (url.port && url.port !== '443') || !suffix || !prefix.split('.').every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) {
+      return { error: localized('地址必须是当前绑定区域内的 OCI HTTPS 服务，填写辅助不会修改区域。', 'The address must be an OCI HTTPS endpoint in the bound region. This helper does not change the region.') };
+    }
+  }
+  return { url: url.href, error: '' };
+}
+
+function renderApiServicePreview() {
+  const picker = apiServicePicker;
+  const preview = apiServicePreview();
+  $('#api-service-current').value = picker?.addresses[picker.target] || '';
+  $('#api-service-preview').value = preview.url || '';
+  $('#api-service-error').textContent = preview.error;
+  $('#api-service-add').disabled = !preview.url;
+  $('#api-service-replace').disabled = !preview.url;
+  $('#api-service-replace').textContent = picker?.addresses[picker.target]?.trim() ? localized('替换当前地址', 'Replace current address') : localized('填入地址', 'Fill address');
+}
+
+function applyApiServiceAddress(add) {
+  const picker = apiServicePicker;
+  if (!picker || picker.generation !== itemEditorGeneration) return closeApiServicePicker(false);
+  syncModuleDraft();
+  const module = currentModules.find(module => module.id === picker.moduleId && module.kind === 'url');
+  if (!module || JSON.stringify(moduleAddresses(module)) !== JSON.stringify(picker.addresses)) {
+    $('#api-service-error').textContent = localized('目标地址已变化，请重新选择目标地址后再应用。', 'Target addresses changed. Refresh the target addresses before applying.');
+    return;
+  }
+  const preview = apiServicePreview();
+  if (!preview.url) return renderApiServicePreview();
+  const canonical = value => { const trimmed = value.trim(); try { return new URL(trimmed.includes('://') ? trimmed : `https://${trimmed}`).href; } catch { return trimmed; } };
+  if (picker.addresses.some((address, index) => canonical(address) === preview.url && (add || index !== picker.target))) {
+    $('#api-service-error').textContent = localized('该地址已经存在，没有新增或更改默认地址。', 'This address already exists. No address or default was changed.');
+    return;
+  }
+  const addresses = [...picker.addresses];
+  if (add && addresses.some(address => address.trim())) addresses.push(preview.url);
+  else addresses[picker.target] = preview.url;
+  [module.value, ...module.alternateValues] = addresses;
+  closeApiServicePicker(false);
+  renderModules();
+  const row = $$('.module-row', $('#module-list')).find(row => row.dataset.moduleId === module.id);
+  const index = add && addresses.length > picker.addresses.length ? addresses.length - 1 : picker.target;
+  $$('[data-module-value], [data-module-alternate-value]', row)[index]?.focus();
 }
 
 function ociRegionChoices() {
@@ -1620,7 +1764,7 @@ function applyTemplate(template) {
     identity: ['firstName', 'lastName', 'email', 'phone', 'address1', 'address2', 'city', 'state', 'postalCode', 'country'],
     secureNote: ['secureNote'],
     ssh: ['host', 'port', 'username', 'password'],
-    api: ['apiCredential'],
+    api: ['url', 'apiCredential'],
     blank: [],
   };
   value('#connection-type', template === 'blank' ? 'custom' : template);
@@ -1706,6 +1850,7 @@ async function openEditor(item = null, draft = null) {
     }
     const source = draft?.input || item || null;
     removedSecretFields = new Set();
+    itemEditorGeneration++;
     editorExistingItem = item;
     editorSourceInput = source;
     editorHttpAuthType = source?.httpAuthType || 'auto';
@@ -1763,6 +1908,8 @@ async function openEditor(item = null, draft = null) {
 }
 
 function closeEditor() {
+  itemEditorGeneration++;
+  closeApiServicePicker(false);
   moduleKeyInput = null;
   if (moduleKeyStaging) moduleKeyStaging.cancelled = true;
   for (const module of currentModules) {
@@ -2283,6 +2430,27 @@ document.addEventListener('click', async (event) => {
     const input = copyInput ? $(`#${copyInput.dataset.copyInput}`) : $('[data-secret-value], [data-module-value]', copyModule.closest('.module-row'));
     try { await api.copyOwnerValue(input.value); toast(localized('已复制', 'Copied')); } catch (error) { toast(cleanError(error), 'error'); }
   }
+  const serviceButton = event.target.closest('[data-select-api-service]');
+  if (serviceButton) { await openApiServicePicker(serviceButton); return; }
+  if (event.target.closest('[data-close-service-picker]') || event.target === $('#api-service-modal')) { closeApiServicePicker(); return; }
+  const serviceOption = event.target.closest('[data-api-service]');
+  if (serviceOption && apiServicePicker) {
+    apiServicePicker.entry = apiServicePicker.catalog.find(entry => entry.id === serviceOption.dataset.apiService);
+    apiServicePicker.parameters = {};
+    if (apiServicePicker.entry.parameters.includes('region') && editorHttpAuthType === 'oci-signature') apiServicePicker.parameters.region = currentModules.find(module => module.id === editorOciBindings?.region)?.secretValue || '';
+    renderApiServicePicker();
+    ($('[data-api-service-parameter]', $('#api-service-modal')) || $('#api-service-target')).focus();
+  }
+  if (event.target.closest('#api-service-replace')) applyApiServiceAddress(false);
+  if (event.target.closest('#api-service-add')) applyApiServiceAddress(true);
+  if (event.target.closest('#api-service-refresh-target') && apiServicePicker) {
+    syncModuleDraft();
+    const module = currentModules.find(module => module.id === apiServicePicker.moduleId && module.kind === 'url');
+    if (!module) { closeApiServicePicker(); return; }
+    apiServicePicker.addresses = moduleAddresses(module);
+    apiServicePicker.target = Math.min(apiServicePicker.target, apiServicePicker.addresses.length - 1);
+    renderApiServicePicker();
+  }
   const addressAction = event.target.closest('[data-add-address], [data-default-address], [data-remove-address]');
   if (addressAction) {
     syncModuleDraft();
@@ -2483,6 +2651,8 @@ $('#connection-filter-chips').addEventListener('click', event => {
   setTitleSearchOpen(true);
 });
 document.addEventListener('input', (event) => {
+  if (event.target.id === 'api-service-search' && apiServicePicker) { apiServicePicker.query = event.target.value; renderApiServicePicker(); return; }
+  if (event.target.matches('[data-api-service-parameter]') && apiServicePicker) { apiServicePicker.parameters[event.target.dataset.apiServiceParameter] = event.target.value; renderApiServicePreview(); return; }
   if (event.target.matches('.pin-cell-input')) {
     event.target.value = event.target.value.replace(/\D/g, '').slice(-1);
     if (event.target.value) {
@@ -2506,6 +2676,18 @@ document.addEventListener('input', (event) => {
     renderActivity();
   }
   if (page === 'settings') applySettingsSearch();
+});
+
+$('#api-service-category').addEventListener('change', event => {
+  if (!apiServicePicker) return;
+  apiServicePicker.category = event.target.value;
+  renderApiServicePicker();
+  $('#api-service-category').focus();
+});
+$('#api-service-target').addEventListener('change', event => {
+  if (!apiServicePicker) return;
+  apiServicePicker.target = Number(event.target.value);
+  renderApiServicePreview();
 });
 
 const itemList = $('#connections-list');
@@ -2803,6 +2985,17 @@ document.addEventListener('paste', (event) => {
 });
 
 document.addEventListener('keydown', (event) => {
+  if (apiServicePicker) {
+    if (event.key === 'Escape') { event.preventDefault(); closeApiServicePicker(); return; }
+    if (event.key === 'Tab') {
+      const controls = $$('button:not(:disabled), input, select', $('#api-service-modal')).filter(control => control.getClientRects().length && !control.closest('.hidden'));
+      const first = controls[0], last = controls.at(-1);
+      if (event.shiftKey && (document.activeElement === first || !controls.includes(document.activeElement)) || !event.shiftKey && (document.activeElement === last || !controls.includes(document.activeElement))) {
+        event.preventDefault(); (event.shiftKey ? last : first)?.focus();
+      }
+    }
+    return;
+  }
   if (event.key === 'Escape' && switchPointerDrag) {
     event.preventDefault(); void finishSwitchDrag(false); return;
   }

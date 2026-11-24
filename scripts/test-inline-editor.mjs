@@ -76,6 +76,18 @@ try {
       }
       if (command === 'copy_ssh_public_key') { fixture.publicKeyCopy = args; return; }
       if (command === 'discard_private_key') { fixture.discardedKey = args.id; return; }
+      if (command === 'api_service_catalog') {
+        const catalog = [
+          {id:'profile-github',name:'GitHub',category:'developer',urlTemplate:'https://api.github.com/',parameters:[],requirements:'Bearer token',authMode:'bearer'},
+          {id:'profile-openai',name:'OpenAI',category:'ai',urlTemplate:'https://api.openai.com/v1/',parameters:[],requirements:'Bearer token',authMode:'bearer'},
+          {id:'profile-cloudflare',name:'Cloudflare',category:'cloud',urlTemplate:'https://api.cloudflare.com/client/v4/',parameters:[],requirements:'Bearer token',authMode:'bearer'},
+          {id:'template-oci',name:'OCI Object Storage',category:'cloud',urlTemplate:'https://objectstorage.<region>.oraclecloud.com/',parameters:['region'],requirements:'OCI request signing',authMode:'oci-signature'},
+          {id:'template-aws',name:'AWS EC2',category:'cloud',urlTemplate:'https://ec2.<region>.amazonaws.com/',parameters:['region'],requirements:'AWS SigV4 signing',authMode:'external'},
+          {id:'template-workspace',name:'Model Studio Workspace',category:'ai',urlTemplate:'https://<workspace-id>.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/',parameters:['workspace-id'],requirements:'Bearer token',authMode:'bearer'},
+        ];
+        if (fixture.deferApiCatalog) return new Promise(resolve => { fixture.resolveApiCatalog = () => resolve(catalog); });
+        return catalog;
+      }
       if (command === 'oci_regions') return ['ap-tokyo-1', 'ap-osaka-1'];
       if (command === 'stage_oci_key') {
         (fixture.ociSources ??= []).push({source:args.source,hasText:typeof args.text==='string'});
@@ -140,7 +152,178 @@ try {
   const row = id => page.locator(`.connection-card[data-item-id="${id}"]`);
   const toggle = id => row(id).locator('.item-disclosure');
   const editor = page.locator('#connection-modal');
-  if (process.argv.includes('--oci')) {
+  if (process.argv.includes('--api-services')) {
+    const picker = page.locator('#api-service-modal');
+    const urls = () => editor.locator('[data-kind="url"]');
+    const addresses = () => urls().locator('[data-module-value], [data-module-alternate-value]');
+    const openPicker = async name => {
+      await urls().locator('[data-select-api-service]').click();
+      await picker.waitFor({state:'visible'});
+      if (name) await picker.locator('[data-api-service]').filter({has:page.locator('strong',{hasText:name})}).click();
+    };
+    const closeEditor = async () => {
+      await editor.locator('.modal-footer [data-close-modal]').click();
+      await editor.waitFor({state:'hidden'});
+    };
+    await page.locator('#add-connection-button').click();
+    await page.locator('[data-item-template="api"]').click();
+    assert.equal(await urls().count(),1);
+    await openPicker('GitHub');
+    assert.equal(await picker.locator('#api-service-preview').inputValue(),'https://api.github.com/');
+    await picker.locator('#api-service-cancel').click();
+    assert.equal(await addresses().first().inputValue(),'');
+    assert.equal(await page.evaluate(()=>fixture.saved.length),0);
+    await closeEditor();
+    await toggle('alpha').click();
+    await openPicker('GitHub');
+    assert.equal(await addresses().first().inputValue(),'https://example.test');
+    assert.match(await picker.locator('#api-service-replace').innerText(),/Replace/i);
+    await picker.locator('#api-service-replace').click();
+    assert.equal(await addresses().first().inputValue(),'https://api.github.com/');
+    await page.locator('#save-connection-button').click();
+    await editor.waitFor({state:'hidden'});
+    const savedBefore = await page.evaluate(()=>JSON.stringify(fixture.saved.at(-1)));
+    const saved = JSON.parse(savedBefore);
+    assert.equal(saved.httpAuthType,'auto');
+    assert.equal(saved.secrets.password,'synthetic-password');
+    assert.equal(saved.modules.find(module=>module.kind==='password').agentVisible,false);
+    await toggle('alpha').click();
+    await addresses().first().fill('api.github.com');
+    await openPicker('GitHub');
+    assert.equal(await picker.locator('#api-service-target').evaluate(el=>el===document.activeElement),true);
+    await picker.locator('#api-service-add').click();
+    assert.match(await picker.locator('#api-service-error').innerText(),/already exists/);
+    await page.keyboard.press('Escape');
+    await addresses().first().fill('https://api.github.com/');
+    await urls().locator('[data-add-address]').click();
+    await addresses().nth(1).fill('https://alternate.test/');
+    await openPicker('Cloudflare');
+    await picker.locator('#api-service-target').selectOption('1');
+    await picker.locator('#api-service-replace').click();
+    assert.equal(await addresses().first().inputValue(),'https://api.github.com/');
+    assert.equal(await addresses().nth(1).inputValue(),'https://api.cloudflare.com/client/v4/');
+    await openPicker('OpenAI');
+    await picker.locator('#api-service-add').click();
+    assert.equal(await addresses().count(),3);
+    assert.equal(await addresses().first().inputValue(),'https://api.github.com/');
+    await openPicker('OpenAI');
+    await picker.locator('#api-service-add').click();
+    assert.match(await picker.locator('#api-service-error').innerText(),/already exists/);
+    assert.equal(await addresses().count(),3);
+    await page.keyboard.press('Escape');
+    await picker.waitFor({state:'hidden'});
+    assert.equal(await editor.isVisible(),true);
+    assert.equal(await urls().locator('[data-select-api-service]').evaluate(el=>el===document.activeElement),true);
+    await openPicker();
+    await picker.locator('#api-service-search').fill('workspace');
+    assert.equal(await picker.locator('[data-api-service]').count(),1);
+    await picker.locator('#api-service-category').selectOption('cloud');
+    assert.equal(await picker.locator('[data-api-service]').count(),0);
+    await picker.locator('#api-service-category').selectOption('ai');
+    assert.equal(await picker.locator('[data-api-service]').count(),1);
+    await picker.locator('[data-api-service="template-workspace"]').click();
+    assert.equal(await picker.locator('#api-service-add').isDisabled(),true);
+    await picker.locator('[data-api-service-parameter="workspace-id"]').fill('bad.example/');
+    assert.equal(await picker.locator('#api-service-add').isDisabled(),true);
+    for (const invalid of ['bad label','bad/label','bad-label-','a'.repeat(64)]) {
+      await picker.locator('[data-api-service-parameter="workspace-id"]').fill(invalid);
+      assert.equal(await picker.locator('#api-service-add').isDisabled(),true);
+    }
+    await picker.locator('[data-api-service-parameter="workspace-id"]').fill('a'.repeat(63));
+    assert.equal(await picker.locator('#api-service-add').isEnabled(),true);
+    await picker.locator('[data-api-service-parameter="workspace-id"]').fill('workspace-demo');
+    assert.equal(await picker.locator('#api-service-preview').inputValue(),'https://workspace-demo.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/');
+    await picker.locator('#api-service-add').click();
+    assert.equal(await addresses().count(),4);
+    await openPicker('OCI Object Storage');
+    assert.match(await picker.locator('#api-service-requirements').innerText(),/needs OCI signing/);
+    await picker.locator('[data-api-service-parameter="region"]').fill('ap-tokyo-1');
+    await picker.locator('#api-service-add').click();
+    assert.equal(await page.locator('#http-auth-type').inputValue(),'auto');
+    await openPicker('AWS EC2');
+    assert.match(await picker.locator('#api-service-requirements').innerText(),/Address only/);
+    await page.keyboard.press('Escape');
+    await openPicker('GitHub');
+    await page.evaluate(()=>{
+      const input=document.querySelector('[data-kind="url"] [data-module-value]');
+      input.value='https://changed-while-open.test/';input.dispatchEvent(new Event('input',{bubbles:true}));
+    });
+    await picker.locator('#api-service-replace').click();
+    assert.match(await picker.locator('#api-service-error').innerText(),/changed/);
+    assert.equal(await addresses().first().inputValue(),'https://changed-while-open.test/');
+    await picker.locator('#api-service-refresh-target').click();
+    assert.equal(await picker.locator('#api-service-current').inputValue(),'https://changed-while-open.test/');
+    await picker.locator('#api-service-replace').click();
+    assert.equal(await addresses().first().inputValue(),'https://api.github.com/');
+    await openPicker('Cloudflare');
+    await page.evaluate(()=>document.querySelector('[data-kind="url"] [data-default-address="1"]').click());
+    await picker.locator('#api-service-replace').click();
+    assert.match(await picker.locator('#api-service-error').innerText(),/changed/);
+    await page.keyboard.press('Escape');
+    assert.equal(await page.evaluate(()=>JSON.stringify(fixture.saved.at(-1))),savedBefore);
+    await closeEditor();
+    assert.equal(await page.evaluate(()=>JSON.stringify(fixture.saved.at(-1))),savedBefore);
+    await page.locator('#add-connection-button').click();
+    await page.locator('[data-item-template="oci"]').click();
+    await editor.locator('[data-fill-oci-region]').selectOption('ap-tokyo-1');
+    const before = await page.evaluate(()=>JSON.stringify({auth:editorHttpAuthType,bindings:editorOciBindings,secrets:currentModules.filter(module=>module.kind!=='url')}));
+    await openPicker('OCI Object Storage');
+    assert.equal(await picker.locator('[data-api-service-parameter="region"]').inputValue(),'ap-tokyo-1');
+    await picker.locator('[data-api-service-parameter="region"]').fill('ap-osaka-1');
+    assert.equal(await picker.locator('#api-service-replace').isDisabled(),true);
+    assert.match(await picker.locator('#api-service-error').innerText(),/bound region/);
+    await picker.locator('[data-api-service="profile-github"]').click();
+    assert.equal(await picker.locator('#api-service-replace').isDisabled(),true);
+    await picker.locator('[data-api-service="template-oci"]').click();
+    await picker.locator('#api-service-replace').click();
+    assert.equal(await addresses().first().inputValue(),'https://objectstorage.ap-tokyo-1.oraclecloud.com/');
+    assert.equal(await page.evaluate(()=>JSON.stringify({auth:editorHttpAuthType,bindings:editorOciBindings,secrets:currentModules.filter(module=>module.kind!=='url')})),before);
+    await openPicker('OCI Object Storage');
+    await page.evaluate(()=>{const module=currentModules.find(module=>module.id===editorOciBindings.region);module.secretValue='';renderModules();});
+    await picker.locator('[data-api-service="template-oci"]').click();
+    assert.match(await picker.locator('#api-service-error').innerText(),/Complete|bound/);
+    await page.keyboard.press('Escape');
+    await closeEditor();
+    await toggle('beta').click();
+    await page.evaluate(()=>{apiServiceCatalog=null;fixture.deferApiCatalog=true;});
+    await openPicker();
+    await page.waitForFunction(()=>typeof fixture.resolveApiCatalog==='function');
+    await page.keyboard.press('Escape');
+    await closeEditor();
+    await toggle('alpha').click();
+    await page.evaluate(()=>fixture.resolveApiCatalog());
+    assert.equal(await picker.isHidden(),true);
+    await openPicker('GitHub');
+    await page.evaluate(async()=>{fixture.owner={pinConfigured:true,unlocked:false};await refreshOwnerLock(false);});
+    assert.equal(await picker.isHidden(),true);
+    assert.equal(await editor.isHidden(),true);
+    await page.evaluate(async()=>{fixture.owner={pinConfigured:false,unlocked:true};await refreshOwnerLock(false);fixture.deferApiCatalog=false;document.querySelector('#toast-region').replaceChildren();});
+    await toggle('alpha').click();
+    await openPicker('AWS EC2');
+    await picker.locator('[data-api-service-parameter="region"]').fill('us-east-1');
+    await picker.locator('#api-service-replace').focus();
+    await page.keyboard.press('Tab');
+    assert.equal(await picker.locator('[data-close-service-picker]').first().evaluate(el=>el===document.activeElement),true);
+    await page.keyboard.press('Shift+Tab');
+    assert.equal(await picker.locator('#api-service-replace').evaluate(el=>el===document.activeElement),true);
+    for (const width of [690,460]) {
+      await page.setViewportSize({width,height:760});
+      for (const language of ['en','zh']) {
+        await page.locator(`[data-language="${language}"]`).evaluate(button=>button.click());
+        for (const theme of ['dark','light']) {
+          if (await page.locator('html').getAttribute('data-theme')!==theme) await page.locator('#theme-toggle').evaluate(button=>button.click());
+          assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+          assert.equal(await picker.evaluate(el=>el.scrollWidth<=el.clientWidth+1),true);
+          const buttonGeometry=await picker.locator('button').evaluateAll(buttons=>buttons.map(button=>({text:button.textContent,width:button.clientWidth,scrollWidth:button.scrollWidth,height:button.clientHeight,scrollHeight:button.scrollHeight})));
+          assert.ok(buttonGeometry.every(button=>button.scrollWidth<=button.width+1&&button.scrollHeight<=button.height+1),JSON.stringify(buttonGeometry));
+          assert.equal(await picker.evaluate(el=>el.querySelector('#api-service-refresh-target').getBoundingClientRect().bottom<=el.querySelector('#api-service-current').closest('label').getBoundingClientRect().top+1),true);
+          await picker.screenshot({path:path.join(artifacts,`api-services-${width}-${language}-${theme}.png`)});
+        }
+      }
+    }
+    assert.deepEqual(errors,[]);
+    console.log(`API service picker passed: ${artifacts}`);
+  } else if (process.argv.includes('--oci')) {
     const rows = editor.locator('#module-list .module-row');
     const module = name => rows.filter({ has: page.locator(`[data-module-name][value="${name}"]`) });
     const keyRow = () => editor.locator('[data-kind="privateKey"]');

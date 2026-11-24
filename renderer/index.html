@@ -300,6 +300,26 @@
       </div>
     </div>
 
+    <div class="modal-backdrop hidden api-service-modal" id="api-service-modal" role="dialog" aria-modal="true" aria-labelledby="api-service-title">
+      <div class="modal-card">
+        <div class="modal-header"><h2 id="api-service-title">Choose a service</h2><button type="button" class="icon-button" data-close-service-picker aria-label="Close">×</button></div>
+        <div class="form-scroll">
+          <div class="field-grid two"><label class="field"><span id="api-service-search-label">Search services</span><input class="input" id="api-service-search" type="search" autocomplete="off" /></label><label class="field"><span id="api-service-category-label">Category</span><select class="input" id="api-service-category"></select></label></div>
+          <div id="api-service-list" class="api-service-list" aria-label="Services"></div>
+          <div id="api-service-selection" class="hidden">
+            <p id="api-service-requirements"></p>
+            <div class="field-grid two" id="api-service-parameters"></div>
+            <label class="field"><span id="api-service-target-label">Target address</span><select class="input" id="api-service-target"></select></label>
+            <button class="small-button" type="button" id="api-service-refresh-target">Refresh target addresses</button>
+            <label class="field"><span id="api-service-current-label">Current address</span><input class="input" id="api-service-current" readonly /></label>
+            <label class="field"><span id="api-service-preview-label">Address preview</span><input class="input" id="api-service-preview" readonly /></label>
+            <p id="api-service-error" role="status"></p>
+          </div>
+        </div>
+        <div class="modal-footer"><button type="button" class="button quiet" data-close-service-picker id="api-service-cancel">Cancel</button><div class="button-row"><button type="button" class="button quiet" id="api-service-add" disabled>Add as another address</button><button type="button" class="button primary" id="api-service-replace" disabled>Fill address</button></div></div>
+      </div>
+    </div>
+
     <div class="modal-backdrop hidden" id="github-modal" role="dialog" aria-modal="true" aria-labelledby="github-modal-title">
       <div class="modal-card github-modal-card">
         <div class="modal-header"><h2 id="github-modal-title">Connect GitHub</h2><button class="icon-button" type="button" id="github-modal-close" aria-label="Close">×</button></div>

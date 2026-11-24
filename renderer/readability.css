@@ -125,3 +125,27 @@ html[lang] .modal-card .field > span {
   white-space: normal;
   overflow-wrap: anywhere;
 }
+
+.module-address-buttons { display: flex; flex-wrap: wrap; gap: 7px; }
+.api-service-modal { z-index: 110; }
+.api-service-modal .modal-card { width: min(680px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); }
+.api-service-modal .form-scroll { display: grid; gap: 12px; }
+.api-service-modal .field > span, .api-service-modal p { font-size: var(--reading-help); line-height: 1.4; }
+.api-service-modal .input, .api-service-modal .button, .api-service-modal .small-button { font-size: var(--reading-label); }
+.api-service-modal .input { min-width: 0; width: 100%; min-height: var(--reading-control); }
+.api-service-modal .api-service-list { display: grid; grid-auto-rows: max-content; align-content: start; gap: 4px; max-height: 230px; min-height: 50px; overflow: auto; }
+.api-service-modal .api-service-option { display: block; width: 100%; min-width: 0; height: auto; min-height: 48px; padding: 8px; text-align: left; white-space: normal; background: var(--ui-well-face); box-shadow: var(--ui-well-shadow); }
+.api-service-modal .api-service-option strong, .api-service-modal .api-service-option small { display: block; overflow-wrap: anywhere; }
+.api-service-modal .api-service-option strong { font-size: var(--reading-text); }
+.api-service-modal .api-service-option small { font-size: var(--reading-help); line-height: 1.4; }
+.api-service-modal .api-service-option[aria-pressed="true"] { color: var(--accent-ink); outline: 1px solid var(--accent-ink); outline-offset: -2px; }
+.api-service-modal #api-service-selection { display: grid; min-width: 0; gap: 10px; }
+.api-service-modal #api-service-error { color: var(--danger); margin: 0; }
+.api-service-modal .modal-footer { flex-wrap: wrap; gap: 8px; }
+.api-service-modal .modal-footer .button-row { flex-wrap: wrap; }
+.api-service-modal #api-service-refresh-target { justify-self: start; width: auto; max-width: 100%; height: auto; min-height: var(--reading-control); padding: 5px 8px; white-space: normal; }
+.api-service-modal .modal-footer .button { height: auto; min-height: var(--reading-control); white-space: normal; }
+.api-service-modal .modal-header .icon-button { width: var(--reading-control); min-width: var(--reading-control); height: var(--reading-control); min-height: var(--reading-control); padding: 0; font-size: var(--reading-text); line-height: 1; }
+@media (max-width: 560px) {
+  .api-service-modal .field-grid.two { grid-template-columns: minmax(0, 1fr); }
+}
