@@ -65,6 +65,7 @@ try {
       }
       if (command === 'update_settings') { fixture.settingsWrites.push(args.patch); Object.assign(state.settings, args.patch); return state.settings; }
       if (command === 'owner_secret_view' && args.id === 'oci') return { fields: Object.entries(fixture.ociSecrets || {}).map(([name, value]) => ({ name, value })) };
+      if (command === 'owner_secret_view' && fixture.keyActionSecret) return { fields: [{name:'privateKey',value:fixture.keyActionSecret}] };
       if (command === 'copy_owner_value') { fixture.copiedValue = args.value; return; }
       if (command === 'owner_secret_view') return { fields: [{ name: 'password', value: 'synthetic-password' }] };
       if (command === 'generate_password') return 'Aa1!'.repeat(32).slice(0, args.options.length);
@@ -152,7 +153,65 @@ try {
   const row = id => page.locator(`.connection-card[data-item-id="${id}"]`);
   const toggle = id => row(id).locator('.item-disclosure');
   const editor = page.locator('#connection-modal');
-  if (process.argv.includes('--editor-footer')) {
+  if (process.argv.includes('--key-actions')) {
+    const keyRow=()=>editor.locator('[data-kind="privateKey"]');
+    const checkActions=async label=>{
+      for (const button of await keyRow().locator('[data-copy-public-key], [data-cancel-pending-key]').all()) {
+        await button.scrollIntoViewIfNeeded();
+        const geometry=await button.evaluate(button=>{
+          const r=button.getBoundingClientRect(), parent=button.closest('.module-control').getBoundingClientRect();
+          const range=document.createRange();
+          range.selectNodeContents(button.querySelector('.lettering-ink')||button);
+          const lines=[...range.getClientRects()].filter(r=>r.width&&r.height).map(r=>Math.round(r.top));
+          return {text:button.textContent,lines:[...new Set(lines)],width:r.width,height:r.height,inside:r.left>=parent.left-1&&r.right<=parent.right+1,overflow:button.scrollWidth>button.clientWidth+1};
+        });
+        assert.equal(geometry.lines.length,1,`Private key action label must use one line: ${JSON.stringify({label,...geometry})}`);
+        assert.equal(geometry.inside&&!geometry.overflow,true,JSON.stringify({label,...geometry}));
+        await button.click({trial:true});
+      }
+    };
+    await page.evaluate(async()=>{
+      fixture.keyActionSecret='SYNTHETIC-ORIGINAL-PRIVATE-KEY';
+      Object.assign(fixture.state.connections.find(item=>item.id==='beta'),{privateKeyName:'fixture.pem',modules:[{kind:'privateKey',configured:true,agentVisible:false}]});
+      await refresh();
+    });
+    for (const mode of ['list','grid','modal']) for (const width of [690,460]) for (const size of ['standard','large']) for (const language of ['en','zh']) {
+      await page.setViewportSize({width,height:800});
+      await page.locator('[data-page="settings"]').click();
+      await page.locator('#item-layout').selectOption(mode==='grid'?'grid':'list');
+      await page.locator('#text-size').selectOption(size);
+      await page.locator(`[data-language="${language}"]`).click();
+      await page.locator('[data-page="connections"]').click();
+      if (mode==='modal') {
+        await page.locator('#add-connection-button').click();
+        await page.locator('#add-module-button').click();
+        await page.locator('[data-add-module="privateKey"]').click();
+      } else {
+        await toggle('beta').click();
+        await checkActions(`${mode}-${width}-${size}-${language}-configured`);
+        await keyRow().locator('[data-copy-public-key]').click();
+        assert.deepEqual(await page.evaluate(()=>fixture.publicKeyCopy),{pendingId:null,itemId:'beta'});
+      }
+      const original=await keyRow().locator('[data-secret-value]').inputValue();
+      await keyRow().locator('.key-source-menu summary').click();
+      await keyRow().locator('[data-stage-key="generate"]').click();
+      await keyRow().locator('[data-cancel-pending-key]').waitFor();
+      await checkActions(`${mode}-${width}-${size}-${language}-pending`);
+      await keyRow().locator('[data-copy-public-key]').click();
+      assert.deepEqual(await page.evaluate(()=>fixture.publicKeyCopy),{pendingId:'staged-key',itemId:mode==='modal'?null:'beta'});
+      if (width===460&&size==='large'&&language==='zh') await keyRow().screenshot({path:path.join(artifacts,`key-actions-${mode}.png`)});
+      await keyRow().locator('[data-cancel-pending-key]').click();
+      assert.equal(await keyRow().locator('[data-cancel-pending-key]').count(),0);
+      assert.equal(await keyRow().locator('[data-secret-value]').inputValue(),original,'Cancel replacement preserves the original private key');
+      assert.equal(await page.evaluate(()=>fixture.discardedKey),'staged-key');
+      await editor.locator('.modal-footer [data-close-modal]').click();
+      await editor.waitFor({state:'hidden'});
+      await page.evaluate(async()=>{fixture.drafts=[];await refreshDrafts();});
+    }
+    assert.equal(await page.evaluate(()=>fixture.saved.length),0);
+    assert.deepEqual(errors,[]);
+    console.log(`Key actions passed: ${artifacts}`);
+  } else if (process.argv.includes('--editor-footer')) {
     const results=[];
     for (const mode of ['list','grid','modal']) for (const width of [690,460]) for (const size of ['standard','large']) for (const language of ['en','zh']) {
       await page.setViewportSize({width,height:760});
