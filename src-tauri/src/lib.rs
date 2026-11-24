@@ -3,6 +3,7 @@ pub mod backup;
 pub mod browser;
 pub mod browser_vault;
 pub mod crypto;
+pub mod certificates;
 pub mod executor;
 pub mod generator;
 pub mod github_backup;
