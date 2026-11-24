@@ -587,7 +587,11 @@ impl StoredConnection {
 
     pub fn test_target(&self, secrets: &SecretBundle) -> Option<&'static str> {
         if self.http_auth_type == crate::oci::AUTH_MODE {
-            return None; // ListInstances needs an explicit compartment.
+            return secrets
+                .oci
+                .as_ref()
+                .filter(|credential| credential.is_configured())
+                .map(|_| "oci");
         }
         if self.has_capability(secrets, "ssh")
             && !self.host.trim().is_empty()

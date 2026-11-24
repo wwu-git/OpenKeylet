@@ -100,6 +100,11 @@ try {
         return saved;
       }
       if (command === 'oci_editor_state') return { config: fixture.savedOci.config, hasKey: true };
+      if (command === 'test_connection' && args.id === 'oci') {
+        (fixture.ociChecks ??= []).push(args.id);
+        if (fixture.ociCheckFailure) throw Error('OCI_CHECK_FAILED: HTTP 403; request ID: denied-fixture');
+        return 'OCI_CHECK_OK: HTTP 200; request ID: check-fixture';
+      }
       if (command === 'save_editor_draft') {
         if (fixture.failDraft) throw Error('Synthetic draft failure');
         const draft = { id: args.draftId || `draft-${args.input.id || 'new'}`, input: structuredClone(args.input) };
@@ -213,6 +218,29 @@ try {
     await editor.waitFor({state:'hidden'});
     const saved = await page.evaluate(()=>JSON.stringify(fixture.savedOci));
     assert.ok(!saved.includes('SYNTHETIC-MANUAL-KEY-MARKER'));
+    for (const language of ['en','zh']) {
+      await page.locator(`[data-language="${language}"]`).click();
+      const check = row('oci').locator('[data-action="test"]');
+      assert.equal(await check.isEnabled(),true);
+      assert.match(await check.getAttribute('title'),language==='zh' ? /租户根区间/ : /tenancy root compartment/);
+      await check.click();
+      const success = language==='zh' ? 'OCI 租户根区间检查成功，HTTP 200' : 'OCI tenancy root compartment check successful, HTTP 200';
+      await page.locator('#toast-region .toast').filter({hasText:success}).waitFor();
+      await page.evaluate(()=>{fixture.ociCheckFailure=true;document.querySelector('#toast-region').replaceChildren();});
+      await check.click();
+      const failure = language==='zh' ? 'OCI 租户根区间检查失败，HTTP 403' : 'OCI tenancy root compartment check failed, HTTP 403';
+      await page.locator('#toast-region .toast.error').filter({hasText:failure}).waitFor();
+      const message = await page.locator('#toast-region').innerText();
+      assert.ok(message.includes('denied-fixture'));
+      assert.ok(!message.includes('OCI_CHECK_'));
+      assert.match(message,language==='zh' ? /不一定表示私钥无效/ : /does not necessarily mean the private key is invalid/);
+      await page.evaluate(()=>{fixture.ociCheckFailure=false;document.querySelector('#toast-region').replaceChildren();});
+    }
+    assert.deepEqual(await page.evaluate(()=>fixture.ociChecks),['oci','oci','oci','oci']);
+    await page.evaluate(async()=>{fixture.state.connections.find(item=>item.id==='oci').canTest=false;await refresh(false);});
+    assert.equal(await row('oci').locator('[data-action="test"]').isDisabled(),true);
+    await page.evaluate(async()=>{fixture.state.connections.find(item=>item.id==='oci').canTest=true;await refresh(false);});
+    await page.locator('[data-language="en"]').click();
     await toggle('oci').click();
     assert.match(await page.locator('#oci-key-status').innerText(),/configured/);
     await page.evaluate(()=>{fixture.rejectOciKey=true;});

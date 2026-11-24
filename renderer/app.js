@@ -200,6 +200,13 @@ const ociKeyErrorMessages = {
 
 function publicMessage(value, fallback = localized('操作失败', 'Operation failed')) {
   const raw = String(value || '').replace(/^Error:\s*/, '');
+  const ociCheck = raw.match(/^OCI_CHECK_(OK|FAILED): HTTP (\d{3})(?:; request ID: (.*))?$/);
+  if (ociCheck) {
+    const result = ociCheck[1] === 'OK'
+      ? localized(`OCI 租户根区间检查成功，HTTP ${ociCheck[2]}`, `OCI tenancy root compartment check successful, HTTP ${ociCheck[2]}`)
+      : localized(`OCI 租户根区间检查失败，HTTP ${ociCheck[2]}。请检查签名配置和根区间权限；根区间拒绝不一定表示私钥无效。`, `OCI tenancy root compartment check failed, HTTP ${ociCheck[2]}. Check signing configuration and root compartment permissions; root access denial does not necessarily mean the private key is invalid.`);
+    return ociCheck[3] ? `${result}${localized('。请求 ID：', '. Request ID: ')}${ociCheck[3]}` : result;
+  }
   const code = raw.split(':', 1)[0];
   const ociMessage = Object.hasOwn(ociKeyErrorMessages, code) ? ociKeyErrorMessages[code] : null;
   if (ociMessage) return localized(...ociMessage);
@@ -981,6 +988,9 @@ function renderConnections() {
   container.innerHTML = items.map((item) => {
     const type = itemDisplayType(item);
     const canTest = item.enabled && item.canTest;
+    const checkTitle = item.httpAuthType === 'oci-signature'
+      ? localized('只读检查租户根区间的实例列表，最多请求 1 项，不显示实例内容。', 'Read-only ListInstances check of the tenancy root compartment, limit 1; instance data is not displayed.')
+      : localized('检查连接', 'Check connection');
     const agentActions = itemCapabilities(item).length > 0;
     const reorderLabel = localized(`${item.name}：拖动排序，或按上/下方向键`, `${item.name}: drag to reorder, or use the Up/Down arrow keys`);
     const toggleLabel = item.enabled
@@ -992,7 +1002,7 @@ function renderConnections() {
       <button class="connection-name" type="button" draggable="false" data-item-reorder="${escapeHtml(item.id)}" aria-label="${escapeHtml(reorderLabel)}" aria-keyshortcuts="ArrowUp ArrowDown Home End" title="${escapeHtml(reorderLabel)}"><span class="lettering-ink">${escapeHtml(item.name)}</span></button>
       <div class="card-actions" role="group" aria-label="${escapeHtml(item.name)}">
         <button class="module-state item-toggle" type="button" data-action="toggle-enabled" data-id="${item.id}" aria-pressed="${item.enabled}" title="${toggleLabel}" aria-label="${toggleLabel}"><i class="status-dot ${item.enabled ? '' : 'off'}" aria-hidden="true"></i></button>
-        ${agentActions ? `<button class="small-button" type="button" data-action="test" data-id="${item.id}" ${canTest ? '' : 'disabled'}>CHECK</button><button class="small-button" type="button" data-action="copy-name" data-id="${item.id}" title="${localized('复制 OpenKeylet MCP 使用提示', 'Copy OpenKeylet MCP use prompt')}" aria-label="${localized('复制 OpenKeylet MCP 使用提示', 'Copy OpenKeylet MCP use prompt')}">USE</button>` : ''}${item.passwordHistoryCount ? `<button class="small-button" type="button" data-action="history" data-id="${item.id}">HISTORY</button>` : ''}<button class="small-button delete" type="button" data-action="delete" data-id="${item.id}">DEL</button>
+        ${agentActions ? `<button class="small-button" type="button" data-action="test" data-id="${item.id}" title="${escapeHtml(checkTitle)}" ${canTest ? '' : 'disabled'}>CHECK</button><button class="small-button" type="button" data-action="copy-name" data-id="${item.id}" title="${localized('复制 OpenKeylet MCP 使用提示', 'Copy OpenKeylet MCP use prompt')}" aria-label="${localized('复制 OpenKeylet MCP 使用提示', 'Copy OpenKeylet MCP use prompt')}">USE</button>` : ''}${item.passwordHistoryCount ? `<button class="small-button" type="button" data-action="history" data-id="${item.id}">HISTORY</button>` : ''}<button class="small-button delete" type="button" data-action="delete" data-id="${item.id}">DEL</button>
       </div>
     </article>`;
   }).join('');

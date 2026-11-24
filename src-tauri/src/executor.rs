@@ -1633,7 +1633,10 @@ fn validate_transfer_path(value: &str, label: &str) -> Result<String> {
 }
 
 pub async fn test_connection(vault: &Vault, connection: &DecryptedConnection) -> Result<String> {
-    if connection.stored.test_target(&connection.secrets) == Some("ssh") {
+    if connection.stored.test_target(&connection.secrets) == Some("oci") {
+        let response = execute_api(connection, oci_check_request(connection)?).await?;
+        oci_check_summary(&response)
+    } else if connection.stored.test_target(&connection.secrets) == Some("ssh") {
         let testable = DecryptedConnection {
             stored: connection.stored.clone(),
             secrets: connection.secrets.clone(),
@@ -1680,6 +1683,38 @@ pub async fn test_connection(vault: &Vault, connection: &DecryptedConnection) ->
         Ok(format!("API responded: HTTP {}", result.status))
     } else {
         bail!("This project has no connection target that can be tested automatically")
+    }
+}
+
+fn oci_check_request(connection: &DecryptedConnection) -> Result<ApiRequestInput> {
+    let credential = connection
+        .secrets
+        .oci
+        .as_ref()
+        .context("Import an OCI signing private key")?;
+    Ok(ApiRequestInput {
+        url: credential.config.base_url()?.join("instances")?.to_string(),
+        method: "GET".to_owned(),
+        query: HashMap::from([
+            ("compartmentId".to_owned(), Value::String(credential.config.tenancy_ocid.clone())),
+            ("limit".to_owned(), Value::from(1)),
+        ]),
+        timeout_seconds: Some(30),
+        max_response_bytes: Some(4096),
+        ..Default::default()
+    })
+}
+
+fn oci_check_summary(response: &ApiResponse) -> Result<String> {
+    let request_id = response
+        .headers
+        .get("opc-request-id")
+        .map(|value| format!("; request ID: {value}"))
+        .unwrap_or_default();
+    if (200..300).contains(&response.status) {
+        Ok(format!("OCI_CHECK_OK: HTTP {}{request_id}", response.status))
+    } else {
+        bail!("OCI_CHECK_FAILED: HTTP {}{request_id}", response.status)
     }
 }
 
@@ -2652,6 +2687,11 @@ mod oci_transport_tests {
             format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: https://{HOST}/20160918/vcns\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
             format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: https://{outside_addr}/20160918/instances\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
             "HTTP/1.1 401 Unauthorized\r\nContent-Length: 11\r\nConnection: close\r\nopc-request-id: auth-fixture\r\nAuthorization: test-header\r\n\r\ntest-secret".to_owned(),
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\nopc-next-page: unused-page\r\nopc-request-id: check-fixture\r\n\r\n[]".to_owned(),
+            "HTTP/1.1 401 Unauthorized\r\nContent-Length: 11\r\nConnection: close\r\nopc-request-id: check-401\r\n\r\ntest-secret".to_owned(),
+            "HTTP/1.1 403 Forbidden\r\nContent-Length: 11\r\nConnection: close\r\nopc-request-id: check-403\r\n\r\ntest-secret".to_owned(),
+            "HTTP/1.1 404 Not Found\r\nContent-Length: 11\r\nConnection: close\r\nopc-request-id: check-404\r\n\r\ntest-secret".to_owned(),
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 11\r\nConnection: close\r\nopc-request-id: check-500\r\n\r\ntest-secret".to_owned(),
         ];
         let server = tokio::spawn(async move {
             let acceptor = TlsAcceptor::from(Arc::new(tls));
@@ -2692,6 +2732,12 @@ mod oci_transport_tests {
             )
             .unwrap();
         let connection = vault.get_connection(saved.id).unwrap();
+        assert_eq!(connection.stored.test_target(&connection.secrets), Some("oci"));
+        assert!(connection.stored.public(Some(&connection.secrets)).can_test);
+        let mut restored_secrets = connection.secrets.clone();
+        restored_secrets.oci.as_mut().unwrap().forget_key();
+        assert_eq!(connection.stored.test_target(&restored_secrets), None);
+        assert!(!connection.stored.public(Some(&restored_secrets)).can_test);
         let base_request = ApiRequestInput {
             url: "instances?compartmentId=fixture".to_owned(),
             method: "GET".to_owned(),
@@ -2749,7 +2795,38 @@ mod oci_transport_tests {
         assert_eq!(failure.headers["opc-request-id"], "auth-fixture");
         assert!(!failure.headers.contains_key("authorization"));
         assert!(failure.body.is_empty());
+        let check_request = oci_check_request(&connection).unwrap();
+        assert_eq!(check_request.timeout_seconds, Some(30));
+        assert_eq!(check_request.max_response_bytes, Some(4096));
+        assert_eq!(check_request.method, "GET");
+        assert!(check_request.body.is_none());
+        assert!(check_request.body_base64.is_none());
+        assert!(check_request.form.is_empty());
+        assert!(check_request.files.is_empty());
+        assert!(check_request.headers.is_empty());
+        let checked = execute_oci_list_instances_with(&connection, check_request.clone(), client)
+            .await
+            .unwrap();
+        assert_eq!(oci_check_summary(&checked).unwrap(), "OCI_CHECK_OK: HTTP 200; request ID: check-fixture");
+        for status in [401, 403, 404, 500] {
+            let response = execute_oci_list_instances_with(&connection, check_request.clone(), client)
+                .await
+                .unwrap();
+            let error = oci_check_summary(&response).unwrap_err().to_string();
+            assert_eq!(error, format!("OCI_CHECK_FAILED: HTTP {status}; request ID: check-{status}"));
+            assert!(!error.contains("test-secret"));
+        }
         let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 10);
+        for request in &requests[5..] {
+            let target = request.lines().next().unwrap().split_whitespace().nth(1).unwrap();
+            let target = Url::parse(&format!("https://{HOST}{target}")).unwrap();
+            assert_eq!(target.path(), oci::INSTANCES_PATH);
+            assert_eq!(target.query_pairs().collect::<HashMap<_, _>>(), HashMap::from([
+                ("compartmentId".into(), config().tenancy_ocid.into()),
+                ("limit".into(), "1".into()),
+            ]));
+        }
         assert!(requests[1].starts_with(
             "GET /20160918/instances?compartmentId=fixture&page=a%2Bb%20c HTTP/1.1\r\n"
         ));
