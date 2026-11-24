@@ -325,6 +325,101 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn direct_untrusted_host_stops_before_authentication() {
+    let fixture = Fixture::new(true).await;
+    fixture
+        .vault
+        .set_ssh_host_trust(fixture.jump, "127.0.0.1", fixture.a_port, None)
+        .unwrap();
+    let target = fixture.vault.get_connection(fixture.jump).unwrap();
+    let result = executor::test_connection(&fixture.vault, &target).await;
+    assert_eq!(
+        fixture.a.auth.load(Ordering::SeqCst),
+        0,
+        "Untrusted direct host received credentials"
+    );
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("host key is not trusted"), "{error}");
+    fixture.closed().await;
+}
+
+#[tokio::test]
+async fn direct_key_mismatch_stops_before_authentication() {
+    let fixture = Fixture::new(true).await;
+    let wrong = key(9)
+        .public_key()
+        .fingerprint(ssh_key::HashAlg::Sha256)
+        .to_string();
+    fixture
+        .vault
+        .set_ssh_host_trust(fixture.jump, "127.0.0.1", fixture.a_port, Some(&wrong))
+        .unwrap();
+    let target = fixture.vault.get_connection(fixture.jump).unwrap();
+    let result = executor::test_connection(&fixture.vault, &target).await;
+    assert_eq!(
+        fixture.a.auth.load(Ordering::SeqCst),
+        0,
+        "Direct host with a mismatched key received credentials"
+    );
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("host key mismatch"), "{error}");
+    fixture.closed().await;
+}
+
+#[tokio::test]
+async fn direct_trust_is_bound_to_the_requested_endpoint() {
+    let fixture = Fixture::new(true).await;
+    let mut target = fixture.vault.get_connection(fixture.jump).unwrap();
+    target.stored.host = "localhost".into();
+    let result = executor::test_connection(&fixture.vault, &target).await;
+    assert_eq!(
+        fixture.a.auth.load(Ordering::SeqCst),
+        0,
+        "Trust for another hostname allowed direct authentication"
+    );
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("host key is not trusted"), "{error}");
+    fixture.closed().await;
+}
+
+#[tokio::test]
+async fn direct_trusted_host_executes_connection_check_without_forwarding() {
+    let fixture = Fixture::new(true).await;
+    let target = fixture.vault.get_connection(fixture.jump).unwrap();
+    assert_eq!(
+        executor::test_connection(&fixture.vault, &target).await.unwrap(),
+        "SSH connection successful"
+    );
+    assert!(fixture.a.auth.load(Ordering::SeqCst) > 0);
+    assert_eq!(fixture.b.auth.load(Ordering::SeqCst), 0);
+    assert!(fixture.a.forwards.lock().unwrap().is_empty());
+    fixture.closed().await;
+}
+
+#[tokio::test]
+async fn direct_probe_observes_without_authentication_or_implicit_trust() {
+    let fixture = Fixture::new(true).await;
+    fixture
+        .vault
+        .set_ssh_host_trust(fixture.jump, "127.0.0.1", fixture.a_port, None)
+        .unwrap();
+    let observed = probe(&fixture.vault, fixture.jump).await.unwrap();
+    assert_eq!(
+        observed.fingerprint,
+        key(1)
+            .public_key()
+            .fingerprint(ssh_key::HashAlg::Sha256)
+            .to_string()
+    );
+    assert_eq!(fixture.a.auth.load(Ordering::SeqCst), 0);
+    assert!(
+        fixture.vault.ssh_host_trust().unwrap().iter()
+            .all(|entry| entry.item_id != fixture.jump)
+    );
+    fixture.closed().await;
+}
+
+#[tokio::test]
 async fn jump_connection_check_accepts_windows_line_endings_and_uses_target_route() {
     let fixture = Fixture::new(true).await;
     let target = fixture.vault.get_connection(fixture.target).unwrap();
