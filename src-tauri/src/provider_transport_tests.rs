@@ -26,6 +26,27 @@ fn connection(url: &str, aws: bool) -> (tempfile::TempDir, DecryptedConnection) 
     (directory, vault.get_connection(saved.id).unwrap())
 }
 
+#[tokio::test]
+async fn aws_check_reports_local_readiness_without_claiming_cloud_authentication() {
+    let (directory, mut saved) = connection("https://ec2.us-east-1.amazonaws.com/", true);
+    let vault = Vault::open(directory.path().join("vault")).unwrap();
+    assert_eq!(saved.stored.test_target(&saved.secrets), Some("aws"));
+    assert!(saved.stored.public(Some(&saved.secrets)).can_test);
+    let summary = test_connection(&vault, &saved).await.unwrap();
+    assert!(summary.contains("AWS configuration valid"), "{summary}");
+    assert!(summary.contains("not verified"), "{summary}");
+    for secret in [ACCESS, SECRET, TOKEN] {
+        assert!(!summary.contains(secret));
+    }
+
+    saved.stored.http_auth_type = "auto".into();
+    saved.stored.aws_bindings = None;
+    assert_eq!(saved.stored.test_target(&saved.secrets), Some("aws"));
+    let error = test_connection(&vault, &saved).await.unwrap_err().to_string();
+    assert!(error.contains("AWS SigV4") && error.contains("AWS signing modules"), "{error}");
+    assert!(!error.contains("Bearer fallback"));
+}
+
 async fn endpoint(
     host: &str,
     status: &str,
