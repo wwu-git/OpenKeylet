@@ -343,6 +343,68 @@ fn saved_endpoint(item: &StoredConnection, secrets: &SecretBundle) -> Result<End
     identify(&url)
 }
 
+pub(crate) fn is_aws_item(item: &StoredConnection) -> bool {
+    item.http_auth_type == crate::aws::AUTH_MODE
+        || Url::parse(&item.base_url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .is_some_and(|host| {
+                let host = host.trim_end_matches('.');
+                domain(host, "amazonaws.com")
+                    || domain(host, "amazonaws.com.cn")
+                    || domain(host, "api.aws")
+            })
+}
+
+pub(crate) fn check_aws_configuration(
+    item: &StoredConnection,
+    secrets: &SecretBundle,
+) -> Result<String> {
+    ensure!(item.enabled, "This connection is disabled");
+    ensure!(
+        item.certificate_authority.is_none(),
+        "Certificate authority projects cannot be used for AWS requests"
+    );
+    let capability = describe_item(item, secrets)?
+        .ok_or_else(|| anyhow::anyhow!("Configure a valid supported AWS service URL"))?;
+    ensure!(
+        capability.provider == ProviderId::Aws,
+        "Configure a supported AWS service URL"
+    );
+    match capability.status {
+        ConfigurationStatus::Ready => {
+            let target = Url::parse(&item.base_url)
+                .map_err(|_| anyhow::anyhow!("Configure a valid supported AWS service URL"))?;
+            execution_plan(item, secrets, &target)?;
+            Ok(
+                "AWS configuration valid locally. No request was sent; cloud credentials and IAM permissions were not verified."
+                    .into(),
+            )
+        }
+        ConfigurationStatus::Unsupported => {
+            bail!("Unsupported AWS endpoint. Configure a supported standard AWS service URL")
+        }
+        ConfigurationStatus::NeedsConfiguration => {
+            let fields = capability.missing_fields.join(", ");
+            let detail = if capability
+                .missing_fields
+                .iter()
+                .any(|field| field == "validAwsConfiguration")
+            {
+                crate::aws::Credential::from_modules(item, secrets)
+                    .err()
+                    .map(|error| error.to_string())
+                    .unwrap_or(fields)
+            } else {
+                fields
+            };
+            bail!(
+                "AWS configuration incomplete: {detail}. Select AWS SigV4 under HTTP authentication and bind the existing fields in AWS signing modules. CHECK only validates local configuration; cloud credentials and IAM permissions are not verified"
+            )
+        }
+    }
+}
+
 fn external_oauth(provider: ProviderId) -> bool {
     matches!(provider, ProviderId::Azure | ProviderId::Gcp)
 }

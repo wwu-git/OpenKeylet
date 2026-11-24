@@ -1947,7 +1947,9 @@ fn validate_transfer_path(value: &str, label: &str) -> Result<String> {
 }
 
 pub async fn test_connection(vault: &Vault, connection: &DecryptedConnection) -> Result<String> {
-    if connection.stored.test_target(&connection.secrets) == Some("oci") {
+    if connection.stored.test_target(&connection.secrets) == Some("aws") {
+        crate::api_provider::check_aws_configuration(&connection.stored, &connection.secrets)
+    } else if connection.stored.test_target(&connection.secrets) == Some("oci") {
         let response = execute_api(connection, oci_check_request(connection)?).await?;
         oci_check_summary(&response)
     } else if connection.stored.test_target(&connection.secrets) == Some("ssh") {

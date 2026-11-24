@@ -124,7 +124,7 @@ try {
         if (saved.id === 'aws') {
           fixture.awsSecrets = {...fixture.awsSecrets, ...args.input.secrets.namedSecrets};
           saved.modules = saved.modules.map(module => ({...module,configured:Boolean(fixture.awsSecrets[module.name])}));
-          saved.canTest = false; saved.capabilities = ['http'];
+          saved.canTest = true; saved.capabilities = ['http'];
         }
         if (saved.id === 'oci') {
           fixture.savedOci = structuredClone(args);

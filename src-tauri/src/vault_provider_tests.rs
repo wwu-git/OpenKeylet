@@ -186,5 +186,5 @@ fn provider_mcp_binding_patch_preserves_omissions_and_write_boundaries() {
     let empty: ConnectionInput=serde_json::from_value(json!({"name":"Incomplete AWS", "itemType":"api", "httpAuthType":"aws-sigv4", "modules":[]})).unwrap();
     let incomplete = vault.save_connection(empty).unwrap();
     assert_eq!(incomplete.http_auth_type, "aws-sigv4");
-    assert!(!incomplete.can_test);
+    assert!(incomplete.can_test);
 }

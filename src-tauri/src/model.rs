@@ -645,7 +645,9 @@ impl StoredConnection {
     }
 
     pub fn test_target(&self, secrets: &SecretBundle) -> Option<&'static str> {
-        if self.http_auth_type == "aws-sigv4" { return None; }
+        if self.http_auth_type == crate::aws::AUTH_MODE {
+            return Some("aws");
+        }
         if self.http_auth_type == crate::oci::AUTH_MODE {
             return Some("oci");
         }
@@ -655,6 +657,8 @@ impl StoredConnection {
             && self.module_configured(secrets, "username")
         {
             Some("ssh")
+        } else if crate::api_provider::is_aws_item(self) {
+            Some("aws")
         } else if self.has_capability(secrets, "http") && !self.base_url.trim().is_empty() {
             Some("http")
         } else {

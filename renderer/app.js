@@ -1010,6 +1010,8 @@ function renderConnections() {
     const canTest = item.enabled && item.canTest;
     const checkTitle = item.httpAuthType === 'oci-signature'
       ? localized('只读检查租户根区间的实例列表，最多请求 1 项，不显示实例内容。', 'Read-only ListInstances check of the tenancy root compartment, limit 1; instance data is not displayed.')
+      : item.httpAuthType === 'aws-sigv4'
+        ? localized('仅检查本机 AWS 签名配置，不发送请求，不验证云端凭据或 IAM 权限。', 'Check local AWS signing configuration only. No request is sent; cloud credentials and IAM permissions are not verified.')
       : localized('检查连接', 'Check connection');
     const agentActions = itemCapabilities(item).length > 0;
     const reorderLabel = localized(`${item.name}：单击展开或收起；拖动排序，或按上/下方向键`, `${item.name}: click to expand or collapse; drag to reorder, or use the Up/Down arrow keys`);

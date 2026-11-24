@@ -45,6 +45,48 @@ async fn aws_check_reports_local_readiness_without_claiming_cloud_authentication
     let error = test_connection(&vault, &saved).await.unwrap_err().to_string();
     assert!(error.contains("AWS SigV4") && error.contains("AWS signing modules"), "{error}");
     assert!(!error.contains("Bearer fallback"));
+    saved.stored.host = "127.0.0.1".into();
+    saved.stored.port = 22;
+    saved.stored.modules.extend(["username", "password"].map(|kind| crate::model::ItemModule {
+        kind: kind.into(), name: kind.into(), ..Default::default()
+    }));
+    saved.secrets.named_secrets.insert("username".into(), "synthetic-user".into());
+    saved.secrets.named_secrets.insert("password".into(), "synthetic-password".into());
+    assert_eq!(saved.stored.test_target(&saved.secrets), Some("ssh"));
+}
+
+#[tokio::test]
+async fn aws_check_rejects_incomplete_unsupported_and_untrusted_configuration_locally() {
+    let (directory, original) = connection("https://ec2.us-east-1.amazonaws.com/", true);
+    let vault = Vault::open(directory.path().join("vault")).unwrap();
+    let copy = || DecryptedConnection { stored: original.stored.clone(), secrets: original.secrets.clone() };
+    let mut cases = Vec::new();
+    let mut missing = copy();
+    missing.stored.base_url.clear();
+    cases.push(missing);
+    let mut mismatch = copy();
+    mismatch.secrets.named_secrets.insert("region".into(), "eu-west-1".into());
+    cases.push(mismatch);
+    let mut temporary = copy();
+    temporary.secrets.named_secrets.remove("session");
+    cases.push(temporary);
+    for url in ["https://s3.us-east-1.amazonaws.com/", "https://example.invalid/"] {
+        let mut unsupported = copy();
+        unsupported.stored.base_url = url.into();
+        for module in &mut unsupported.stored.modules {
+            if module.kind == "url" { module.value = url.into(); }
+        }
+        cases.push(unsupported);
+    }
+    let mut disabled = copy();
+    disabled.stored.enabled = false;
+    cases.push(disabled);
+    for saved in cases {
+        assert_eq!(saved.stored.test_target(&saved.secrets), Some("aws"));
+        let error = test_connection(&vault, &saved).await.unwrap_err().to_string();
+        assert!(!error.contains("AWS configuration valid"));
+        for secret in [ACCESS, SECRET, TOKEN] { assert!(!error.contains(secret)); }
+    }
 }
 
 async fn endpoint(
