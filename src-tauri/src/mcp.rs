@@ -337,6 +337,8 @@ impl VaultMcp {
                 } else { None };
                 Ok(ItemOutput {
                     certificate_authority: decrypted.stored.certificate_authority.clone(),
+                    aws_bindings: decrypted.stored.aws_bindings.clone(),
+                    api_service: if decrypted.stored.certificate_authority.is_none() { crate::api_provider::describe_item(&decrypted.stored, &decrypted.secrets).map_err(|error| error.to_string())? } else { None },
                     oci_bindings: decrypted.stored.oci_bindings.clone(),
                     ssh_jump_item_id: decrypted.stored.ssh_jump_item_id.map(|id|id.to_string()),
                     ssh_jump_unresolved: decrypted.stored.ssh_jump_unresolved,
@@ -901,7 +903,11 @@ struct ItemsSearchOutput {
 #[serde(rename_all = "camelCase")]
 struct ItemOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
+    api_service: Option<crate::api_provider::ServiceCapability>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     certificate_authority: Option<crate::model::CertificateAuthorityBinding>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    aws_bindings: Option<crate::model::AwsModuleBindings>,
     #[serde(skip_serializing_if = "Option::is_none")]
     oci_bindings: Option<crate::model::OciModuleBindings>,
     ssh_jump_item_id: Option<String>,
@@ -1391,8 +1397,36 @@ struct CertificateCheckInput {
     public_or_certificate: String,
 }
 
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ApiServiceCapabilitiesInput {
+    #[serde(default)]
+    item: String,
+    url: Option<String>,
+}
+
 #[tool_router(router = tool_router)]
 impl VaultMcp {
+    #[tool(name = "api_service_capabilities", description = "Identify the concrete API service and supported authentication from a URL, or inspect a selected item's native configuration. Returns required role names, readiness, official documentation and protocol/pagination guidance without credentials. URL-only discovery does not authorize sending stored secrets or claim configuration is ready. Supports AWS standard SigV4 endpoint subset, existing OCI RSA signing, GitHub REST, Cloudflare control plane, DigitalOcean control plane and Hetzner Cloud. S3, OAuth token acquisition and other vendor signers are not implied. Call http_send with the documented operation; OpenKeylet signs/authenticates locally but does not choose operations or enumerate pages.", output_schema = rmcp::handler::server::tool::schema_for_type::<crate::api_provider::ServiceCapability>(), annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false))]
+    async fn api_service_capabilities(
+        &self,
+        Parameters(input): Parameters<ApiServiceCapabilitiesInput>,
+    ) -> CallToolResult {
+        let result: Result<crate::api_provider::ServiceCapability, String> = (|| {
+            if let Some(url) = input.url {
+                if !input.item.trim().is_empty() {
+                    return Err("Choose item or url, not both".into());
+                }
+                return crate::api_provider::describe_url(&url).map_err(|error| error.to_string());
+            }
+            let connection = self.resolve_item_for_action(&input.item, Some("http"))?;
+            self.vault
+                .guard_agent_secret_use(connection.stored.id)
+                .map_err(|error| error.to_string())?;
+            crate::api_provider::describe_item(&connection.stored, &connection.secrets).map_err(|error| error.to_string())?.ok_or_else(|| "No recognized native API service; this project uses generic HTTP authentication".into())
+        })();
+        into_tool_result(result)
+    }
     #[tool(name = "certificate_capabilities", description = "Read owner-controlled local CA registration and Agent signing grants, permitted certificate kinds and maximum TTL. Signing is off by default and independent of folder write access. Reports fingerprints/status only, never CA private material. Agent cannot change grants or CA registration.", output_schema = rmcp::handler::server::tool::schema_for_type::<crate::vault::CertificateCapabilities>(), annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false))]
     async fn certificate_capabilities(&self) -> CallToolResult {
         into_tool_result(
@@ -1466,14 +1500,14 @@ impl VaultMcp {
         into_tool_result(self.vault.write_capabilities().map_err(|_| "Could not read write permissions".to_owned()))
     }
 
-    #[tool(name = "items_create", description = "Create a project in an authorized folder. Call vault_write_capabilities for fields. Requires name, itemType, folder and modules. Optional sshJumpItemId selects an existing enabled direct SSH project; trust records are local and cannot be written here. SSH needs host, username, password/privateKey and sshAuthType; API needs url, httpAuthType and credentials. Module value is the default address for host/url; alternateValues lists other addresses. Module values are strings except integer port. customSecret stores extra named values only. New secrets are hidden. Encrypted SSH keys require passphrase in this request. No OCI creation. Returns IDs and revision only; never repeat secrets in chat.",
+    #[tool(name = "items_create", description = "Create a project in an authorized folder. Call vault_write_capabilities for fields. Requires name, itemType, folder and modules. Optional sshJumpItemId selects an existing enabled direct SSH project; trust records are local and cannot be written here. SSH needs host, username, password/privateKey and sshAuthType; API needs url, httpAuthType and credentials. Module value is the default address for host/url; alternateValues lists other addresses. Module values are strings except integer port. customSecret stores extra named values only. New secrets are hidden. Encrypted SSH keys require passphrase in this request. AWS and OCI native signing use awsBindings or ociBindings with stable module IDs. Create ordinary modules first, then bind returned IDs in an update; use vault_write_capabilities for role names. Returns IDs and revision only; never repeat secrets in chat.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<crate::vault_write::WriteOutput>(),
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false))]
     async fn items_create(&self, Parameters(WriteRequest(input)): Parameters<WriteRequest<crate::vault_write::CreateInput>>) -> CallToolResult {
         into_tool_result(self.vault.agent_create(input).map_err(|e|e.to_string()))
     }
 
-    #[tool(name = "items_update", description = "Patch a project by id and expectedRevision. Update modules by stable id; omit id and provide kind/name/value to add. Omitted fields remain unchanged. Targets and authentication can change. For host/url, value is the default and alternateValues lists other addresses; omit the list to preserve it or use [] to clear it. Switch defaults by submitting both fields. sshJumpItemId selects an existing direct SSH project; null clears it and omission preserves it. Host trust cannot be changed. Moves require both folders authorized. Cannot change visibility, delete, or change OCI signing fields/derived URL; OCI supports metadata and ordinary attached modules only. A conflict requires re-query, never replay automatically. Encrypted replacement SSH keys require passphrase; unencrypted replacements clear old passphrase. No secret values returned.",
+    #[tool(name = "items_update", description = "Patch a project by id and expectedRevision. Update modules by stable id; omit id and provide kind/name/value to add. Omitted fields remain unchanged. Targets and authentication can change. For host/url, value is the default and alternateValues lists other addresses; omit the list to preserve it or use [] to clear it. Switch defaults by submitting both fields. sshJumpItemId selects an existing direct SSH project; null clears it and omission preserves it. Host trust cannot be changed. Moves require both folders authorized. Cannot change visibility or delete. AWS and OCI credentials and stable signing-module bindings may be updated under the same folder/revision rules. CA registration and signing grants remain owner-only. A conflict requires re-query, never replay automatically. Encrypted replacement SSH keys require passphrase; unencrypted replacements clear old passphrase. No secret values returned.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<crate::vault_write::WriteOutput>(),
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false))]
     async fn items_update(&self, Parameters(WriteRequest(input)): Parameters<WriteRequest<crate::vault_write::UpdateInput>>) -> CallToolResult {
@@ -1482,7 +1516,7 @@ impl VaultMcp {
 
     #[tool(
         name = "items_search",
-        description = "Discover or select enabled OpenKeylet projects, modules, and available actions. A query that finds one project makes it the current project for this MCP session, so later compatible actions can omit item. When the user already named a project and the intended action is clear, call that action directly instead. Query may be the project name or the user's natural-language phrase containing it. Exact case-insensitive name matches win. Only modules explicitly marked agentVisible include value. OCI projects also return non-secret ociContext with region and tenancyOcid for constructing API requests; hidden module values are never returned; a signing key is returned only when the owner explicitly enables its module visibility.",
+        description = "Discover or select enabled OpenKeylet projects, modules, and available actions. A query that finds one project makes it the current project for this MCP session, so later compatible actions can omit item. When the user already named a project and the intended action is clear, call that action directly instead. Query may be the project name or the user's natural-language phrase containing it. Exact case-insensitive name matches win. Only modules explicitly marked agentVisible include value. Recognized API projects include apiService protocol/readiness/documentation metadata and AWS bindings expose IDs only. Call api_service_capabilities for detailed service guidance. OCI projects also return non-secret ociContext with region and tenancyOcid for constructing API requests; hidden module values are never returned; a signing key is returned only when the owner explicitly enables its module visibility.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<ItemsSearchOutput>(),
         annotations(title = "Find OpenKeylet projects", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
@@ -2137,7 +2171,7 @@ impl VaultMcp {
 
     #[tool(
         name = "http_send",
-        description = "Send an authenticated HTTP request without returning hidden stored credentials. Omit item after selecting a compatible project, or pass its name. OCI projects provide general API signing, not a fixed list of operations: choose the method, path, query, headers and one body format from the OCI API documentation. Relative URLs use the default Compute base; absolute URLs select another OCI service in ociContext.region. Only HTTPS port 443 regional oraclecloud.com endpoints are allowed for OCI; redirects and proxies are disabled. Signing headers are generated locally. Use items_search to discover ociContext.region and tenancyOcid when needed. Resolve named resources through the appropriate OCI APIs, handle pagination using service response headers, and ask only when resource matches remain ambiguous. Do not treat an empty root-compartment result as all resources. OCI IAM controls permissions; do not bypass a denial. OpenKeylet sends one request and does not choose operations, enumerate resources or follow pages automatically. Built-in API/Basic authentication is also injected automatically. Hidden ordinary modules may be referenced as {{openkeylet:password}} or {{openkeylet:service token}} in URL, headers, query or body values; secretBindings provides optional aliases. OCI signing fields follow ordinary module visibility and placeholder rules. Large responses may use saveResponseTo. For non-OCI projects, HTTP/HTTPS URLs and redirects follow the existing general HTTP behavior. No address failover occurs.",
+        description = "Send an authenticated HTTP request without returning hidden stored credentials. Consult api_service_capabilities for URL-specific support, missing module bindings and official operation documentation. AWS aws-sigv4 signs standard supported commercial regional endpoints using bound Access Key ID, Secret Access Key and optional Session Token; the request region must match the saved region. Supply AWS Query Action/Version or JSON X-Amz-Target as documented, and process XML/JSON responses and pagination yourself. Native providers reject cross-provider targets, proxies and redirects; unsupported signing endpoints never silently fall back to Bearer. No credential refresh, IMDS, S3, streaming signatures or SigV4a. Existing selected CA projects remain unavailable for generic APIs. Omit item after selecting a compatible project, or pass its name. OCI projects provide general API signing, not a fixed list of operations: choose the method, path, query, headers and one body format from the OCI API documentation. Relative URLs use the default Compute base; absolute URLs select another OCI service in ociContext.region. Only HTTPS port 443 regional oraclecloud.com endpoints are allowed for OCI; redirects and proxies are disabled. Signing headers are generated locally. Use items_search to discover ociContext.region and tenancyOcid when needed. Resolve named resources through the appropriate OCI APIs, handle pagination using service response headers, and ask only when resource matches remain ambiguous. Do not treat an empty root-compartment result as all resources. OCI IAM controls permissions; do not bypass a denial. OpenKeylet sends one request and does not choose operations, enumerate resources or follow pages automatically. Built-in API/Basic authentication is also injected automatically. Hidden ordinary modules may be referenced as {{openkeylet:password}} or {{openkeylet:service token}} in URL, headers, query or body values; secretBindings provides optional aliases. OCI signing fields follow ordinary module visibility and placeholder rules. Large responses may use saveResponseTo. Unrecognized generic HTTP services retain existing HTTP/HTTPS, proxy and redirect behavior. Recognized native providers enforce their own strict HTTPS target, no-proxy and no-redirect policies. No address failover occurs.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<ApiResponse>(),
         annotations(title = "Send an authenticated API request", read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = true)
     )]
@@ -2187,7 +2221,7 @@ impl ServerHandler for VaultMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("openkeylet", env!("CARGO_PKG_VERSION")).with_title("OpenKeylet"))
             .with_instructions(
-            "OpenKeylet lets agents use locally saved credentials without receiving hidden plaintext. Certificate workflow: certificate_capabilities reports separately owner-granted CA kinds and TTL limits; certificate_inspect and certificate_verify operate on public material, and certificate_check_key compares a saved key locally. certificate_issue accepts public subject keys/CSRs only, a UUID requestId, concrete identities, purpose and ttlSeconds. Reuse the UUID only for identical retries; current grants are checked again before replay. CA-marked projects cannot be delegated through fill, HTTP, SSH, placeholders, secretEnv or terminals even if a module was marked visible. Agent cannot register/unmark a CA or edit signing grants. Existing CA bindings remain protected after module/type edits. Store SSH leaves as a standard sshCertificate module beside its matching privateKey, choose sshAuthType certificate; jump endpoints authenticate independently. Host CA trust requires explicit user confirmation of signer CA fingerprint for each exact item/host/port using the client or ssh-trust set-ca; never auto-trust from a probe. TLS verification does not check revocation. This does not sandbox arbitrary programs already having local-user file access. An explicit item or unique items_search result becomes the current project; later compatible actions may omit item, and a terminal keeps its own binding. When the user names a project and the action is clear, call it directly. Use items_search only for discovery, selection, inspection, or genuine ambiguity. For OCI, http_send is a general signed request executor. The agent reads the OCI API documentation and chooses operations, methods, parameters, pagination and filtering; OpenKeylet validates the target, signs locally and returns the response. items_search exposes non-secret ociContext.region and tenancyOcid. Use the relevant OCI APIs to discover named compartments or resources rather than asking the user for OCIDs that can be retrieved; ask when matches are ambiguous. Use an absolute regional OCI service URL when the API is not under the default Compute base. OCI requests stay within the configured region on HTTPS port 443, never follow redirects, and never use proxies. Resource permissions remain with OCI IAM. Do not bypass IAM denials or claim an empty root-compartment page means the tenancy has no instances. Each call sends one request; handle service pagination and filter returned data as required by the user. OCI signing fields are ordinary modules bound by stable module IDs. Module visibility controls all plaintext returned to the agent, including the signing key and OCI request context. Hidden modules can still be used locally without revealing plaintext. credential_fill understands common module phrases and may infer a sole secret; omit target to use the current running OpenKeylet terminal, otherwise a connected browser or foreground control, and use submit=true to complete the login. terminal_start makes the opened PTY current, so terminal_write, terminal_read, terminal_stop, and terminal credential fills should omit sessionId unless deliberately switching among multiple terminals. Use terminal_run for one-shot local commands and PTY tools only for persistent interaction. Direct {{openkeylet:module}} placeholders work in commands, stdin, paths, terminal input, SSH, and HTTP values; OpenKeylet substitutes and redacts them locally. terminal_run.stdin and ssh_run.stdin pass scripts, JSON, or other text without shell escaping or temporary files. Host and service URL modules may save other addresses in alternateValues; value is the default. Omitted SSH host or HTTP URL uses that default, relative HTTP paths use the default service URL, and explicit host or absolute URL selects another target. Addresses share project credentials and SSH port; there is no automatic failover. A password or private-key project can use SSH without saved target metadata: pass host, optional port, and username at runtime; saved values are defaults and port 22 is the fallback. For a saved SSH jump route, call ssh_run, ssh_upload, or ssh_download with target project B directly. OpenKeylet automatically routes through jump project A and authenticates each endpoint with its own credentials. items_search exposes the saved route; items_create/items_update configure sshJumpItemId under the existing write permissions and revision rules. If a plain-key fingerprint or explicitly trusted host CA is missing or mismatched, stop and ask the user to verify it against a trusted source and confirm it through the OpenKeylet client or local ssh-trust CLI, confirming A before probing B when needed. Never auto-trust keys or bypass the route with a direct or nested ssh connection. Use secretEnv only when a program needs an environment variable, and HTTP secretBindings only for aliases. Never ask the user to reveal a hidden value. terminal_read.until waits without polling and has no deadline unless waitSeconds is supplied. For vault writing, consult vault_write_capabilities, then items_create/items_update. Writing requires desktop folder authorization, uses stable project/module IDs and expectedRevision, and cannot change visibility. Never echo submitted secrets. OpenKeylet has no observation, diagnostic, restricted, or execution modes.",
+            "OpenKeylet lets agents use locally saved credentials without receiving hidden plaintext. API provider workflow: api_service_capabilities identifies a concrete API service, protocol support, required bindings and official documentation. AWS native aws-sigv4 uses awsBindings stable module IDs for serviceUrl, region, accessKeyId, secretAccessKey and optional sessionToken. Create ordinary modules, then bind returned IDs under normal write grants. The agent chooses operations, method, action/version, parameters and pagination; OpenKeylet validates supported provider/region targets, signs final bytes and sends one request without redirects/proxies. Native AWS supports a documented standard endpoint subset; S3, SigV4a, streaming, presigning and automatic credential refresh are excluded. Other vendor signatures and OAuth acquisition are not provided merely because a URL is recognized. GitHub/Cloudflare/DigitalOcean/Hetzner guides describe their distinct API/token boundaries. Do not infer all services from a company brand or send private keys/credential JSON as Bearer tokens. Certificate workflow: certificate_capabilities reports separately owner-granted CA kinds and TTL limits; certificate_inspect and certificate_verify operate on public material, and certificate_check_key compares a saved key locally. certificate_issue accepts public subject keys/CSRs only, a UUID requestId, concrete identities, purpose and ttlSeconds. Reuse the UUID only for identical retries; current grants are checked again before replay. CA-marked projects cannot be delegated through fill, HTTP, SSH, placeholders, secretEnv or terminals even if a module was marked visible. Agent cannot register/unmark a CA or edit signing grants. Existing CA bindings remain protected after module/type edits. Store SSH leaves as a standard sshCertificate module beside its matching privateKey, choose sshAuthType certificate; jump endpoints authenticate independently. Host CA trust requires explicit user confirmation of signer CA fingerprint for each exact item/host/port using the client or ssh-trust set-ca; never auto-trust from a probe. TLS verification does not check revocation. This does not sandbox arbitrary programs already having local-user file access. An explicit item or unique items_search result becomes the current project; later compatible actions may omit item, and a terminal keeps its own binding. When the user names a project and the action is clear, call it directly. Use items_search only for discovery, selection, inspection, or genuine ambiguity. For OCI, http_send is a general signed request executor. The agent reads the OCI API documentation and chooses operations, methods, parameters, pagination and filtering; OpenKeylet validates the target, signs locally and returns the response. items_search exposes non-secret ociContext.region and tenancyOcid. Use the relevant OCI APIs to discover named compartments or resources rather than asking the user for OCIDs that can be retrieved; ask when matches are ambiguous. Use an absolute regional OCI service URL when the API is not under the default Compute base. OCI requests stay within the configured region on HTTPS port 443, never follow redirects, and never use proxies. Resource permissions remain with OCI IAM. Do not bypass IAM denials or claim an empty root-compartment page means the tenancy has no instances. Each call sends one request; handle service pagination and filter returned data as required by the user. OCI signing fields are ordinary modules bound by stable module IDs. Module visibility controls all plaintext returned to the agent, including the signing key and OCI request context. Hidden modules can still be used locally without revealing plaintext. credential_fill understands common module phrases and may infer a sole secret; omit target to use the current running OpenKeylet terminal, otherwise a connected browser or foreground control, and use submit=true to complete the login. terminal_start makes the opened PTY current, so terminal_write, terminal_read, terminal_stop, and terminal credential fills should omit sessionId unless deliberately switching among multiple terminals. Use terminal_run for one-shot local commands and PTY tools only for persistent interaction. Direct {{openkeylet:module}} placeholders work in commands, stdin, paths, terminal input, SSH, and HTTP values; OpenKeylet substitutes and redacts them locally. terminal_run.stdin and ssh_run.stdin pass scripts, JSON, or other text without shell escaping or temporary files. Host and service URL modules may save other addresses in alternateValues; value is the default. Omitted SSH host or HTTP URL uses that default, relative HTTP paths use the default service URL, and explicit host or absolute URL selects another target only within the selected native provider target policy where applicable. Addresses share project credentials and SSH port; there is no automatic failover. A password or private-key project can use SSH without saved target metadata: pass host, optional port, and username at runtime; saved values are defaults and port 22 is the fallback. For a saved SSH jump route, call ssh_run, ssh_upload, or ssh_download with target project B directly. OpenKeylet automatically routes through jump project A and authenticates each endpoint with its own credentials. items_search exposes the saved route; items_create/items_update configure sshJumpItemId under the existing write permissions and revision rules. If a plain-key fingerprint or explicitly trusted host CA is missing or mismatched, stop and ask the user to verify it against a trusted source and confirm it through the OpenKeylet client or local ssh-trust CLI, confirming A before probing B when needed. Never auto-trust keys or bypass the route with a direct or nested ssh connection. Use secretEnv only when a program needs an environment variable, and HTTP secretBindings only for aliases. Never ask the user to reveal a hidden value. terminal_read.until waits without polling and has no deadline unless waitSeconds is supplied. For vault writing, consult vault_write_capabilities, then items_create/items_update. Writing requires desktop folder authorization, uses stable project/module IDs and expectedRevision, and cannot change visibility. Never echo submitted secrets. OpenKeylet has no observation, diagnostic, restricted, or execution modes.",
         )
     }
 
@@ -2533,6 +2567,7 @@ mod tests {
         let saved = vault
             .save_connection(ConnectionInput {
                 certificate_authority: None,
+                aws_bindings: None,
                 oci_bindings: None,
                 ssh_jump_item_id: None,
                 ssh_jump_unresolved: false,
@@ -2693,6 +2728,7 @@ mod tests {
         let api_saved = vault
             .save_connection(ConnectionInput {
                 certificate_authority: None,
+                aws_bindings: None,
                 oci_bindings: None,
                 ssh_jump_item_id: None,
                 ssh_jump_unresolved: false,
@@ -2801,6 +2837,7 @@ mod tests {
         let public = vault
             .save_connection(ConnectionInput {
                 certificate_authority: None,
+                aws_bindings: None,
                 oci_bindings: None,
                 ssh_jump_item_id: None,
                 ssh_jump_unresolved: false,
@@ -2952,6 +2989,7 @@ mod tests {
         vault
             .save_connection(ConnectionInput {
                 certificate_authority: None,
+                aws_bindings: None,
                 oci_bindings: None,
                 ssh_jump_item_id: None,
                 ssh_jump_unresolved: false,
@@ -3099,6 +3137,7 @@ mod tests {
         vault
             .save_connection(ConnectionInput {
                 certificate_authority: None,
+                aws_bindings: None,
                 oci_bindings: None,
                 ssh_jump_item_id: None,
                 ssh_jump_unresolved: false,
@@ -3171,6 +3210,7 @@ mod tests {
         let saved = vault
             .save_connection(ConnectionInput {
                 certificate_authority: None,
+                aws_bindings: None,
                 oci_bindings: None,
                 ssh_jump_item_id: None,
                 ssh_jump_unresolved: false,
@@ -3339,6 +3379,7 @@ mod tests {
         vault
             .save_connection(ConnectionInput {
                 certificate_authority: None,
+                aws_bindings: None,
                 oci_bindings: None,
                 ssh_jump_item_id: None,
                 ssh_jump_unresolved: false,
@@ -3373,6 +3414,7 @@ mod tests {
         vault
             .save_connection(ConnectionInput {
                 certificate_authority: None,
+                aws_bindings: None,
                 oci_bindings: None,
                 ssh_jump_item_id: None,
                 ssh_jump_unresolved: false,

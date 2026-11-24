@@ -360,6 +360,21 @@ pub struct PasswordHistoryEntry {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AwsModuleBindings {
+    #[serde(default)]
+    pub service_url: Option<Uuid>,
+    #[serde(default)]
+    pub access_key_id: Option<Uuid>,
+    #[serde(default)]
+    pub secret_access_key: Option<Uuid>,
+    #[serde(default)]
+    pub session_token: Option<Uuid>,
+    #[serde(default)]
+    pub region: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OciModuleBindings {
     #[serde(default)]
     #[schemars(with = "Option<String>")]
@@ -388,6 +403,8 @@ pub struct StoredConnection {
     pub certificate_authority: Option<CertificateAuthorityBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oci_bindings: Option<OciModuleBindings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws_bindings: Option<AwsModuleBindings>,
     #[serde(default)]
     pub ssh_jump_item_id: Option<Uuid>,
     #[serde(default)]
@@ -459,6 +476,8 @@ pub struct PortableConnection {
     pub certificate_authority: Option<CertificateAuthorityBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oci_bindings: Option<OciModuleBindings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws_bindings: Option<AwsModuleBindings>,
     #[serde(default)]
     pub ssh_jump_item_id: Option<Uuid>,
     #[serde(default)]
@@ -498,6 +517,8 @@ pub struct PublicConnection {
     pub certificate_authority: Option<CertificateAuthorityBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oci_bindings: Option<OciModuleBindings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws_bindings: Option<AwsModuleBindings>,
     #[serde(default)]
     pub ssh_jump_item_id: Option<Uuid>,
     #[serde(default)]
@@ -545,6 +566,7 @@ impl StoredConnection {
         PortableConnection {
             certificate_authority: self.certificate_authority.clone(),
             oci_bindings: self.oci_bindings.clone(),
+            aws_bindings: self.aws_bindings.clone(),
             ssh_jump_item_id: self.ssh_jump_item_id,
             ssh_jump_unresolved: self.ssh_jump_unresolved,
             revision: self.revision,
@@ -595,7 +617,7 @@ impl StoredConnection {
                     .is_some()
         });
         let mut capabilities = Vec::new();
-        if self.http_auth_type == crate::oci::AUTH_MODE {
+        if matches!(self.http_auth_type.as_str(), "oci-signature" | "aws-sigv4") {
             if can_fill {
                 capabilities.push("fill".to_owned());
             }
@@ -623,6 +645,7 @@ impl StoredConnection {
     }
 
     pub fn test_target(&self, secrets: &SecretBundle) -> Option<&'static str> {
+        if self.http_auth_type == "aws-sigv4" { return None; }
         if self.http_auth_type == crate::oci::AUTH_MODE {
             return Some("oci");
         }
@@ -643,6 +666,7 @@ impl StoredConnection {
         PublicConnection {
             certificate_authority: self.certificate_authority.clone(),
             oci_bindings: self.oci_bindings.clone(),
+            aws_bindings: self.aws_bindings.clone(),
             ssh_jump_item_id: self.ssh_jump_item_id,
             ssh_jump_unresolved: self.ssh_jump_unresolved,
             revision: self.revision,
@@ -722,6 +746,8 @@ pub struct ConnectionInput {
     pub certificate_authority: Option<CertificateAuthorityBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oci_bindings: Option<OciModuleBindings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws_bindings: Option<AwsModuleBindings>,
     #[serde(default)]
     pub ssh_jump_item_id: Option<Uuid>,
     #[serde(default)]

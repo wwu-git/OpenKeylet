@@ -287,6 +287,7 @@ fn add_item(vault: &Vault, id: Uuid, name: &str, secret: &str) {
     vault
         .save_connection(ConnectionInput {
             certificate_authority: None,
+            aws_bindings: None,
             oci_bindings: None,
             ssh_jump_item_id: None,
             ssh_jump_unresolved: false,

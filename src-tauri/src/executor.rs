@@ -170,10 +170,15 @@ pub async fn execute_api(
     if !connection.stored.enabled {
         bail!("This connection is disabled");
     }
-    if connection.stored.http_auth_type == crate::oci::AUTH_MODE {
-        return execute_oci_request(connection, input).await;
-    }
     let mut target = build_api_url(&connection.stored, &input.url, &input.query)?;
+    let plan = crate::api_provider::execution_plan(&connection.stored, &connection.secrets, &target)?;
+    match plan {
+        crate::api_provider::ExecutionPlan::Oci => return execute_oci_request(connection, input).await,
+        crate::api_provider::ExecutionPlan::Generic => {}
+        _ => return execute_native_request_with(connection, input, target, plan, |timeout| {
+            Ok(crate::oci::client_builder(timeout).build()?)
+        }).await,
+    }
     let save_response_to = match input.save_response_to.clone() {
         Some(path) => {
             Some(prepare_api_response_destination(&path, input.overwrite_response_file).await?)
@@ -370,6 +375,136 @@ async fn build_api_body(
 
 const MAX_OCI_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 
+fn validate_native_transport_headers(headers: &HeaderMap) -> Result<()> {
+    for name in [
+        "host",
+        "content-length",
+        "transfer-encoding",
+        "proxy-authorization",
+        "proxy-connection",
+        "connection",
+    ] {
+        if headers.contains_key(name) {
+            bail!("Native API transport header is managed by OpenKeylet");
+        }
+    }
+    Ok(())
+}
+
+async fn execute_native_request_with(
+    connection: &DecryptedConnection,
+    input: ApiRequestInput,
+    target: Url,
+    plan: crate::api_provider::ExecutionPlan,
+    client: impl FnOnce(Option<u64>) -> Result<Client>,
+) -> Result<ApiResponse> {
+    use crate::api_provider::ExecutionPlan;
+    let mut request = Request::new(
+        Method::from_bytes(input.method.trim().to_ascii_uppercase().as_bytes())
+            .context("Invalid HTTP method")?,
+        target,
+    );
+    for (name, value) in &input.headers {
+        request.headers_mut().insert(
+            HeaderName::from_bytes(name.as_bytes()).context("Invalid request header name")?,
+            HeaderValue::from_str(value).context("Invalid request header content")?,
+        );
+    }
+    validate_native_transport_headers(request.headers())?;
+    if matches!(plan, ExecutionPlan::Aws(_)) {
+        crate::aws::validate_request(&request)?;
+    }
+    if let ExecutionPlan::Token(provider) = &plan {
+        crate::api_provider::apply_defaults(*provider, request.headers_mut())?;
+    }
+    request
+        .headers_mut()
+        .entry(reqwest::header::USER_AGENT)
+        .or_insert(HeaderValue::from_static(concat!(
+            "OpenKeylet/",
+            env!("CARGO_PKG_VERSION")
+        )));
+    let credential = if matches!(plan, ExecutionPlan::Aws(_)) {
+        Some(crate::aws::Credential::from_modules(
+            &connection.stored,
+            &connection.secrets,
+        )?)
+    } else {
+        None
+    };
+    let destination = match input.save_response_to.as_deref() {
+        Some(path) => {
+            Some(prepare_api_response_destination(path, input.overwrite_response_file).await?)
+        }
+        None => None,
+    };
+    let client = client(input.timeout_seconds)?;
+    if !input.files.is_empty() {
+        request.headers_mut().remove(reqwest::header::CONTENT_TYPE);
+    }
+    let mut request = build_api_body(RequestBuilder::from_parts(client.clone(), request), &input)
+        .await?
+        .build()?;
+    if let Some(body) = request.body_mut().take() {
+        let bytes = Limited::new(body, MAX_OCI_REQUEST_BYTES)
+            .collect()
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("Unable to buffer native API request within the 64 MiB limit")
+            })?
+            .to_bytes();
+        *request.body_mut() = Some(bytes.into());
+    }
+    request
+        .headers_mut()
+        .remove(reqwest::header::CONTENT_LENGTH);
+    let authorization = match plan {
+        ExecutionPlan::Aws(endpoint) => {
+            let date = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+            let (prepared, auth) = crate::aws::prepare(
+                credential.as_ref().expect("AWS plan has credentials"),
+                &endpoint,
+                request,
+                &date,
+            )?;
+            request = prepared;
+            Some(auth)
+        }
+        ExecutionPlan::Token(_) => {
+            let mut headers = std::mem::take(request.headers_mut());
+            apply_api_auth(
+                &connection.stored,
+                &connection.secrets,
+                &mut headers,
+                request.url_mut(),
+            )?;
+            validate_native_transport_headers(&headers)?;
+            let authorization = headers.get(reqwest::header::AUTHORIZATION).cloned();
+            *request.headers_mut() = headers;
+            authorization
+        }
+        _ => bail!("Invalid native API execution plan"),
+    };
+    let mut secrets = zeroize::Zeroizing::new(connection.secrets.non_empty_values());
+    if let Some(auth) = authorization.as_ref().and_then(|value| value.to_str().ok()) {
+        secrets.push(auth.to_owned());
+        if let Some((_, signature)) = auth.rsplit_once("Signature=") {
+            secrets.push(signature.to_owned());
+        }
+        if let Some((_, token)) = auth.split_once(' ') {
+            secrets.push(token.to_owned());
+        }
+    }
+    let response = client
+        .execute(request)
+        .await
+        .map_err(|error| anyhow::anyhow!(api_request_error_message(&error)))?;
+    if response.status().is_redirection() {
+        bail!("Native API redirect blocked");
+    }
+    finish_native_response(response, input, destination, &secrets, "Native API").await
+}
+
 async fn execute_oci_request(
     connection: &DecryptedConnection,
     input: ApiRequestInput,
@@ -430,7 +565,7 @@ async fn execute_oci_request_with(
         .format("%a, %d %b %Y %H:%M:%S GMT")
         .to_string();
     let (request, signature) = crate::oci::prepare(&credential, request, &date)?;
-    let mut response = client
+    let response = client
         .execute(request)
         .await
         .map_err(|error| anyhow::anyhow!(api_request_error_message(&error)))?;
@@ -443,9 +578,20 @@ async fn execute_oci_request_with(
         .rsplit_once("signature=\"")
         .and_then(|(_, value)| value.strip_suffix('"'))
         .unwrap_or_default();
-    let mut secrets = connection.secrets.non_empty_values();
+    let mut secrets = zeroize::Zeroizing::new(connection.secrets.non_empty_values());
     secrets.extend([authorization.to_owned(), signature_value.to_owned()]);
-    let candidates = oci_redaction_candidates(&secrets);
+    finish_native_response(response, input, destination, &secrets, "OCI").await
+}
+
+async fn finish_native_response(
+    mut response: reqwest::Response,
+    input: ApiRequestInput,
+    destination: Option<PathBuf>,
+    secrets: &[String],
+    label: &str,
+) -> Result<ApiResponse> {
+    let status = response.status();
+    let candidates = oci_redaction_candidates(secrets);
     let redact = |bytes: &[u8]| redact_oci_bytes(bytes, &candidates);
     let headers = response
         .headers()
@@ -481,7 +627,7 @@ async fn execute_oci_request_with(
     while let Some(chunk) = response
         .chunk()
         .await
-        .context("Unable to read OCI response")?
+        .with_context(|| format!("Unable to read {label} response"))?
     {
         let remaining = max_bytes.saturating_sub(bytes.len());
         bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
@@ -495,7 +641,7 @@ async fn execute_oci_request_with(
     let mut bytes_transferred = None;
     let body = if let Some(destination) = destination {
         if truncated {
-            bail!("OCI response exceeded the size limit; no response file was saved");
+            bail!("{label} response exceeded the size limit; no response file was saved");
         }
         saved_to = Some(
             save_oci_response_bytes(&bytes, &destination, input.overwrite_response_file).await?,
@@ -503,7 +649,7 @@ async fn execute_oci_request_with(
         bytes_transferred = Some(bytes.len() as u64);
         String::new()
     } else if truncated {
-        "[OCI response exceeded the size limit]".to_owned()
+        format!("[{label} response exceeded the size limit]")
     } else {
         String::from_utf8_lossy(&bytes).into_owned()
     };
@@ -2129,6 +2275,7 @@ mod tests {
 
     fn stored(base_url: String) -> StoredConnection {
         StoredConnection {
+            aws_bindings: None,
             certificate_authority: None,
             oci_bindings: None,
             ssh_jump_item_id: None,
@@ -3077,3 +3224,7 @@ mod oci_transport_tests {
 #[cfg(test)]
 #[path = "oci_generic_transport_tests.rs"]
 mod oci_generic_transport_tests;
+
+#[cfg(test)]
+#[path = "provider_transport_tests.rs"]
+mod provider_transport_tests;

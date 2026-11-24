@@ -41,7 +41,7 @@ pub const API_ADDRESS_TEMPLATES: &[ApiAddressTemplate] = &[
     },
     ApiAddressTemplate {
         category: "cloud",
-        auth_mode: "external",
+        auth_mode: "aws-sigv4",
         display_name: "AWS EC2",
         url_template: "https://ec2.<region>.amazonaws.com/",
         requirements: "AWS SigV4 request signing",
@@ -512,8 +512,10 @@ mod tests {
             assert_eq!(service.parameters, ["region"]);
             assert_eq!(service.category, "cloud");
         }
+        let aws = catalog.iter().find(|service| service.name == "AWS EC2").unwrap();
+        assert_eq!(aws.auth_mode, "aws-sigv4");
+        assert_eq!(aws.parameters, ["region"]);
         for name in [
-            "AWS EC2",
             "Alibaba Cloud ECS",
             "Tencent Cloud CVM",
             "Huawei Cloud ECS",

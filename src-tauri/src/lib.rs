@@ -1,4 +1,6 @@
 pub mod api_catalog;
+pub mod api_provider;
+pub mod aws;
 pub mod backup;
 pub mod browser;
 pub mod browser_vault;

@@ -1,0 +1,112 @@
+{
+  "oracle": "AWS botocore.auth.SigV4Auth",
+  "oracleVersion": "1.44.10",
+  "reference": "https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv-create-signed-request.html",
+  "fixtures": [
+    {
+      "name": "form-post",
+      "method": "POST",
+      "url": "https://ec2.us-east-1.amazonaws.com/",
+      "service": "ec2",
+      "region": "us-east-1",
+      "bodyBase64": "QWN0aW9uPURlc2NyaWJlSW5zdGFuY2VzJlZlcnNpb249MjAxNi0xMS0xNQ==",
+      "headers": {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "X-Amz-Content-SHA256": "6171eb09865e32b0602af0f7957e26573a51f53caaedff02ff88883cb0275885"
+      },
+      "accessKeyId": "AKIDEXAMPLE",
+      "secretAccessKey": "synthetic-secret-key-for-oracle",
+      "sessionToken": null,
+      "date": "20261124T123456Z",
+      "expected": {
+        "url": "https://ec2.us-east-1.amazonaws.com/",
+        "authorization": "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20261124/us-east-1/ec2/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date, Signature=bcc86326ab5272210c150e25dceee10b0cf17eef87641bdf8f88ad7b10d38b5a",
+        "canonicalRequest": "POST\n/\n\ncontent-type:application/x-www-form-urlencoded\nhost:ec2.us-east-1.amazonaws.com\nx-amz-content-sha256:6171eb09865e32b0602af0f7957e26573a51f53caaedff02ff88883cb0275885\nx-amz-date:20261124T123456Z\n\ncontent-type;host;x-amz-content-sha256;x-amz-date\n6171eb09865e32b0602af0f7957e26573a51f53caaedff02ff88883cb0275885"
+      }
+    },
+    {
+      "name": "duplicate-query-encoding",
+      "method": "GET",
+      "url": "https://ec2.us-east-1.amazonaws.com/a//b/%2F/%E4%B8%AD?q=a+b&q=a%2Bb&empty=&q=%E4%B8%AD&z=%25&flag",
+      "service": "ec2",
+      "region": "us-east-1",
+      "bodyBase64": "",
+      "headers": {
+        "X-Synthetic-Whitespace": "  alpha   beta  ",
+        "X-Amz-Content-SHA256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "accessKeyId": "AKIDEXAMPLE",
+      "secretAccessKey": "synthetic-secret-key-for-oracle",
+      "sessionToken": null,
+      "date": "20261124T123456Z",
+      "expected": {
+        "url": "https://ec2.us-east-1.amazonaws.com/a//b/%2F/%E4%B8%AD?empty=&flag=&q=%E4%B8%AD&q=a%20b&q=a%2Bb&z=%25",
+        "authorization": "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20261124/us-east-1/ec2/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date;x-synthetic-whitespace, Signature=72aacdbb6f9eea275db86033b87a84d4713fce79c123f18f79ef1b05a0086145",
+        "canonicalRequest": "GET\n/a/b/%252F/%25E4%25B8%25AD\nempty=&flag=&q=%E4%B8%AD&q=a%20b&q=a%2Bb&z=%25\nhost:ec2.us-east-1.amazonaws.com\nx-amz-content-sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\nx-amz-date:20261124T123456Z\nx-synthetic-whitespace:alpha beta\n\nhost;x-amz-content-sha256;x-amz-date;x-synthetic-whitespace\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "name": "json-temporary-credentials",
+      "method": "POST",
+      "url": "https://ssm.ap-northeast-1.amazonaws.com/",
+      "service": "ssm",
+      "region": "ap-northeast-1",
+      "bodyBase64": "eyJOYW1lIjoic3ludGhldGljL+WPguaVsCIsIldpdGhEZWNyeXB0aW9uIjpmYWxzZX0=",
+      "headers": {
+        "Content-Type": "application/x-amz-json-1.1",
+        "X-Amz-Target": "AmazonSSM.GetParameter",
+        "X-Amz-Content-SHA256": "b6599309ff75ec892d7de02a0dba182d972f1f4edb1a8573c2e634d86bd0e0ef"
+      },
+      "accessKeyId": "AKIDEXAMPLE",
+      "secretAccessKey": "synthetic-secret-key-for-oracle",
+      "sessionToken": "synthetic/session+token=",
+      "date": "20261124T123456Z",
+      "expected": {
+        "url": "https://ssm.ap-northeast-1.amazonaws.com/",
+        "authorization": "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20261124/ap-northeast-1/ssm/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date;x-amz-security-token;x-amz-target, Signature=d72a6e84ca03ef81e79aff0e60a1abf15cff742886d3c4b7bc5ae6382bdadfc9",
+        "canonicalRequest": "POST\n/\n\ncontent-type:application/x-amz-json-1.1\nhost:ssm.ap-northeast-1.amazonaws.com\nx-amz-content-sha256:b6599309ff75ec892d7de02a0dba182d972f1f4edb1a8573c2e634d86bd0e0ef\nx-amz-date:20261124T123456Z\nx-amz-security-token:synthetic/session+token=\nx-amz-target:AmazonSSM.GetParameter\n\ncontent-type;host;x-amz-content-sha256;x-amz-date;x-amz-security-token;x-amz-target\nb6599309ff75ec892d7de02a0dba182d972f1f4edb1a8573c2e634d86bd0e0ef"
+      }
+    },
+    {
+      "name": "global-iam",
+      "method": "GET",
+      "url": "https://iam.amazonaws.com/?Action=ListUsers&Version=2010-05-08",
+      "service": "iam",
+      "region": "us-east-1",
+      "bodyBase64": "",
+      "headers": {
+        "Accept": "application/xml",
+        "X-Amz-Content-SHA256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "accessKeyId": "AKIDEXAMPLE",
+      "secretAccessKey": "synthetic-secret-key-for-oracle",
+      "sessionToken": null,
+      "date": "20261124T123456Z",
+      "expected": {
+        "url": "https://iam.amazonaws.com/?Action=ListUsers&Version=2010-05-08",
+        "authorization": "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20261124/us-east-1/iam/aws4_request, SignedHeaders=accept;host;x-amz-content-sha256;x-amz-date, Signature=5d57b7fda21a4d8e9b5b1a5106c9e1a343ab66b5dd77dd576fa031034ee6b735",
+        "canonicalRequest": "GET\n/\nAction=ListUsers&Version=2010-05-08\naccept:application/xml\nhost:iam.amazonaws.com\nx-amz-content-sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\nx-amz-date:20261124T123456Z\n\naccept;host;x-amz-content-sha256;x-amz-date\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "name": "empty-values-encoded-key",
+      "method": "GET",
+      "url": "https://logs.eu-west-1.amazonaws.com/?x=&x&%E4%B8%AD=%2F&a=%20&a=+&a=%2B",
+      "service": "logs",
+      "region": "eu-west-1",
+      "bodyBase64": "",
+      "headers": {
+        "X-Amz-Content-SHA256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "accessKeyId": "AKIDEXAMPLE",
+      "secretAccessKey": "synthetic-secret-key-for-oracle",
+      "sessionToken": "synthetic/session+token=",
+      "date": "20261124T123456Z",
+      "expected": {
+        "url": "https://logs.eu-west-1.amazonaws.com/?%E4%B8%AD=%2F&a=%20&a=%20&a=%2B&x=&x=",
+        "authorization": "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20261124/eu-west-1/logs/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date;x-amz-security-token, Signature=b9a71aa493891916be99f47ad0c5660a711a3d3b73603c4860dbba9db3c03cab",
+        "canonicalRequest": "GET\n/\n%E4%B8%AD=%2F&a=%20&a=%20&a=%2B&x=&x=\nhost:logs.eu-west-1.amazonaws.com\nx-amz-content-sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\nx-amz-date:20261124T123456Z\nx-amz-security-token:synthetic/session+token=\n\nhost;x-amz-content-sha256;x-amz-date;x-amz-security-token\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    }
+  ]
+}

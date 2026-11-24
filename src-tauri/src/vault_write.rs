@@ -29,6 +29,47 @@ pub struct LoginRule {
 }
 #[derive(Clone, Default, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AwsBindingsPatch {
+    #[serde(default, deserialize_with = "nullable_jump_id")]
+    pub service_url: Option<Option<String>>,
+    #[serde(default, deserialize_with = "nullable_jump_id")]
+    pub access_key_id: Option<Option<String>>,
+    #[serde(default, deserialize_with = "nullable_jump_id")]
+    pub secret_access_key: Option<Option<String>>,
+    #[serde(default, deserialize_with = "nullable_jump_id")]
+    pub session_token: Option<Option<String>>,
+    #[serde(default, deserialize_with = "nullable_jump_id")]
+    pub region: Option<Option<String>>,
+}
+impl AwsBindingsPatch {
+    fn apply(self, bindings: &mut crate::model::AwsModuleBindings) -> Result<()> {
+        for (patch, target) in [
+            (self.service_url, &mut bindings.service_url),
+            (self.access_key_id, &mut bindings.access_key_id),
+            (self.secret_access_key, &mut bindings.secret_access_key),
+            (self.session_token, &mut bindings.session_token),
+            (self.region, &mut bindings.region),
+        ] {
+            if let Some(value) = patch {
+                *target = value
+                    .map(|id| {
+                        Uuid::parse_str(&id)
+                            .map_err(|_| anyhow::anyhow!("Invalid AWS module binding ID"))
+                    })
+                    .transpose()?;
+            }
+        }
+        Ok(())
+    }
+}
+fn nullable_aws_bindings<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<Option<AwsBindingsPatch>>, D::Error> {
+    Option::<AwsBindingsPatch>::deserialize(deserializer).map(Some)
+}
+
+#[derive(Clone, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OciBindingsPatch {
     #[serde(default, deserialize_with = "nullable_jump_id")]
     pub region: Option<Option<String>>,
@@ -104,6 +145,7 @@ fn nullable_oci_bindings<'de, D: serde::Deserializer<'de>>(
 #[derive(Clone, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateInput {
+    pub aws_bindings: Option<crate::model::AwsModuleBindings>,
     pub oci_bindings: Option<crate::model::OciModuleBindings>,
     /// Existing enabled direct SSH project ID. Omit for direct connection.
     pub ssh_jump_item_id: Option<String>,
@@ -121,6 +163,8 @@ pub struct CreateInput {
 #[derive(Clone, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateInput {
+    #[serde(default, deserialize_with = "nullable_aws_bindings")]
+    pub aws_bindings: Option<Option<AwsBindingsPatch>>,
     #[serde(default, deserialize_with = "nullable_oci_bindings")]
     pub oci_bindings: Option<Option<OciBindingsPatch>>,
     /// Omit to preserve the route, null to clear it, or an existing direct SSH project ID.
@@ -210,8 +254,9 @@ impl Vault {
             operations:vec!["create".into(),"update".into(),"move via update".into()],
             item_types:vec!["ssh".into(),"api".into(),"login".into(),"custom".into()],
             modules:["host","port","username","password","privateKey","passphrase","url","apiCredential","totp","customSecret","publicKey","sshCertificate","certificate","csr","caCertificate"].map(str::to_owned).to_vec(),
-            ssh_auth_types:vec!["password".into(),"privateKey".into(),"certificate".into()], http_auth_types:vec!["bearer".into(),"apiKey".into(),"basic".into(),"oci-signature".into()],
+            ssh_auth_types:vec!["password".into(),"privateKey".into(),"certificate".into()], http_auth_types:vec!["bearer".into(),"apiKey".into(),"basic".into(),"oci-signature".into(),"aws-sigv4".into()],
             rules:vec![
+                "AWS uses httpAuthType aws-sigv4 and awsBindings with serviceUrl, region, accessKeyId, secretAccessKey and optional sessionToken module IDs. Create ordinary modules first and bind returned IDs in an update. Bound credential roles are secret modules; serviceUrl binds a url module. Omitted bindings preserve, null clears. Native execution requires complete credentials and a supported endpoint in the bound region. No automatic CHECK operation is guessed for AWS; use http_send with documented action/version or target headers.".into(),
                 "sshJumpItemId selects an existing enabled direct SSH project. Update omits it to preserve or uses null to clear. Single-hop only; host trust is device-local and cannot be modified through MCP.".into(),
                 "Create requires name, itemType, folder and modules; update requires item ID and expectedRevision. Omitted fields are preserved.".into(),
                 "Host and url modules use value as the default address and alternateValues as other addresses. Omitted alternateValues is preserved; [] clears it. To switch defaults, submit the new value and remaining addresses together. No automatic failover. SSH addresses share the project port and credentials.".into(),
@@ -229,12 +274,13 @@ impl Vault {
             authorize(&document.settings, request.folder.trim())?;
             let mut input: ConnectionInput=serde_json::from_value(serde_json::json!({"name":request.name,"itemType":request.item_type,"folder":request.folder.trim(),"description":request.description.unwrap_or_default(),"enabled":request.enabled.unwrap_or(true)}))?;
             input.oci_bindings = request.oci_bindings;
+            input.aws_bindings = request.aws_bindings;
             input.ssh_jump_item_id = jump_id(request.ssh_jump_item_id)?;
             set_auth(&mut input,request.ssh_auth_type,request.http_auth_type,request.auth_header)?;
             if let Some(rules)=request.login_uris { input.login_uris=login_rules(rules)?; }
             apply_modules(&mut input, &request.modules)?;
             validate_credentials(&mut input, None, &request.modules)?;
-            validate_item(&input, input.http_auth_type == crate::oci::AUTH_MODE)?;
+            validate_item(&input, matches!(input.http_auth_type.as_str(), "oci-signature" | "aws-sigv4"))?;
             let key=input.secrets.private_key.clone().map(zeroize::Zeroizing::new);
             let saved=self.save_connection_in_document(document,input,None,key.as_ref().map(|k|(k.as_str(),"SSH KEY"))).map_err(|_|anyhow::anyhow!("Invalid item or module configuration; nothing was saved"))?;
             Ok(saved.into())
@@ -262,6 +308,12 @@ impl Vault {
             let mut input: ConnectionInput =
                 serde_json::from_value(serde_json::to_value(existing.portable())?)?;
             input.secrets = secrets.clone();
+            if let Some(patch) = request.aws_bindings {
+                match patch {
+                    None => input.aws_bindings = None,
+                    Some(patch) => patch.apply(input.aws_bindings.get_or_insert_with(Default::default))?,
+                }
+            }
             if let Some(patch) = request.oci_bindings {
                 match patch {
                     None => input.oci_bindings = None,
@@ -298,7 +350,7 @@ impl Vault {
             }
             apply_modules(&mut input, &request.modules)?;
             validate_credentials(&mut input, Some(&existing), &request.modules)?;
-            validate_item(&input, input.http_auth_type == crate::oci::AUTH_MODE)?;
+            validate_item(&input, matches!(input.http_auth_type.as_str(), "oci-signature" | "aws-sigv4"))?;
             let key = input
                 .secrets
                 .private_key
@@ -347,7 +399,7 @@ fn set_auth(
     }
     if let Some(mode) = http {
         ensure!(
-            matches!(mode.as_str(), "bearer" | "apiKey" | "basic" | "oci-signature"),
+            matches!(mode.as_str(), "bearer" | "apiKey" | "basic" | "oci-signature" | "aws-sigv4"),
             "Unsupported API authentication mode"
         );
         input.http_auth_type = mode;
@@ -554,7 +606,7 @@ fn changed_totp(input: &ConnectionInput, patches: &[ModulePatch]) -> bool {
                 }))
     })
 }
-fn validate_item(input: &ConnectionInput, oci: bool) -> Result<()> {
+fn validate_item(input: &ConnectionInput, native_signing: bool) -> Result<()> {
     ensure!(matches!(input.item_type.as_str(), "ssh" | "api" | "login" | "custom"), "Unsupported project type for MCP writing");
     let has = |name: &str| input.secrets.get(name).is_some_and(|s| !s.is_empty());
     if input.item_type == "ssh" {
@@ -572,7 +624,7 @@ fn validate_item(input: &ConnectionInput, oci: bool) -> Result<()> {
             "SSH host is required"
         );
     }
-    if input.item_type == "api" && !oci {
+    if input.item_type == "api" && !native_signing {
         ensure!(
             input
                 .modules

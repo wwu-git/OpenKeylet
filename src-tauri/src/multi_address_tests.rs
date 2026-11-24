@@ -58,7 +58,7 @@ fn validates_every_address_and_preserves_saved_data_on_failure() {
 }
 
 #[test]
-fn version14_single_address_remains_readable_and_rewrites_as17() {
+fn version14_single_address_remains_readable_and_rewrites_as18() {
     let directory = tempfile::tempdir().unwrap();
     let vault = Vault::open(directory.path().into()).unwrap();
     let saved = vault.save_connection(input("legacy", "host", "a.example", &[])).unwrap();
@@ -73,7 +73,7 @@ fn version14_single_address_remains_readable_and_rewrites_as17() {
     assert!(vault.get_connection(saved.id).unwrap().stored.modules[0].alternate_values.is_empty());
     vault.save_connection(input("new", "host", "b.example", &["c.example"])).unwrap();
     let document: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(document["version"], 17);
+    assert_eq!(document["version"], 18);
 }
 
 #[test]

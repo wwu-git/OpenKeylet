@@ -69,7 +69,7 @@ fn previous_vault_version_is_backed_up_and_upgrades_on_open() {
     std::fs::write(&path, &old).unwrap();
     drop(vault);
     let reopened = Vault::open(directory.path().into()).unwrap();
-    assert_eq!(serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap()["version"], 17);
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap()["version"], 18);
     let backup = std::fs::read_dir(directory.path()).unwrap().flatten().find(|entry| entry.file_name().to_string_lossy().starts_with("before-oci-modules-")).unwrap();
     assert_eq!(std::fs::read(backup.path().join("vault.json")).unwrap(), old);
     assert_eq!(

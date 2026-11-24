@@ -22,7 +22,7 @@ use url::Url;
 use uuid::Uuid;
 
 const MAX_ACTIVITIES: usize = 3_000;
-const VAULT_VERSION: u8 = 17;
+const VAULT_VERSION: u8 = 18;
 #[path = "vault_certificates.rs"]
 mod certificates;
 pub use certificates::{CertificateActor, CertificateCapabilities, CertificateAuthorityStatus, SigningPermissionChange};
@@ -38,6 +38,10 @@ mod ssh_jump_tests;
 #[cfg(test)]
 #[path = "multi_address_tests.rs"]
 mod multi_address_tests;
+
+#[cfg(test)]
+#[path = "vault_provider_tests.rs"]
+mod provider_tests;
 
 #[cfg(test)]
 #[path = "vault_certificate_tests.rs"]
@@ -192,9 +196,9 @@ impl Vault {
         let bytes = fs::read(&self.inner.vault_path).context("Could not read vault")?;
         let document: VaultDocument =
             serde_json::from_slice(&bytes).context("Invalid vault file format")?;
-        if !matches!(document.version, 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | VAULT_VERSION) {
+        if !matches!(document.version, 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | VAULT_VERSION) {
             bail!(
-                "OpenKeylet supports vault versions 7 through 17; current file version is {}",
+                "OpenKeylet supports vault versions 7 through 18; current file version is {}",
                 document.version
             );
         }
@@ -208,7 +212,7 @@ impl Vault {
                 return Ok(());
             }
             let mut document = self.read_document_unlocked()?;
-            if raw.version == 16 {
+            if matches!(raw.version, 16 | 17) {
                 document.version = VAULT_VERSION;
                 return self.write_document_unlocked(&document);
             }
@@ -716,7 +720,7 @@ impl Vault {
             {
                 bail!("Project name already exists; use a different name");
             }
-            if input.modules.is_empty() && input.http_auth_type != crate::oci::AUTH_MODE {
+            if input.modules.is_empty() && !matches!(input.http_auth_type.as_str(), "oci-signature" | "aws-sigv4") {
                 bail!("Project must have at least one module");
             }
 
@@ -1164,7 +1168,7 @@ impl Vault {
         let bytes = fs::read(&self.inner.vault_path).context("Could not read vault")?;
         let mut document: VaultDocument =
             serde_json::from_slice(&bytes).context("Invalid vault file format")?;
-        if !matches!(document.version, 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | VAULT_VERSION) {
+        if !matches!(document.version, 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | VAULT_VERSION) {
             bail!("Unsupported vault version {}", document.version);
         }
         document.version = VAULT_VERSION;
@@ -1339,6 +1343,16 @@ fn same_certificate_authority(left: &StoredConnection, right: &StoredConnection)
         (b.kind, position(b.private_key), b.ca_certificate.map(position))
     });
     binding(left) == binding(right)
+}
+
+fn same_aws_bindings(left: &StoredConnection, right: &StoredConnection) -> bool {
+    let positions = |item: &StoredConnection| {
+        item.aws_bindings.as_ref().map(|binding| {
+            [binding.region, binding.service_url, binding.access_key_id, binding.secret_access_key, binding.session_token]
+                .map(|id| id.map(|id| item.modules.iter().position(|module| module.id == id).map_or_else(|| format!("missing:{id}"), |position| format!("module:{position}"))))
+        })
+    };
+    positions(left) == positions(right)
 }
 
 fn same_oci_bindings(left: &StoredConnection, right: &StoredConnection) -> bool {
@@ -1587,6 +1601,29 @@ pub(crate) fn normalize_connection(
             }
         }
     }
+    let mut aws_bindings = input.aws_bindings;
+    if let Some(bindings) = &mut aws_bindings {
+        for binding in [
+            &mut bindings.region,
+            &mut bindings.service_url,
+            &mut bindings.access_key_id,
+            &mut bindings.secret_access_key,
+            &mut bindings.session_token,
+        ] {
+            if let Some(id) = *binding {
+                if !modules.iter().any(|module| module.id == id) {
+                    anyhow::ensure!(
+                        existing.is_some_and(|old| old.modules.iter().any(|module| module.id == id)),
+                        "AWS binding must reference a module in this project"
+                    );
+                    *binding = None;
+                }
+            }
+        }
+    }
+    if input.http_auth_type == "aws-sigv4" {
+        crate::aws::validate_modules(&modules, secrets, aws_bindings.as_ref())?;
+    }
     if input.http_auth_type == crate::oci::AUTH_MODE {
         crate::oci::validate_modules(&modules, secrets, oci_bindings.as_ref())?;
     }
@@ -1609,6 +1646,8 @@ pub(crate) fn normalize_connection(
         oci_bindings
             .as_ref()
             .and_then(|bindings| crate::oci::binding_value(&modules, secrets, bindings.service_url))
+    } else if input.http_auth_type == "aws-sigv4" {
+        aws_bindings.as_ref().and_then(|bindings| crate::oci::binding_value(&modules, secrets, bindings.service_url))
     } else {
         module_value(&modules, "url")
     };
@@ -1656,6 +1695,7 @@ pub(crate) fn normalize_connection(
     Ok(StoredConnection {
         certificate_authority: existing.and_then(|old| old.certificate_authority.clone()).or(input.certificate_authority),
         oci_bindings,
+        aws_bindings,
         ssh_jump_item_id: input.ssh_jump_item_id,
         ssh_jump_unresolved: input.ssh_jump_unresolved,
         revision: existing.map_or(1, |old| old.revision.saturating_add(1)),
@@ -1700,6 +1740,7 @@ fn stored_from_portable(
     let mut input = ConnectionInput {
         certificate_authority: portable.certificate_authority.clone(),
         oci_bindings: portable.oci_bindings.clone(),
+        aws_bindings: portable.aws_bindings.clone(),
         ssh_jump_item_id: portable.ssh_jump_item_id,
         ssh_jump_unresolved: portable.ssh_jump_unresolved,
         ssh_auth_type: portable.ssh_auth_type.clone(),
@@ -1745,6 +1786,7 @@ fn same_portable_content(
 ) -> bool {
     if !same_certificate_authority(left, right)
         || !same_oci_bindings(left, right)
+        || !same_aws_bindings(left, right)
         || left.ssh_jump_item_id != right.ssh_jump_item_id
         || left.ssh_jump_unresolved != right.ssh_jump_unresolved
         || left.login_uris != right.login_uris
@@ -2060,6 +2102,7 @@ mod tests {
             .insert("apiCredential".into(), token.to_owned());
         ConnectionInput {
             certificate_authority: None,
+            aws_bindings: None,
             oci_bindings: None,
             ssh_jump_item_id: None,
             ssh_jump_unresolved: false,
@@ -2105,6 +2148,7 @@ mod tests {
             .insert("username".into(), "root".into());
         ConnectionInput {
             certificate_authority: None,
+            aws_bindings: None,
             oci_bindings: None,
             ssh_jump_item_id: None,
             ssh_jump_unresolved: false,
@@ -2591,7 +2635,7 @@ mod tests {
         drop(vault);
 
         let error = Vault::open(vault_dir).err().expect("version 6 must fail");
-        assert!(format!("{error:#}").contains("supports vault versions 7 through 17"));
+        assert!(format!("{error:#}").contains("supports vault versions 7 through 18"));
     }
 
     #[test]
@@ -2758,6 +2802,7 @@ mod tests {
         let saved = vault
             .save_connection(ConnectionInput {
                 certificate_authority: None,
+                aws_bindings: None,
                 oci_bindings: None,
                 ssh_jump_item_id: None,
                 ssh_jump_unresolved: false,
@@ -2834,6 +2879,7 @@ mod tests {
             .insert("username".into(), "developer@example.test".into());
         let input = |id, secrets, remove_secret_names| ConnectionInput {
             certificate_authority: None,
+            aws_bindings: None,
             oci_bindings: None,
             ssh_jump_item_id: None,
             ssh_jump_unresolved: false,

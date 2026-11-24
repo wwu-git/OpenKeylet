@@ -161,7 +161,7 @@ fn migration_v16_only_defaults_and_host_trust_kind_defaults() {
     fs::write(&v.inner.vault_path, serde_json::to_vec(&raw).unwrap()).unwrap();
     drop(v);
     let v = Vault::open(d.path().into()).unwrap();
-    assert_eq!(v.read_document().unwrap().version, 17);
+    assert_eq!(v.read_document().unwrap().version, 18);
     assert!(v.agent_connection(id).is_err());
     assert!(!fs::read_dir(d.path()).unwrap().any(|e| {
         e.unwrap()
