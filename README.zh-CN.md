@@ -144,6 +144,8 @@ OpenKeylet 支持密码与私钥认证、不限制长度的命令与输出、直
 
 项目可选择已有 SSH 项目作为单级跳板，两端使用各自凭据，命令与 SFTP 共用连接链。直连和跳板连接均要求在认证前确认主机指纹。已有直连项目也须先通过本机客户端或 `ssh-trust` CLI 确认对应端点的指纹。认证明文不会返回给 Agent。配置和兼容边界见 [SSH 跳板文档](docs/ssh-jump.md)。
 
+SSH 用户证书认证和主机 CA 验证支持直连、跳板及 SFTP。已有 CA 可通过独立授权的 MCP 工具或本机 CLI 签发 SSH 用户/主机和 TLS 服务端/客户端叶子证书，证书与 CSR 使用标准模块。使用方式与验收边界见[证书文档](docs/certificates.md)。
+
 ### HTTP API
 
 OpenKeylet 会识别常见 API 服务与 Basic 认证组合，无法识别时使用 Bearer Token。保存的服务 URL 只是默认地址和相对路径基准，不是 Origin 限制；Agent 可按任务使用任意 HTTP/HTTPS 目标。其他协议可在 URL、Header、Query、JSON/文本正文或表单中写 `{{openkeylet:模块名}}`，由 OpenKeylet 在本地解析。重定向会正常跟随，响应默认没有大小上限，也可直接流式保存到本地文件，并支持 multipart 文件上传。

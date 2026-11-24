@@ -1645,8 +1645,7 @@ pub(crate) fn normalize_connection(
         }
         &input.ssh_auth_type
     };
-    // Manual edits can remove the selected credential. Preserve explicit choice only
-    // while it remains usable; MCP validates its explicit choice before this layer.
+    // Incomplete certificate configuration must not fall back to password authentication.
     let ssh_auth_type = if requested_ssh_auth_type == "certificate" || module_secret_configured(&modules, secrets, requested_ssh_auth_type) {
         requested_ssh_auth_type.to_owned()
     } else {

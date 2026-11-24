@@ -11,3 +11,6 @@ ts	phase	decision	why	evidence	result
 2026-11-24T17:50:54+08:00	mcp-cli	以固定 Agent/Owner 适配器区分调用者	MCP 不能选择 Owner 或更改签发授权	src-tauri/tests/headless_certificates.rs; src-tauri/src/mcp_certificate_tests.rs	真实 stdio MCP 与 CLI 2项通过; MCP证书5项通过; 不重连撤权生效
 2026-11-24T17:54:02+08:00	gui	复用标准模块和本地用户命令; 设置单独管理签发	模板仅组合字段; 避免特殊编辑组件和隐式授权	scripts/test-certificates-ui.mjs; scripts/test-ssh-jump-ui.mjs	Chrome 隔离夹具通过; 460px 无水平溢出; 按钮单行; CA 候选不自动信任
 2026-11-24T17:54:02+08:00	review	拆分界面输入的多张 TLS 中间证书	核心验证每个数组元素必须恰好一张证书	renderer/certificates.js; scripts/test-certificates-ui.mjs	两张中间证书分别提交; 混入其他材料拒绝
+2026-11-24T17:58:13+08:00	acceptance	补真实双中间 CA 链验证并完成回归	界面拆分测试不能代替真实链校验	src-tauri/src/certificates/tests.rs; cargo test --locked --offline	281 项通过; 独立 OpenSSH 1项另行通过; GUI/无界面构建通过
+2026-11-24T17:58:13+08:00	privacy	逐项复核扫描命中且不增加豁免	格式头字符串不能误报为真实密钥; 不隐藏真实问题	gitleaks git dbcbdc3..HEAD --redact	2处均为 starts_with 格式判断; 新增内容无完整私钥 PEM
+2026-11-24T17:58:13+08:00	final-review	记录实际验证边界和保留复验工具	不把模拟 GUI、日志审核或单平台编译宣称为部署验收	docs/certificates.md	独立代码审核无阻断项; 未安装未推送; Linux/Windows/Grok及最低Rust未实机验证

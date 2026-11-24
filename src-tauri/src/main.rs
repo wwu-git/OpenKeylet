@@ -101,7 +101,7 @@ async fn dispatch() -> Result<()> {
             Ok(())
         }
         _ => anyhow::bail!(
-            "Usage: openkeylet [gui] | mcp stdio | config <stdio-json|stdio-toml> | browser <status|enable [port]|disable|pair [port]|reset> | backup <export|import> <file> | permissions <status|enable|disable|folder add/remove NAME> | github-backup <status|connect|upload|restore|disconnect> | ssh-trust <list|set ITEM_ID HOST PORT FINGERPRINT|remove ITEM_ID HOST PORT|probe ITEM_ID> | certificates <status|authority|permissions|inspect|verify|check-key|issue> | key migrate (macOS)"
+            "Usage: openkeylet [gui] | mcp stdio | config <stdio-json|stdio-toml> | browser <status|enable [port]|disable|pair [port]|reset> | backup <export|import> <file> | permissions <status|enable|disable|folder add/remove NAME> | github-backup <status|connect|upload|restore|disconnect> | ssh-trust <list|set ITEM_ID HOST PORT FINGERPRINT|set-ca ITEM_ID HOST PORT CA_FINGERPRINT|remove ITEM_ID HOST PORT|probe ITEM_ID> | certificates <status|authority|permissions|inspect|verify|check-key|issue> | key migrate (macOS)"
         ),
     }
 }

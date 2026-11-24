@@ -913,3 +913,66 @@ fn ssh_host_verification_rejects_weak_ca_even_when_pinned() {
     let error = verify_ssh_host_certificate(&cert, "server.test", &fingerprint, NOW).unwrap_err();
     assert_eq!(error.to_string(), "Unsupported or weak SSH key algorithm");
 }
+
+#[test]
+fn tls_two_intermediates_require_complete_correct_chain_and_leaf_context() {
+    let (root_key, root) = ca_fixture();
+    let root_issuer =
+        Issuer::from_ca_cert_pem(&root, KeyPair::from_pem(&root_key).unwrap()).unwrap();
+    let first_key = KeyPair::generate().unwrap();
+    let mut first_params = ca_params();
+    first_params
+        .distinguished_name
+        .push(DnType::CommonName, "Synthetic first intermediate");
+    let first = first_params
+        .signed_by(&first_key, &root_issuer)
+        .unwrap()
+        .pem();
+    let first_issuer = Issuer::from_ca_cert_pem(&first, first_key).unwrap();
+    let second_key = KeyPair::generate().unwrap();
+    let mut second_params = ca_params();
+    second_params
+        .distinguished_name
+        .push(DnType::CommonName, "Synthetic second intermediate");
+    let second = second_params
+        .signed_by(&second_key, &first_issuer)
+        .unwrap()
+        .pem();
+    let (_, csr) = csr_fixture();
+    let issued = issue_certificate(
+        &material(&second_key.serialize_pem(), Some(&second)),
+        &tls_request(csr, CertificateKind::TlsServer),
+        60,
+        &[4, 2],
+        NOW,
+    )
+    .unwrap();
+    let mut request = verify_input(&issued.certificate, &root, CertificateKind::TlsServer);
+    request.intermediates = vec![second.clone(), first.clone()];
+    let report = verify_certificate(&request, NOW).unwrap();
+    assert!(report.verified, "{:?}", report.reasons);
+    assert!(report.issuer_trusted && report.signature_valid);
+    assert!(report.identity_matches && report.purpose_valid && report.time_valid);
+
+    let (_, wrong) = ca_fixture();
+    for chain in [
+        vec![],
+        vec![second.clone()],
+        vec![first.clone()],
+        vec![second.clone(), wrong.clone()],
+        vec![wrong, first.clone()],
+    ] {
+        request.intermediates = chain;
+        let report = verify_certificate(&request, NOW).unwrap();
+        assert!(!report.verified);
+        assert!(!report.issuer_trusted);
+    }
+    request.intermediates = vec![second, first];
+    request.identity = "wrong.test".into();
+    let report = verify_certificate(&request, NOW).unwrap();
+    assert!(!report.verified && !report.identity_matches);
+    request.identity = "server.test".into();
+    request.kind = CertificateKind::TlsClient;
+    let report = verify_certificate(&request, NOW).unwrap();
+    assert!(!report.verified && !report.purpose_valid);
+}

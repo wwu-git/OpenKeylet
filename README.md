@@ -144,6 +144,8 @@ OpenKeylet supports password and private-key authentication, unrestricted-length
 
 An item can select an existing SSH item as a single jump host. Both endpoints use their own credentials, and commands and SFTP share the connection chain. Direct connections and jump routes require confirmed host fingerprints before authentication. Existing direct projects must confirm their endpoint fingerprint through the local client or `ssh-trust` CLI before connecting. Authentication plaintext is not returned to the agent. See [SSH jump configuration and compatibility](docs/ssh-jump.md).
 
+SSH user authentication and host CA verification support direct and jump routes. Existing CAs can issue SSH user/host and TLS server/client leaf certificates through separately authorized MCP tools or the owner CLI. Standard modules store certificates and CSRs. See [certificate setup and acceptance](docs/certificates.md).
+
 ### HTTP APIs
 
 OpenKeylet recognizes common API providers and Basic combinations, and falls back to Bearer Token when no provider matches. A saved service URL is a default and relative-path base, not an Origin restriction; the agent may use any HTTP/HTTPS destination required by the task. Other protocols can place `{{openkeylet:module name}}` placeholders in the URL, headers, query, JSON/text body, or form values, and OpenKeylet resolves them locally. Redirects are followed, responses have no default size limit and may stream directly to a local file, and multipart uploads are supported.
