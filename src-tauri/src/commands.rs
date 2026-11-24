@@ -286,6 +286,11 @@ async fn copy_owner_value(
 }
 
 #[tauri::command]
+fn api_service_catalog() -> Vec<crate::api_catalog::ApiService> {
+    crate::api_catalog::service_catalog()
+}
+
+#[tauri::command]
 fn oci_regions() -> &'static [&'static str] {
     crate::oci::REGIONS
 }
@@ -1465,6 +1470,7 @@ pub fn run_gui() -> Result<()> {
             set_ssh_host_trust,
             probe_ssh_host,
             oci_regions,
+            api_service_catalog,
             stage_oci_key,
             discard_oci_key,
             reorder_connections,
