@@ -290,31 +290,6 @@ fn oci_regions() -> &'static [&'static str] {
     crate::oci::REGIONS
 }
 
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct OciEditorState {
-    config: crate::oci::Config,
-    has_key: bool,
-}
-
-#[tauri::command]
-async fn oci_editor_state(
-    runtime: State<'_, AppRuntime>,
-    id: Uuid,
-) -> Result<OciEditorState, String> {
-    require_owner_unlocked(&runtime).await?;
-    let item = runtime.vault.get_connection(id).map_err(command_error)?;
-    let credential = item
-        .secrets
-        .oci
-        .as_ref()
-        .ok_or_else(|| "Missing OCI configuration".to_owned())?;
-    Ok(OciEditorState {
-        config: credential.config.clone(),
-        has_key: credential.is_configured(),
-    })
-}
-
 #[tauri::command]
 async fn stage_oci_key(
     app: AppHandle,
@@ -387,44 +362,6 @@ async fn discard_oci_key(runtime: State<'_, AppRuntime>, id: Uuid) -> Result<(),
 }
 
 #[tauri::command]
-async fn save_oci_connection(
-    app: AppHandle,
-    runtime: State<'_, AppRuntime>,
-    mut input: ConnectionInput,
-    expected_updated_at: Option<String>,
-    config: crate::oci::Config,
-    pending_id: Option<Uuid>,
-) -> Result<PublicConnection, String> {
-    let mut pending = runtime.pending_oci_key.lock().await;
-    require_owner_unlocked(&runtime).await?;
-    let key = pending_id
-        .map(|requested| {
-            pending
-                .as_ref()
-                .filter(|(id, _)| *id == requested)
-                .map(|(_, pem)| pem.as_str())
-                .ok_or_else(|| "Please select the OCI signing key again".to_owned())
-        })
-        .transpose()?;
-    let mut pending_ssh = runtime.pending_private_key.lock().await;
-    let ssh_key = staged_ssh_key(&mut input, pending_ssh.as_ref())?;
-    let saved = runtime
-        .vault
-        .save_oci_connection(input, expected_updated_at.as_deref(), config, key, ssh_key)
-        .map_err(command_error)?;
-    if ssh_key.is_some() {
-        pending_ssh.take();
-    }
-    drop(pending_ssh);
-    if pending_id.is_some() {
-        pending.take();
-    }
-    drop(pending);
-    emit_changed(&app);
-    Ok(saved)
-}
-
-#[tauri::command]
 async fn ssh_host_trust(runtime: State<'_, AppRuntime>) -> Result<Vec<crate::model::SshHostTrust>, String> {
     require_owner_unlocked(&runtime).await?;
     runtime.vault.ssh_host_trust().map_err(command_error)
@@ -448,8 +385,36 @@ async fn save_connection(
     runtime: State<'_, AppRuntime>,
     mut input: ConnectionInput,
     expected_updated_at: Option<String>,
+    pending_oci_key_id: Option<Uuid>,
+    pending_oci_key_module_id: Option<Uuid>,
 ) -> Result<PublicConnection, String> {
     require_owner_unlocked(&runtime).await?;
+    let mut pending_oci = runtime.pending_oci_key.lock().await;
+    if let Some(id) = pending_oci_key_id {
+        let pem = pending_oci
+            .as_ref()
+            .filter(|(candidate, _)| *candidate == id)
+            .map(|(_, pem)| pem.as_str())
+            .ok_or_else(|| "Please import the RSA signing key again".to_owned())?;
+        let module_id = pending_oci_key_module_id
+            .ok_or_else(|| "Signing key target module is required".to_owned())?;
+        let module = input
+            .modules
+            .iter()
+            .find(|module| module.id == module_id)
+            .ok_or_else(|| "Signing key module is unavailable".to_owned())?;
+        let name = module
+            .secret_name()
+            .ok_or_else(|| "Signing key must bind a secret module".to_owned())?;
+        if name == "privateKey" {
+            input.secrets.private_key = Some(pem.to_owned());
+        } else {
+            input
+                .secrets
+                .named_secrets
+                .insert(name.to_owned(), pem.to_owned());
+        }
+    }
     let mut pending = runtime.pending_private_key.lock().await;
     let private_key = staged_ssh_key(&mut input, pending.as_ref())?;
     let connection = runtime
@@ -460,6 +425,10 @@ async fn save_connection(
         pending.take();
     }
     drop(pending);
+    if pending_oci_key_id.is_some() {
+        pending_oci.take();
+    }
+    drop(pending_oci);
     emit_changed(&app);
     Ok(connection)
 }
@@ -1496,10 +1465,8 @@ pub fn run_gui() -> Result<()> {
             set_ssh_host_trust,
             probe_ssh_host,
             oci_regions,
-            oci_editor_state,
             stage_oci_key,
             discard_oci_key,
-            save_oci_connection,
             reorder_connections,
             set_connection_enabled,
             delete_connection,
@@ -1686,14 +1653,7 @@ mod oci_key_tests {
         pending.take();
         assert!(std::fs::read(directory.path().join("vault.json")).unwrap() == before);
         assert!(
-            vault
-                .get_connection(saved.id)
-                .unwrap()
-                .secrets
-                .oci
-                .as_ref()
-                .unwrap()
-                .is_configured()
+            { let item = vault.get_connection(saved.id).unwrap(); crate::oci::Credential::from_modules(&item.stored, &item.secrets).unwrap().is_configured() }
         );
         assert!(
             !serde_json::to_string(&saved)

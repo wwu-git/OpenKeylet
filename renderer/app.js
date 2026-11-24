@@ -133,23 +133,9 @@ const staticCopy = [
   ['[data-item-template="ssh"] > span', 'html', 'SSH<small>主机 + 端口 + 账号 + 密码</small>', 'SSH<small>HOST + PORT + USER + PASSWORD</small>'],
   ['[data-item-template="api"] > span', 'html', 'API<small>API 凭据</small>', 'API<small>API CREDENTIAL</small>'],
   ['[data-item-template="oci"] > span', 'html', 'OCI API<small>本地签名代执行，接口和操作由 Agent 决定</small>', 'OCI API<small>Local signing; the agent chooses API operations</small>'],
-  ['#oci-config-note', 'text', '模板预填签名字段，其他信息可通过「添加模块」补充。', 'The template prefills signing fields. Add other information with Add module.'],
-  ['#oci-key-label', 'text', 'RSA 签名私钥', 'RSA signing private key'],
-  ['#oci-key-privacy', 'text', '仅本地签名 · Agent 不可见', 'Local signing only · never visible to the Agent'],
-  ['#oci-region-label', 'text', '区域', 'Region'],
-  ['#oci-url-label', 'text', '服务 URL', 'Service URL'],
-  ['#oci-tenancy-label', 'text', '租户 OCID', 'Tenancy OCID'],
-  ['#oci-user-label', 'text', '用户 OCID', 'User OCID'],
-  ['#oci-fingerprint-label', 'text', '公钥指纹', 'Public key fingerprint'],
-  ['#oci-import-key', 'text', '添加 RSA 签名私钥', 'Add RSA signing key'],
-  ['#oci-key-file', 'text', '导入密钥文件', 'Import key file'],
-  ['#oci-key-clipboard', 'text', '从剪贴板粘贴密钥', 'Paste key from clipboard'],
-  ['#oci-key-input', 'text', '手动输入密钥', 'Enter key manually'],
-  ['#oci-key-input-label', 'text', 'RSA 私钥 PEM', 'RSA private key PEM'],
-  ['#oci-key-input-help', 'text', '未加密的 RSA PEM，至少 2048 位。确认导入后才会暂存。', 'Unencrypted RSA PEM, at least 2048 bits. Imported only after confirmation.'],
-  ['#oci-key-input-confirm', 'text', '确认导入', 'Import key'],
-  ['#oci-key-input-cancel', 'text', '取消输入', 'Cancel input'],
-  ['#oci-key-note', 'text', '请保管原始 PEM。签名私钥不随备份导出。', 'Keep your original PEM. Signing keys are excluded from backups.'],
+  ['#http-auth-label', 'text', 'HTTP 认证', 'HTTP authentication'],
+  ['#oci-bindings-summary', 'text', 'OCI 签名模块', 'OCI signing modules'],
+  ['#oci-bindings-note', 'text', '选择用于签名的模块。删除或清空必需模块后，项目可以保存，调用时会提示配置不完整。', 'Choose the modules used for signing. Missing modules can be saved; requests report incomplete configuration.'],
   ['[data-item-template="blank"] > span', 'html', '空白<small>从零添加模块</small>', 'BLANK<small>START WITH NO MODULES</small>'],
   ['#connection-enabled-label', 'text', '启用此项目', 'ENABLE ITEM'],
   ['#connection-enabled-help', 'text', '禁用后 Agent 无法使用', 'Agents cannot use a disabled item.'],
@@ -187,7 +173,7 @@ function applyLanguage() {
   syncActivityFilterControl();
   syncSettingsFilterControl();
   syncTitleSearch();
-  if (ociEditor) renderOciKeyStatus();
+  renderHttpAuthentication();
 }
 
 const ociKeyErrorMessages = {
@@ -241,7 +227,10 @@ const api = {
   saveDraft: (draftId, input) => invoke('save_editor_draft', { draftId, input }),
   deleteDraft: (id) => invoke('delete_editor_draft', { id }),
   copyOwnerValue: (value) => invoke('copy_owner_value', { value }),
-  save: (input) => invoke('save_connection', { input, expectedUpdatedAt: editorExistingItem?.updatedAt || null }),
+  save: (input) => {
+    const pending = currentModules.find(module => module.pendingKind === 'oci');
+    return invoke('save_connection', { input, expectedUpdatedAt: editorExistingItem?.updatedAt || null, pendingOciKeyId: pending?.pending || null, pendingOciKeyModuleId: pending?.id || null });
+  },
   setEnabled: (id, enabled) => invoke('set_connection_enabled', { id, enabled }),
   reorder: (ids, expectedOrder) => invoke('reorder_connections', { ids, expectedOrder }),
   remove: (id, expectedUpdatedAt) => invoke('delete_connection', { id, expectedUpdatedAt }),
@@ -296,9 +285,13 @@ let currentModules = [];
 let editorDrafts = [];
 let currentDraftId = '';
 let removedSecretFields = new Set();
-let ociEditor = null;
-let ociKeyStaging = null;
-let ociRegions;
+let editorHttpAuthType = 'auto';
+let editorOciBindings = null;
+let moduleKeyInput = null;
+let editorDerivedOciUrl = "";
+let ociRegionOptions = [];
+let ociRegionLoading;
+let moduleKeyStaging = null;
 let editorExistingItem = null;
 let editorSourceInput = null;
 let editorOpenedFromDraft = false;
@@ -1258,6 +1251,7 @@ function syncModuleDraft() {
       existing: row.dataset.existing === 'true',
       privateKeyName: row.dataset.privateKeyName || '',
       pending: row.dataset.pending || '',
+      pendingKind: row.dataset.pendingKind || '',
       fingerprint: row.dataset.keyFingerprint || '',
       agentVisible: $('[data-module-agent-visible]', row)?.getAttribute('aria-pressed') === 'true',
     };
@@ -1266,11 +1260,13 @@ function syncModuleDraft() {
 
 function renderModules() {
   renderSshRoute();
+  renderHttpAuthentication();
   finishModulePointerDrag(false);
   const container = $('#module-list');
   if (!currentModules.length) {
     container.innerHTML = `<div class="module-empty"><b>EMPTY / DRAFT</b><span>${localized('选择模板或添加任意模块', 'Choose a template or add any module')}</span></div>`;
     syncModuleDraft();
+    syncModuleKeyControls();
     return;
   }
   container.innerHTML = currentModules.map((module, index) => {
@@ -1285,16 +1281,19 @@ function renderModules() {
     const customName = `${nameControl}<div class="module-metadata">${secretCaption}<span class="module-visibility-state" data-module-visibility aria-hidden="true">${agentVisibilityStatus}</span></div>`;
     let control = '';
     let actions = '';
-    if (module.kind === 'privateKey') {
-      const keyState = module.pending ? module.privateKeyName : module.configured ? (module.privateKeyName || 'IMPORTED KEY') : localized('尚未导入', 'NOT IMPORTED');
+    const ociKey = module.pendingKind === 'oci' || moduleKeyInput?.moduleId === module.id || (editorHttpAuthType === 'oci-signature' && editorOciBindings?.privateKey === module.id);
+    if (module.kind === 'privateKey' || ociKey) {
+      const keyState = module.pending ? (module.pendingKind === 'oci' ? localized('RSA 私钥待保存', 'RSA key pending save') : module.privateKeyName) : module.configured ? (module.privateKeyName || 'IMPORTED KEY') : localized('尚未导入', 'NOT IMPORTED');
       const sources = [
-        ['generate', localized('生成新密钥', 'Generate new key')],
+        ...(ociKey ? [] : [['generate', localized('生成新密钥', 'Generate new key')]]),
         ['file', localized('导入密钥文件', 'Import key file')],
         ['clipboard', localized('从剪贴板粘贴密钥', 'Paste key from clipboard')],
+        ...(ociKey ? [['input', localized('手动输入密钥', 'Enter key manually')]] : []),
       ];
       const keyTitle = module.fingerprint ? `${keyState} · ${module.fingerprint}` : keyState;
       control = `<div class="module-key-control"><span title="${escapeHtml(keyTitle)}">${escapeHtml(keyTitle)}</span><details class="key-source-menu"><summary class="copy-secret-button">${localized('添加私钥', 'Add private key')}</summary><div class="key-source-options">${sources.map(([source, label]) => `<button type="button" data-stage-key="${source}">${label}</button>`).join('')}</div></details></div>`;
-      if (module.pending || (module.configured && editorExistingItem?.id)) {
+      if (module.pending) control += `<button class="small-button" type="button" data-cancel-pending-key>${localized('取消替换', 'Cancel replacement')}</button>`;
+      if (!ociKey && (module.pending || (module.configured && editorExistingItem?.id))) {
         control += `<button class="small-button" type="button" data-copy-public-key>${localized('复制公钥', 'Copy public key')}</button>`;
       }
       if (module.secretValue && !module.pending) {
@@ -1302,6 +1301,7 @@ function renderModules() {
       } else {
         control += `<input type="hidden" data-secret-value value="${escapeHtml(module.secretValue || '')}" />`;
       }
+      if (moduleKeyInput?.moduleId === module.id) control += `<div class="module-key-input"><label class="field"><span>${localized('RSA 私钥 PEM', 'RSA private key PEM')}</span><textarea class="input textarea" data-key-input rows="6" maxlength="65536" autocomplete="off" autocapitalize="off" spellcheck="false">${escapeHtml(moduleKeyInput.text)}</textarea></label><p>${localized('未加密的 RSA PEM，至少 2048 位。确认后暂存，保存项目后生效。', 'Unencrypted RSA PEM, at least 2048 bits. Confirm to stage, then save the item to apply.')}</p><div class="button-row"><button type="button" class="small-button" data-confirm-key-input>${localized('确认导入', 'Import key')}</button><button type="button" class="small-button" data-cancel-key-input>${localized('取消输入', 'Cancel input')}</button></div></div>`;
       const keyActionsDisabled = !module.secretValue || Boolean(module.pending);
       actions = `${secretActionButton('reveal', true, keyActionsDisabled)}${secretActionButton('copy', true, keyActionsDisabled)}`;
     } else if (definition.secret) {
@@ -1327,11 +1327,20 @@ function renderModules() {
       control = `<input class="input" data-module-value type="${inputType}" ${module.kind === 'port' ? 'min="1" max="65535"' : ''} value="${escapeHtml(module.value || '')}" placeholder="${placeholder}" />`;
       actions = `<span class="module-action-spacer" aria-hidden="true"></span>${secretActionButton('copy', false)}`;
     }
+    if (editorHttpAuthType === 'oci-signature' && editorOciBindings?.region === module.id) control += `<select class="input oci-region-helper" data-fill-oci-region aria-label="${localized('选择区域填入字段', 'Choose a region to fill the field')}">${ociRegionChoices()}</select>`;
     const removeLabel = localized('删除模块', 'Remove module');
     const reorderLabel = localized('拖动调整顺序，或聚焦后按上/下方向键', 'Drag to reorder, or focus and use the Up/Down arrow keys');
-    return `<div class="module-row" data-module-index="${index}" data-module-id="${escapeHtml(module.id || '')}" data-kind="${escapeHtml(module.kind)}" data-name="${escapeHtml(module.name || '')}" data-existing="${Boolean(module.existing)}" data-configured="${Boolean(module.configured)}" data-private-key-name="${escapeHtml(module.privateKeyName || '')}" data-pending="${escapeHtml(module.pending || '')}" data-key-fingerprint="${escapeHtml(module.fingerprint || '')}"><button type="button" class="module-drag-handle" data-module-drag-handle aria-label="${reorderLabel}" title="${reorderLabel}" aria-keyshortcuts="ArrowUp ArrowDown"><svg viewBox="0 0 12 20" aria-hidden="true"><path d="M4 5h.01M8 5h.01M4 10h.01M8 10h.01M4 15h.01M8 15h.01"/></svg></button><button type="button" class="module-agent-toggle" data-module-agent-visible aria-pressed="${agentVisible}" aria-label="${agentVisibilityLabel}" title="${agentVisibilityLabel}"><i aria-hidden="true"></i></button><div class="module-identity">${customName}</div><div class="module-control">${control}</div><div class="module-actions ${actions ? 'full' : 'single'}">${actions}<button type="button" class="remove-module module-action-icon" data-remove-module aria-label="${removeLabel}" title="${removeLabel}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5.5h14M7.5 5.5V3.25h5v2.25M5.25 5.5l.75 11h8l.75-11M8.25 8.5v5M11.75 8.5v5"/></svg></button></div></div>`;
+    return `<div class="module-row" data-module-index="${index}" data-module-id="${escapeHtml(module.id || '')}" data-kind="${escapeHtml(module.kind)}" data-name="${escapeHtml(module.name || '')}" data-existing="${Boolean(module.existing)}" data-configured="${Boolean(module.configured)}" data-private-key-name="${escapeHtml(module.privateKeyName || '')}" data-pending="${escapeHtml(module.pending || '')}" data-pending-kind="${escapeHtml(module.pendingKind || '')}" data-key-fingerprint="${escapeHtml(module.fingerprint || '')}"><button type="button" class="module-drag-handle" data-module-drag-handle aria-label="${reorderLabel}" title="${reorderLabel}" aria-keyshortcuts="ArrowUp ArrowDown"><svg viewBox="0 0 12 20" aria-hidden="true"><path d="M4 5h.01M8 5h.01M4 10h.01M8 10h.01M4 15h.01M8 15h.01"/></svg></button><button type="button" class="module-agent-toggle" data-module-agent-visible aria-pressed="${agentVisible}" aria-label="${agentVisibilityLabel}" title="${agentVisibilityLabel}"><i aria-hidden="true"></i></button><div class="module-identity">${customName}</div><div class="module-control">${control}</div><div class="module-actions ${actions ? 'full' : 'single'}">${actions}<button type="button" class="remove-module module-action-icon" data-remove-module aria-label="${removeLabel}" title="${removeLabel}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5.5h14M7.5 5.5V3.25h5v2.25M5.25 5.5l.75 11h8l.75-11M8.25 8.5v5M11.75 8.5v5"/></svg></button></div></div>`;
   }).join('');
   syncModuleDraft();
+  syncModuleKeyControls();
+  if (editorHttpAuthType === 'oci-signature' && !ociRegionOptions.length && !ociRegionLoading) {
+    ociRegionLoading = invoke('oci_regions').then(regions => { ociRegionOptions = regions; $$('[data-fill-oci-region]').forEach(select => { select.innerHTML = ociRegionChoices(); }); }).catch(error => toast(cleanError(error), 'error')).finally(() => { ociRegionLoading = null; });
+  }
+}
+
+function ociRegionChoices() {
+  return `<option value="">${localized('选择区域填入字段', 'Choose a region to fill the field')}</option>${ociRegionOptions.map(region => `<option value="${escapeHtml(region)}">${escapeHtml(region)}</option>`).join('')}`;
 }
 
 function secretActionButton(kind, secret = true, disabled = false) {
@@ -1385,6 +1394,7 @@ function addModule(kind, options = {}) {
     return toast(localized('这个模块已经存在', 'That module already exists'));
   }
   currentModules.push({
+    id: crypto.randomUUID(),
     kind,
     name: kind === 'customSecret' ? '' : kind,
     value: kind === 'port' ? '22' : '',
@@ -1503,83 +1513,107 @@ $('#ssh-trust-remove').addEventListener('click', async () => {
   } catch (error) { toast(cleanError(error), 'error'); }
 });
 
-function renderOciKeyStatus() {
-  $('#oci-key-status').textContent = ociEditor?.pendingId
-    ? localized('签名私钥待保存', 'Signing key pending save')
-    : ociEditor?.hasKey
-      ? localized('已配置签名私钥', 'Signing key configured')
-      : localized('尚未导入签名私钥', 'No signing key imported');
+const OCI_BINDING_FIELDS = [
+  ['region', '区域', 'Region'],
+  ['serviceUrl', '服务 URL', 'Service URL'],
+  ['tenancyOcid', '租户 OCID', 'Tenancy OCID'],
+  ['userOcid', '用户 OCID', 'User OCID'],
+  ['fingerprint', '公钥指纹', 'Public key fingerprint'],
+  ['privateKey', 'RSA 签名私钥', 'RSA signing private key'],
+];
+
+function renderHttpAuthentication() {
+  const select = $('#http-auth-type');
+  if (!select) return;
+  const selected = editorHttpAuthType || 'auto';
+  const existingModes = [...new Set([selected, editorSourceInput?.httpAuthType])].filter(mode => mode && !['auto', 'oci-signature'].includes(mode));
+  select.innerHTML = `<option value="auto">${localized('自动', 'Automatic')}</option><option value="oci-signature">OCI API</option>${existingModes.map(mode => `<option value="${escapeHtml(mode)}">${escapeHtml(mode)}</option>`).join('')}`;
+  select.value = selected;
+  $('#oci-bindings').classList.toggle('hidden', selected !== 'oci-signature');
+  $('#oci-binding-fields').innerHTML = OCI_BINDING_FIELDS.map(([role, zh, en]) => {
+    const bound = editorOciBindings?.[role] || '';
+    const missing = bound && !currentModules.some(module => module.id === bound);
+    const candidates = currentModules.filter(module => role === 'serviceUrl' ? module.kind === 'url' : moduleHasPlaintextReveal(module.kind));
+    return `<label class="field"><span>${localized(zh, en)}</span><select class="input" data-oci-binding="${role}"><option value="">${localized('未绑定', 'Not bound')}</option>${missing ? `<option value="${escapeHtml(bound)}" selected>${localized('模块已删除', 'Module removed')}</option>` : ''}${candidates.map(module => `<option value="${escapeHtml(module.id)}" ${module.id === bound ? 'selected' : ''}>${escapeHtml(module.kind === 'customSecret' ? module.name || localized('未命名字段', 'Unnamed field') : moduleLabel(module.kind))}</option>`).join('')}</select></label>`;
+  }).join('');
 }
 
-function clearOciKeyInput() {
-  $('#oci-key-text').value = '';
-  $('#oci-key-input-panel').hidden = true;
-  $('#oci-key-source-menu').open = false;
+function syncModuleKeyControls() {
+  $('#save-connection-button').disabled = Boolean(moduleKeyStaging || moduleKeyInput);
+  $$('.module-key-input button, .module-key-input textarea, [data-stage-key]').forEach(control => { control.disabled = Boolean(moduleKeyStaging); });
 }
 
-function syncOciKeyControls() {
-  const busy = Boolean(ociKeyStaging);
-  $$('[data-stage-oci-key], #oci-key-input-confirm, #oci-key-input-cancel, #oci-key-text').forEach(control => { control.disabled = busy; });
-  $('#oci-import-key').setAttribute('aria-disabled', String(busy));
-  $('#save-connection-button').disabled = Boolean(ociEditor) && (busy || !$('#oci-key-input-panel').hidden);
+function discardModuleKey(module) {
+  return module.pendingKind === 'oci' ? invoke('discard_oci_key', { id: module.pending }) : api.discardKey(module.pending);
 }
 
-function updateOciUrl() {
-  const region = $('#oci-region').value;
-  $('#oci-url').value = region ? `https://iaas.${region}.oraclecloud.com/20160918/` : '';
+function updateOciModuleUrl() {
+  const region = currentModules.find(module => module.id === editorOciBindings?.region)?.secretValue.trim();
+  const urlModule = currentModules.find(module => module.id === editorOciBindings?.serviceUrl);
+  if (!urlModule || (urlModule.value && urlModule.value !== editorDerivedOciUrl)) return;
+  editorDerivedOciUrl = region ? `https://iaas.${region}.oraclecloud.com/20160918/` : '';
+  urlModule.value = editorDerivedOciUrl;
+  const input = $(`[data-module-id="${urlModule.id}"] [data-module-value]`, $('#module-list'));
+  if (input) input.value = urlModule.value;
 }
 
-async function showOciEditor(existing = null) {
-  const editor = { pendingId: null, hasKey: false };
-  ociEditor = editor;
+async function stageModuleKey(row, source, text = null) {
+  if (moduleKeyStaging) return;
+  syncModuleDraft();
+  const moduleId = row.dataset.moduleId;
+  const oci = source === 'input' || currentModules.find(module => module.id === moduleId)?.pendingKind === 'oci' || (editorHttpAuthType === 'oci-signature' && editorOciBindings?.privateKey === moduleId);
+  if (oci && currentModules.some(module => module.pendingKind === 'oci' && module.id !== moduleId)) return toast(localized('请先保存或取消其他模块中待保存的 RSA 私钥。', 'Save or cancel the pending RSA key in the other module first.'), 'error');
+  const token = { moduleId };
+  moduleKeyStaging = token;
+  syncModuleKeyControls();
   try {
-    ociRegions ||= await invoke('oci_regions');
-    if (ociEditor !== editor) return;
-    const config = existing?.config;
-    const region = $('#oci-region');
-    region.replaceChildren(new Option(localized('请选择区域', 'Select a region'), ''));
-    for (const name of ociRegions) region.add(new Option(name, name));
-    region.value = config?.region || '';
-    $('#oci-tenancy').value = config?.tenancyOcid || '';
-    $('#oci-user').value = config?.userOcid || '';
-    $('#oci-fingerprint').value = config?.fingerprint || '';
-    editor.hasKey = Boolean(existing?.hasKey);
-    updateOciUrl();
-    renderOciKeyStatus();
-    $('#oci-config').classList.remove('hidden');
-    $('#oci-config').disabled = false;
-    syncOciKeyControls();
-    currentModules = currentModules.filter(module => module.kind !== 'url');
+    const preview = oci
+      ? await invoke('stage_oci_key', { source, text })
+      : await api.stageKey(source, currentModules.find(module => module.kind === 'passphrase')?.secretValue || null);
+    if (!preview) return;
+    const pending = oci ? preview : preview.id;
+    if (token.cancelled || moduleKeyStaging !== token || !currentModules.some(module => module.id === moduleId) || $('#connection-modal').classList.contains('hidden')) {
+      await discardModuleKey({ pending, pendingKind: oci ? 'oci' : '' });
+      return;
+    }
+    syncModuleDraft();
+    const module = currentModules.find(module => module.id === moduleId);
+    if (!module) return;
+    if (module.pending) await discardModuleKey(module);
+    Object.assign(module, { pending, pendingKind: oci ? 'oci' : '', configured: true, privateKeyName: oci ? localized('RSA 私钥待保存', 'RSA key pending save') : preview.name, fingerprint: oci ? '' : preview.fingerprint });
+    moduleKeyInput = null;
     renderModules();
-    $('#module-menu [data-add-module="url"]').classList.add('hidden');
-    $('#connection-modal .login-websites').classList.add('hidden');
-    value('#connection-type', 'api');
-    $('#connection-type').disabled = true;
-    $('#template-picker').classList.add('hidden');
-  } catch (error) {
-    if (ociEditor === editor) ociEditor = null;
-    throw error;
+  } catch (error) { toast(cleanError(error), 'error'); }
+  finally {
+    if (moduleKeyStaging === token) moduleKeyStaging = null;
+    syncModuleKeyControls();
   }
 }
 
-function clearOciEditor() {
-  if (ociEditor?.pendingId) void invoke('discard_oci_key', { id: ociEditor.pendingId }).catch(() => {});
-  ociEditor = null;
-  clearOciKeyInput();
-  syncOciKeyControls();
-  $('#oci-config').classList.add('hidden');
-  $('#oci-config').disabled = true;
-  $('#module-menu [data-add-module="url"]').classList.remove('hidden');
-  $('#connection-modal .login-websites').classList.remove('hidden');
-  $('#connection-type').disabled = false;
-}
+$('#module-list').addEventListener('keydown', event => {
+  if (event.key !== 'Escape' || !event.target.closest('.module-key-input')) return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (!moduleKeyStaging) {
+    moduleKeyInput = null;
+    syncModuleDraft();
+    renderModules();
+  }
+});
 
 function applyTemplate(template) {
+  editorHttpAuthType = template === 'oci' ? 'oci-signature' : 'auto';
+  editorOciBindings = null;
+  editorDerivedOciUrl = '';
   if (template === 'oci') {
-    if (!ociEditor) void showOciEditor().catch(error => toast(cleanError(error), 'error'));
+    const fields = [['region', 'region'], ['serviceUrl', 'url'], ['tenancyOcid', 'tenancy_ocid'], ['userOcid', 'user_ocid'], ['fingerprint', 'fingerprint'], ['privateKey', 'privateKey']];
+    currentModules = fields.map(([role, name]) => ({ id: crypto.randomUUID(), kind: role === 'serviceUrl' ? 'url' : role === 'privateKey' ? 'privateKey' : 'customSecret', name, value: '', alternateValues: [], secretValue: '', configured: false, existing: false, privateKeyName: '', pending: '', agentVisible: role === 'serviceUrl' }));
+    editorOciBindings = Object.fromEntries(fields.map(([role], index) => [role, currentModules[index].id]));
+    value('#connection-type', 'api');
+    $('#template-picker').classList.add('hidden');
+    renderModules();
     return;
   }
-  clearOciEditor();
   const presets = {
     login: ['url', 'username', 'password'],
     card: ['cardholderName', 'cardNumber', 'cardBrand', 'cardExpMonth', 'cardExpYear', 'cardSecurityCode'],
@@ -1590,7 +1624,7 @@ function applyTemplate(template) {
     blank: [],
   };
   value('#connection-type', template === 'blank' ? 'custom' : template);
-  currentModules = (presets[template] || []).map((kind) => ({ kind, name: kind, value: kind === 'port' ? '22' : '', alternateValues: [], secretValue: '', configured: false, existing: false, privateKeyName: '', pending: '', agentVisible: defaultModuleAgentVisible(kind) }));
+  currentModules = (presets[template] || []).map((kind) => ({ id: crypto.randomUUID(), kind, name: kind, value: kind === 'port' ? '22' : '', alternateValues: [], secretValue: '', configured: false, existing: false, privateKeyName: '', pending: '', agentVisible: defaultModuleAgentVisible(kind) }));
   $('#template-picker').classList.add('hidden');
   renderModules();
 }
@@ -1670,16 +1704,14 @@ async function openEditor(item = null, draft = null) {
         return false;
       }
     }
-    let ociState = null;
-    if (item?.httpAuthType === 'oci-signature') {
-      try { ociState = await invoke('oci_editor_state', { id: item.id }); }
-      catch (error) { toast(cleanError(error), 'error'); return false; }
-    }
-    clearOciEditor();
     const source = draft?.input || item || null;
     removedSecretFields = new Set();
     editorExistingItem = item;
     editorSourceInput = source;
+    editorHttpAuthType = source?.httpAuthType || 'auto';
+    editorOciBindings = source?.ociBindings ? structuredClone(source.ociBindings) : null;
+    moduleKeyInput = null;
+    editorDerivedOciUrl = '';
     editorJumpSelection = source?.sshJumpUnresolved ? `unresolved:${source?.sshJumpItemId || ''}` : source?.sshJumpItemId || '';
     editorSshRouteMode = source?.sshJumpItemId || source?.sshJumpUnresolved ? 'jump' : 'direct';
     $('#ssh-trust-details').open = false;
@@ -1701,13 +1733,13 @@ async function openEditor(item = null, draft = null) {
     currentModules = (source?.modules || []).map((module) => {
       const secretName = module.kind === 'customSecret' ? module.name : module.kind;
       const privateKeyName = draft?.input?.secrets?.privateKeyName || item?.privateKeyName || '';
-      return { ...module, alternateValues: [...(module.alternateValues || [])], secretValue: ownerValues[secretName] || '', configured: Boolean(module.configured || ownerValues[secretName]), existing: Boolean(item), privateKeyName: module.kind === 'privateKey' ? privateKeyName : '', pending: '', agentVisible: typeof module.agentVisible === 'boolean' ? module.agentVisible : defaultModuleAgentVisible(module.kind) };
+      return { ...module, id: module.id || crypto.randomUUID(), alternateValues: [...(module.alternateValues || [])], secretValue: ownerValues[secretName] || '', configured: Boolean(module.configured || ownerValues[secretName]), existing: Boolean(item), privateKeyName: module.kind === 'privateKey' ? privateKeyName : '', pending: '', agentVisible: typeof module.agentVisible === 'boolean' ? module.agentVisible : defaultModuleAgentVisible(module.kind) };
     });
+    const regionModule = currentModules.find(module => module.id === editorOciBindings?.region);
+    const urlModule = currentModules.find(module => module.id === editorOciBindings?.serviceUrl);
+    const defaultUrl = regionModule?.secretValue ? `https://iaas.${regionModule.secretValue}.oraclecloud.com/20160918/` : '';
+    editorDerivedOciUrl = urlModule?.value === defaultUrl ? defaultUrl : '';
     renderModules();
-    if (ociState) {
-      try { await showOciEditor(ociState); }
-      catch (error) { toast(cleanError(error), 'error'); return false; }
-    }
     editorReturnFocus = launcher;
     inlineEditorItemId = item?.id || null;
     if (inlineEditorItemId) renderConnections();
@@ -1731,10 +1763,12 @@ async function openEditor(item = null, draft = null) {
 }
 
 function closeEditor() {
-  clearOciEditor();
-  for (const { pending } of currentModules) {
-    if (pending) void api.discardKey(pending).catch(() => {});
+  moduleKeyInput = null;
+  if (moduleKeyStaging) moduleKeyStaging.cancelled = true;
+  for (const module of currentModules) {
+    if (module.pending) void discardModuleKey(module).catch(() => {});
   }
+  syncModuleKeyControls();
   editorFoldAnimation?.cancel();
   editorFoldAnimation = null;
   $('#connection-modal').classList.remove('is-folding');
@@ -1802,7 +1836,7 @@ function collectModules(validate = true) {
     else if (name === 'privateKey') secrets.privateKey = fieldValue;
     else if (name) secrets.namedSecrets[name] = fieldValue;
   }
-  return { modules, secrets, privateKeyImportPath: currentModules.find((module) => module.kind === 'privateKey' && module.pending)?.pending || '' };
+  return { modules, secrets, privateKeyImportPath: currentModules.find((module) => module.kind === 'privateKey' && module.pending && module.pendingKind !== 'oci')?.pending || '' };
 }
 
 function serializeItem(validate = true) {
@@ -1813,7 +1847,7 @@ function serializeItem(validate = true) {
     throw new Error(localized('项目名称已存在，请使用其他名称', 'An item with this name already exists'));
   }
   syncModuleDraft();
-  if (validate && !ociEditor && !currentModules.length) throw new Error(localized('请至少添加一个模块', 'Add at least one module'));
+  if (validate && editorHttpAuthType !== 'oci-signature' && !currentModules.length) throw new Error(localized('请至少添加一个模块', 'Add at least one module'));
   const collected = collectModules(validate);
   return {
     id,
@@ -1828,7 +1862,8 @@ function serializeItem(validate = true) {
     sshJumpItemId: editorSshRouteMode === 'jump' ? (editorJumpSelection.replace(/^unresolved:/, '') || null) : null,
     sshJumpUnresolved: editorSshRouteMode === 'jump' && (!editorJumpSelection || editorJumpSelection.startsWith('unresolved:')),
     sshAuthType: editorSourceInput?.sshAuthType || '',
-    httpAuthType: editorSourceInput?.httpAuthType || 'auto',
+    httpAuthType: editorHttpAuthType,
+    ociBindings: editorHttpAuthType === 'oci-signature' ? editorOciBindings || {} : null,
     authHeader: editorSourceInput?.authHeader || '',
     authLocation: editorSourceInput?.authLocation || '',
     authPrefix: editorSourceInput?.authPrefix || '',
@@ -1855,11 +1890,6 @@ function closeEditorWithDraft() {
 
 async function saveDraftAndCloseEditor() {
   try {
-    if (ociEditor) {
-      await animateInlineEditor(false);
-      closeEditor();
-      return true;
-    }
     const input = serializeItem(false);
     input.privateKeyImportPath = '';
     const changed = JSON.stringify(input) !== editorInitialSnapshot;
@@ -2290,34 +2320,34 @@ document.addEventListener('click', async (event) => {
   }
   const toggleAgentVisible = event.target.closest('[data-module-agent-visible]');
   if (toggleAgentVisible) setModuleAgentVisibility(toggleAgentVisible, toggleAgentVisible.getAttribute('aria-pressed') !== 'true');
-  const stageKey = event.target.closest('[data-stage-key]');
-  if (stageKey) {
-    const row = stageKey.closest('.module-row');
-    const menu = stageKey.closest('details');
-    const buttons = $$('[data-stage-key]', menu);
-    buttons.forEach(button => { button.disabled = true; });
-    try {
-      syncModuleDraft();
-      const passphrase = currentModules.find(module => module.kind === 'passphrase')?.secretValue || null;
-      const preview = await api.stageKey(stageKey.dataset.stageKey, passphrase);
-      if (!preview) return;
-      if (!row.isConnected || $('#connection-modal').classList.contains('hidden')) {
-        await api.discardKey(preview.id);
-        return;
-      }
-      syncModuleDraft();
-      const index = Number(row.dataset.moduleIndex);
-      Object.assign(currentModules[index], {
-        pending: preview.id, configured: true, privateKeyName: preview.name, fingerprint: preview.fingerprint,
-      });
+  const cancelPendingKey = event.target.closest('[data-cancel-pending-key]');
+  if (cancelPendingKey && !moduleKeyStaging) {
+    syncModuleDraft();
+    const module = currentModules.find(module => module.id === cancelPendingKey.closest('.module-row').dataset.moduleId);
+    if (module?.pending) {
+      await discardModuleKey(module);
+      Object.assign(module, { pending: '', pendingKind: '', configured: Boolean(module.secretValue), privateKeyName: editorExistingItem?.privateKeyName || '', fingerprint: '' });
       renderModules();
-      const keyMenu = $$('.module-row', $('#module-list'))[index]?.querySelector('summary');
-      keyMenu?.focus();
-    } catch (error) { toast(cleanError(error), 'error'); }
-    finally {
-      menu.open = false;
-      buttons.forEach(button => { button.disabled = false; });
     }
+  }
+  const cancelKeyInput = event.target.closest('[data-cancel-key-input]');
+  if (cancelKeyInput && !moduleKeyStaging) {
+    moduleKeyInput = null;
+    syncModuleDraft();
+    renderModules();
+  }
+  const confirmKeyInput = event.target.closest('[data-confirm-key-input]');
+  if (confirmKeyInput && moduleKeyInput) await stageModuleKey(confirmKeyInput.closest('.module-row'), 'input', moduleKeyInput.text);
+  const stageKey = event.target.closest('[data-stage-key]');
+  if (stageKey && !moduleKeyStaging) {
+    const row = stageKey.closest('.module-row');
+    stageKey.closest('details').open = false;
+    syncModuleDraft();
+    if (stageKey.dataset.stageKey === 'input') {
+      moduleKeyInput = { moduleId: row.dataset.moduleId, text: '' };
+      renderModules();
+      $('[data-key-input]', $('#module-list')).focus();
+    } else await stageModuleKey(row, stageKey.dataset.stageKey);
   }
   const copyPublicKey = event.target.closest('[data-copy-public-key]');
   if (copyPublicKey) {
@@ -2342,7 +2372,8 @@ document.addEventListener('click', async (event) => {
     })) return;
     if (!row.isConnected || $('#connection-modal').classList.contains('hidden')) return;
     if (removed?.existing && moduleSecretName(removed)) removedSecretFields.add(moduleSecretName(removed));
-    if (removed.pending) void api.discardKey(removed.pending).catch(() => {});
+    if (removed.pending) void discardModuleKey(removed).catch(() => {});
+    if (moduleKeyInput?.moduleId === removed.id) moduleKeyInput = null;
     currentModules.splice(index, 1);
     renderModules();
     const remainingRows = $$('.module-row', $('#module-list'));
@@ -2459,7 +2490,12 @@ document.addEventListener('input', (event) => {
       inputs[inputs.indexOf(event.target) + 1]?.focus();
     }
   }
-  if (event.target.closest('.module-row')) syncModuleDraft();
+  if (event.target.matches('[data-key-input]') && moduleKeyInput) moduleKeyInput.text = event.target.value;
+  if (event.target.closest('.module-row')) {
+    syncModuleDraft();
+    if (event.target.closest('.module-row').dataset.moduleId === editorOciBindings?.region && event.target.matches('[data-secret-value]')) updateOciModuleUrl();
+    if (event.target.matches('[data-module-name]')) renderHttpAuthentication();
+  }
   const page = event.target.dataset.pageSearch;
   if (!page) return;
   pageSearch[page] = event.target.value;
@@ -2874,59 +2910,34 @@ document.addEventListener('keydown', (event) => {
   }
 });
 
-$('#oci-region').addEventListener('change', updateOciUrl);
-async function stageOciKey(source) {
-  const editor = ociEditor;
-  if (!editor || ociKeyStaging) return;
-  if (source !== 'input') clearOciKeyInput();
-  ociKeyStaging = editor;
-  syncOciKeyControls();
-  try {
-    const text = source === 'input' ? $('#oci-key-text').value : null;
-    const id = await invoke('stage_oci_key', { source, text });
-    if (!id) return;
-    if (ociEditor !== editor) {
-      await invoke('discard_oci_key', { id });
-      return;
-    }
-    editor.pendingId = id;
-    clearOciKeyInput();
-    renderOciKeyStatus();
-  } catch (error) { toast(cleanError(error), 'error'); }
-  finally {
-    if (ociKeyStaging === editor) ociKeyStaging = null;
-    if (ociEditor) syncOciKeyControls();
-  }
-}
+$('#module-list').addEventListener('change', event => {
+  if (!event.target.matches('[data-fill-oci-region]') || !event.target.value) return;
+  const row = event.target.closest('.module-row');
+  const field = $('[data-secret-value]', row);
+  if (field) field.value = event.target.value;
+  event.target.value = '';
+  syncModuleDraft();
+  updateOciModuleUrl();
+});
 
-$('#oci-import-key').addEventListener('click', event => {
-  if (ociKeyStaging) event.preventDefault();
+$('#http-auth-type').addEventListener('change', () => {
+  syncModuleDraft();
+  editorHttpAuthType = value('#http-auth-type');
+  if (editorHttpAuthType === 'oci-signature') editorOciBindings ||= {};
+  renderModules();
 });
-$$('[data-stage-oci-key]').forEach(button => button.addEventListener('click', () => {
-  if (!ociEditor || ociKeyStaging) return;
-  $('#oci-key-source-menu').open = false;
-  if (button.dataset.stageOciKey === 'input') {
-    $('#oci-key-input-panel').hidden = false;
-    syncOciKeyControls();
-    $('#oci-key-text').focus();
-  } else void stageOciKey(button.dataset.stageOciKey);
-}));
-$('#oci-key-input-confirm').addEventListener('click', () => { void stageOciKey('input'); });
-$('#oci-key-input-cancel').addEventListener('click', () => {
-  clearOciKeyInput();
-  syncOciKeyControls();
-  $('#oci-import-key').focus();
-});
-$('#oci-key-input-panel').addEventListener('keydown', event => {
-  if (event.key !== 'Escape') return;
-  event.preventDefault();
-  event.stopPropagation();
-  if (!ociKeyStaging) $('#oci-key-input-cancel').click();
+$('#oci-binding-fields').addEventListener('change', event => {
+  const role = event.target.dataset.ociBinding;
+  if (!role) return;
+  syncModuleDraft();
+  editorOciBindings ||= {};
+  editorOciBindings[role] = event.target.value || null;
+  renderModules();
 });
 
 $('#connection-form').addEventListener('submit', async (event) => {
   event.preventDefault();
-  if (ociEditor && (ociKeyStaging || !$('#oci-key-input-panel').hidden)) {
+  if (moduleKeyStaging || moduleKeyInput) {
     toast(localized('请先确认导入或取消密钥输入', 'Import the key or cancel key input before saving'), 'error');
     return;
   }
@@ -2934,21 +2945,7 @@ $('#connection-form').addEventListener('submit', async (event) => {
   button.disabled = true;
   try {
     const input = serializeItem();
-    if (ociEditor) {
-      await invoke('save_oci_connection', {
-        input,
-        expectedUpdatedAt: editorExistingItem?.updatedAt || null,
-        pendingId: ociEditor.pendingId,
-        config: {
-          region: value('#oci-region'),
-          tenancyOcid: value('#oci-tenancy').trim(),
-          userOcid: value('#oci-user').trim(),
-          fingerprint: value('#oci-fingerprint').trim().toLowerCase(),
-        },
-      });
-    } else {
-      await api.save(input);
-    }
+    await api.save(input);
     if (currentDraftId) await api.deleteDraft(currentDraftId);
     currentDraftId = '';
     await animateInlineEditor(false);

@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use reqwest::{
     Client, Method, Request,
@@ -114,12 +114,95 @@ impl Config {
     }
 }
 
+pub(crate) fn binding_value<'a>(
+    modules: &'a [crate::model::ItemModule],
+    secrets: &'a crate::model::SecretBundle,
+    id: Option<uuid::Uuid>,
+) -> Option<&'a str> {
+    let module = modules.iter().find(|module| Some(module.id) == id)?;
+    let value = module
+        .secret_name()
+        .and_then(|name| secrets.get(name))
+        .unwrap_or(&module.value);
+    (!value.trim().is_empty()).then_some(value)
+}
+
+pub(crate) fn validate_modules(
+    modules: &[crate::model::ItemModule],
+    secrets: &crate::model::SecretBundle,
+    bindings: Option<&crate::model::OciModuleBindings>,
+) -> Result<()> {
+    let Some(bindings) = bindings else {
+        return Ok(());
+    };
+    let ids = [
+        bindings.region,
+        bindings.service_url,
+        bindings.tenancy_ocid,
+        bindings.user_ocid,
+        bindings.fingerprint,
+        bindings.private_key,
+    ];
+    let present = ids
+        .into_iter()
+        .flatten()
+        .filter(|id| modules.iter().any(|module| module.id == *id))
+        .collect::<Vec<_>>();
+    let unique = present.iter().collect::<std::collections::HashSet<_>>();
+    ensure!(
+        unique.len() == present.len(),
+        "Each OCI authentication field must bind a different module"
+    );
+    if let Some(module) = modules
+        .iter()
+        .find(|module| Some(module.id) == bindings.private_key)
+    {
+        ensure!(
+            module.is_secret(),
+            "OCI signing key must bind a secret module"
+        );
+    }
+    if let Some(key) = binding_value(modules, secrets, bindings.private_key) {
+        validate_pem(key)?;
+    }
+    if let Some(region) = binding_value(modules, secrets, bindings.region) {
+        ensure!(
+            REGIONS.contains(&region),
+            "Unsupported OCI commercial region"
+        );
+    }
+    for (id, prefix) in [
+        (bindings.tenancy_ocid, "ocid1.tenancy.oc1.."),
+        (bindings.user_ocid, "ocid1.user.oc1.."),
+    ] {
+        if let Some(value) = binding_value(modules, secrets, id) {
+            ensure!(
+                value
+                    .strip_prefix(prefix)
+                    .is_some_and(|suffix| !suffix.is_empty()
+                        && suffix.len() <= 240
+                        && suffix.bytes().all(|b| b.is_ascii_alphanumeric())),
+                "Invalid OCI tenancy or user OCID"
+            );
+        }
+    }
+    if let Some(value) = binding_value(modules, secrets, bindings.fingerprint) {
+        ensure!(
+            value.len() == 47
+                && value
+                    .split(':')
+                    .all(|part| part.len() == 2 && part.bytes().all(|b| b.is_ascii_hexdigit())),
+            "Invalid OCI API key fingerprint"
+        );
+    }
+    Ok(())
+}
 #[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Credential {
     pub config: Config,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    key_pem: Option<String>,
+    pub(crate) key_pem: Option<String>,
 }
 
 impl std::fmt::Debug for Credential {
@@ -131,6 +214,30 @@ impl std::fmt::Debug for Credential {
 }
 
 impl Credential {
+    pub(crate) fn from_modules(
+        item: &crate::model::StoredConnection,
+        secrets: &crate::model::SecretBundle,
+    ) -> Result<Self> {
+        let bindings = item
+            .oci_bindings
+            .as_ref()
+            .context("OCI authentication bindings are missing")?;
+        let read = |id, name| {
+            binding_value(&item.modules, secrets, id)
+                .with_context(|| format!("OCI configuration is incomplete: {name}"))
+        };
+        let config = Config {
+            region: read(bindings.region, "region")?.to_owned(),
+            tenancy_ocid: read(bindings.tenancy_ocid, "tenancy OCID")?.to_owned(),
+            user_ocid: read(bindings.user_ocid, "user OCID")?.to_owned(),
+            fingerprint: read(bindings.fingerprint, "fingerprint")?.to_owned(),
+        };
+        read(bindings.service_url, "service URL")?;
+        Self::new(
+            config,
+            read(bindings.private_key, "RSA signing private key")?,
+        )
+    }
     pub fn new(config: Config, pem: &str) -> Result<Self> {
         config.validate()?;
         validate_pem(pem)?;
@@ -144,10 +251,6 @@ impl Credential {
         self.key_pem.is_some()
     }
 
-    pub fn forget_key(&mut self) {
-        self.key_pem.zeroize();
-        self.key_pem = None;
-    }
 
     fn sign(&self, request: &mut Request, date: &str) -> Result<HeaderValue> {
         let key = parse_key(
@@ -534,7 +637,7 @@ pub(crate) mod tests {
             assert!(prepare(&credential, Request::new(method, url.clone()), DATE).is_ok());
         }
         let mut credential = credential;
-        credential.forget_key();
+        credential.key_pem = None;
         assert!(
             prepare(&credential, Request::new(Method::GET, url), DATE)
                 .unwrap_err()
@@ -554,58 +657,39 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn oci_key_is_sign_only_and_not_portable() {
+    fn oci_key_is_a_standard_secret_and_survives_all_backup_formats() {
         let dir = tempfile::tempdir().unwrap();
         let vault = crate::vault::Vault::open(dir.path().join("source")).unwrap();
-        let mut input: crate::model::ConnectionInput = serde_json::from_value(serde_json::json!({
-            "name": "OCI test"
-        }))
-        .unwrap();
+        let input = serde_json::from_value(serde_json::json!({"name":"OCI test"})).unwrap();
         let saved = vault
-            .save_oci_connection(input.clone(), None, config(), Some(KEY), None)
+            .save_oci_connection(input, None, config(), Some(KEY), None)
             .unwrap();
         let item = vault.get_connection(saved.id).unwrap();
-        assert_eq!(item.stored.capabilities(&item.secrets), ["http"]);
-        assert!(item.secrets.non_empty_values().is_empty());
-        assert!(item.secrets.get("privateKey").is_none());
-        assert!(item.secrets.get("oci").is_none());
+        assert!(item.secrets.oci.is_none());
+        assert_eq!(item.secrets.get("privateKey"), Some(KEY));
+        assert!(
+            !item
+                .stored
+                .modules
+                .iter()
+                .find(|module| module.kind == "privateKey")
+                .unwrap()
+                .agent_visible()
+        );
         assert!(
             vault
                 .owner_secret_view(saved.id)
                 .unwrap()
                 .fields
                 .iter()
-                .all(|f| !f.value.contains("PRIVATE KEY"))
+                .any(|field| field.value == KEY)
         );
         assert!(
             !std::fs::read_to_string(vault.data_dir().join("vault.json"))
                 .unwrap()
                 .contains("PRIVATE KEY")
         );
-        input.id = Some(saved.id);
-        assert!(
-            vault
-                .save_oci_connection(
-                    input,
-                    Some(&saved.updated_at),
-                    config(),
-                    Some("bad replacement"),
-                    None,
-                )
-                .is_err()
-        );
-        assert!(
-            vault
-                .get_connection(saved.id)
-                .unwrap()
-                .secrets
-                .oci
-                .as_ref()
-                .unwrap()
-                .is_configured()
-        );
         let cloud = crate::backup::cloud_snapshot(&vault).unwrap();
-        assert!(!String::from_utf8_lossy(&cloud).contains("PRIVATE KEY"));
         let target = crate::vault::Vault::open(dir.path().join("cloud-restored")).unwrap();
         crate::backup::restore_cloud_snapshot(&target, &cloud).unwrap();
         let portable = dir.path().join("portable.mvault");
@@ -621,10 +705,11 @@ pub(crate) mod tests {
             .unwrap();
         for target in [target, portable_target, protected_target] {
             let restored = target.get_connection(saved.id).unwrap();
-            let credential = restored.secrets.oci.as_ref().unwrap();
+            let credential = Credential::from_modules(&restored.stored, &restored.secrets).unwrap();
             assert_eq!(credential.config, config());
-            assert!(!credential.is_configured());
-            assert!(restored.stored.capabilities(&restored.secrets).is_empty());
+            assert!(credential.is_configured());
+            assert_eq!(restored.stored.oci_bindings, item.stored.oci_bindings);
         }
     }
+
 }

@@ -191,13 +191,13 @@ async fn generic_oci_requests_sign_exact_wire_bytes_and_redact_all_responses() {
         assert_eq!(result.headers["x-echo-secret"], "[REDACTED]");
         assert_eq!(
             result.headers["location"],
-            format!("https://{HOST}/objects/[REDACTED]")
+            format!("https://{}/objects/[REDACTED]", HOST.replace("ap-tokyo-1", "[REDACTED]"))
         );
         for header in ["x-path-echo", "x-rfc3986-echo", "x-form-echo"] {
             assert_eq!(result.headers[header], "[REDACTED]");
         }
         if index == request_count - 4 {
-            assert_eq!(result.url, format!("https://{HOST}/uri-echo/[REDACTED]"));
+            assert_eq!(result.url, format!("https://{}/uri-echo/[REDACTED]", HOST.replace("ap-tokyo-1", "[REDACTED]")));
             let body: Value = serde_json::from_str(&result.body).unwrap();
             assert_eq!(
                 body["values"],

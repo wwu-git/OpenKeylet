@@ -64,9 +64,8 @@ try {
         return structuredClone(fixture.integrations);
       }
       if (command === 'update_settings') { fixture.settingsWrites.push(args.patch); Object.assign(state.settings, args.patch); return state.settings; }
-      if (command === 'owner_secret_view' && args.id === 'oci') {
-        return { fields: Object.entries(fixture.savedOci.input.secrets.namedSecrets).map(([name, value]) => ({ name, value })) };
-      }
+      if (command === 'owner_secret_view' && args.id === 'oci') return { fields: Object.entries(fixture.ociSecrets || {}).map(([name, value]) => ({ name, value })) };
+      if (command === 'copy_owner_value') { fixture.copiedValue = args.value; return; }
       if (command === 'owner_secret_view') return { fields: [{ name: 'password', value: 'synthetic-password' }] };
       if (command === 'generate_password') return 'Aa1!'.repeat(32).slice(0, args.options.length);
       if (command === 'stage_private_key') {
@@ -89,17 +88,6 @@ try {
         return id;
       }
       if (command === 'discard_oci_key') { fixture.discardedOciKey = args.id; if (fixture.pendingOciKey===args.id) fixture.pendingOciKey=null; return; }
-      if (command === 'save_oci_connection') {
-        if (fixture.failOciSave) throw Error('Synthetic save rejected');
-        if (args.pendingId && args.pendingId!==fixture.pendingOciKey) throw Error('Missing pending key');
-        fixture.savedOci = structuredClone(args);
-        fixture.pendingOciKey=null;
-        const saved = { ...item('oci', args.input.name, ['http']), httpAuthType: 'oci-signature', itemType: 'api', modules: args.input.modules };
-        const existing=state.connections.findIndex(item=>item.id===saved.id);
-        if (existing<0) state.connections.push(saved); else state.connections[existing]=saved;
-        return saved;
-      }
-      if (command === 'oci_editor_state') return { config: fixture.savedOci.config, hasKey: true };
       if (command === 'test_connection' && args.id === 'oci') {
         (fixture.ociChecks ??= []).push(args.id);
         if (fixture.ociCheckFailure) throw Error('OCI_CHECK_FAILED: HTTP 403; request ID: denied-fixture');
@@ -115,9 +103,25 @@ try {
         const index = state.connections.findIndex(i => i.id === args.input.id);
         const existing = state.connections[index];
         if (existing && args.expectedUpdatedAt !== existing.updatedAt) throw Error('Stale edit');
+        if (fixture.failOciSave && (args.input.httpAuthType === 'oci-signature' || args.input.id === 'oci')) throw Error('Synthetic save rejected');
+        if (args.pendingOciKeyId && args.pendingOciKeyId !== fixture.pendingOciKey) throw Error('Missing pending key');
         fixture.saved.push(structuredClone(args.input));
-        const saved = { ...existing, ...args.input, updatedAt: `revision-${++fixture.revision}` };
-        state.connections[index] = saved; return saved;
+        const saved = { ...existing, ...args.input, id: args.input.id || 'oci', updatedAt: `revision-${++fixture.revision}` };
+        if (saved.id === 'oci') {
+          fixture.savedOci = structuredClone(args);
+          const next = { ...args.input.secrets.namedSecrets, privateKey: args.input.secrets.privateKey || fixture.ociSecrets?.privateKey || '' };
+          if (args.pendingOciKeyId) {
+            const module = saved.modules.find(module => module.id === args.pendingOciKeyModuleId);
+            next[module.kind === 'customSecret' ? module.name : module.kind] = 'SYNTHETIC-RSA-PEM';
+            fixture.pendingOciKey = null;
+          }
+          fixture.ociSecrets = Object.fromEntries(saved.modules.map(module => module.kind === 'customSecret' ? module.name : module.kind).filter(name => name in next).map(name => [name, next[name]]));
+          saved.modules = saved.modules.map(module => ({ ...module, configured: Boolean(fixture.ociSecrets[module.kind === 'customSecret' ? module.name : module.kind]) }));
+          saved.canTest = true;
+          saved.capabilities = ['http'];
+        }
+        if (index < 0) state.connections.push(saved); else state.connections[index] = saved;
+        return saved;
       }
       if (command === 'delete_connection') { state.connections = state.connections.filter(i => i.id !== args.id); return; }
       if (command === 'reorder_connections') {
@@ -137,266 +141,168 @@ try {
   const toggle = id => row(id).locator('.item-disclosure');
   const editor = page.locator('#connection-modal');
   if (process.argv.includes('--oci')) {
-    const openTemplate = async () => {
-      await page.locator('#add-connection-button').click();
-      assert.match(await page.locator('[data-item-template="oci"]').innerText(), /OCI API/);
-      await page.locator('[data-item-template="oci"]').click();
-      await editor.locator('#oci-config').waitFor({state:'visible'});
-      assert.equal(await editor.locator('#oci-config legend').innerText(), 'OCI API');
-      assert.equal(await editor.locator('.module-editor #oci-config').count(), 1);
-      assert.equal(await editor.locator('#oci-config .module-row').count(), 6);
-      assert.equal(await editor.locator('#oci-config [data-module-agent-visible], #oci-config [data-remove-module], #oci-config [data-module-drag-handle]').count(), 0);
-      assert.equal(await editor.locator('#oci-config [data-secret-value], #oci-config [data-copy-module-secret]').count(), 0);
-      await page.locator('#oci-region').selectOption('ap-tokyo-1');
-      await page.locator('#connection-name').fill('OCI test');
-      await page.locator('#oci-tenancy').fill('ocid1.tenancy.oc1..test');
-      await page.locator('#oci-user').fill('ocid1.user.oc1..test');
-      await page.locator('#oci-fingerprint').fill(Array(16).fill('00').join(':'));
-    };
+    const rows = editor.locator('#module-list .module-row');
+    const module = name => rows.filter({ has: page.locator(`[data-module-name][value="${name}"]`) });
+    const keyRow = () => editor.locator('[data-kind="privateKey"]');
     const chooseSource = async source => {
-      if (!await page.locator('#oci-key-source-menu').evaluate(el=>el.open)) await page.locator('#oci-import-key').click();
-      await page.locator(`[data-stage-oci-key="${source}"]`).click();
+      const menu = keyRow().locator('.key-source-menu');
+      if (!await menu.evaluate(el => el.open)) await menu.locator('summary').click();
+      await menu.locator(`[data-stage-key="${source}"]`).click();
     };
-    const assertKeyStatusLanguages = async (zh,en) => {
-      for (const [language,expected] of [['zh',zh],['en',en]]) {
-        await page.locator(`[data-language="${language}"]`).evaluate(button=>button.click());
-        assert.equal(await page.locator('#oci-key-status').innerText(),expected);
-      }
-    };
-    const input = page.locator('#oci-key-text');
-    const inputPanel = page.locator('#oci-key-input-panel');
     const save = page.locator('#save-connection-button');
-    await openTemplate();
-    assert.equal(await page.locator('#oci-url').inputValue(),'https://iaas.ap-tokyo-1.oraclecloud.com/20160918/');
-    await page.locator('#oci-region').selectOption('ap-osaka-1');
-    assert.equal(await page.locator('#oci-url').inputValue(),'https://iaas.ap-osaka-1.oraclecloud.com/20160918/');
-    await page.locator('#oci-region').selectOption('ap-tokyo-1');
+    await page.locator('#add-connection-button').click();
+    await page.locator('[data-item-template="oci"]').click();
+    await page.locator('#oci-bindings-summary').click();
+    assert.equal(await rows.count(), 6);
+    assert.equal(await editor.locator('#oci-config').count(), 0);
+    assert.equal(await page.locator('#connection-type').isEnabled(), true);
+    await page.locator('#connection-name').fill('OCI modules');
+    await module('region').locator('[data-fill-oci-region]').selectOption('ap-tokyo-1');
+    assert.equal(await module('region').locator('[data-secret-value]').inputValue(), 'ap-tokyo-1');
+    assert.equal(await editor.locator('[data-kind="url"] [data-module-value]').inputValue(), 'https://iaas.ap-tokyo-1.oraclecloud.com/20160918/');
+    await module('tenancy_ocid').locator('[data-secret-value]').fill('ocid1.tenancy.oc1..test');
+    await module('user_ocid').locator('[data-secret-value]').fill('ocid1.user.oc1..test');
+    await module('fingerprint').locator('[data-secret-value]').fill(Array(16).fill('00').join(':'));
+    for (const row of await rows.all()) {
+      assert.equal(await row.locator('[data-module-agent-visible]').count(), 1);
+      assert.equal(await row.locator('[data-remove-module]').count(), 1);
+      assert.equal(await row.locator('[data-module-drag-handle]').count(), 1);
+    }
+    assert.equal(await module('region').locator('[data-module-agent-visible]').getAttribute('aria-pressed'), 'false');
+    const regionId = await module('region').getAttribute('data-module-id');
+    await module('region').locator('[data-toggle-module-secret]').click();
+    assert.equal(await module('region').locator('[data-secret-value]').getAttribute('type'), 'text');
+    await module('region').locator('[data-copy-module-secret]').click();
+    assert.equal(await page.evaluate(() => fixture.copiedValue), 'ap-tokyo-1');
+    await module('region').locator('[data-module-name]').fill('oci_region');
+    assert.equal(await editor.locator('[data-oci-binding="region"]').inputValue(), regionId);
+    await keyRow().locator('[data-module-agent-visible]').click();
+    assert.equal(await keyRow().locator('[data-module-agent-visible]').getAttribute('aria-pressed'), 'true');
+    await page.evaluate(() => { fixture.cancelOciFile = true; });
     await chooseSource('file');
-    await page.waitForFunction(()=>Boolean(fixture.pendingOciKey));
-    const first = await page.evaluate(()=>fixture.pendingOciKey);
-    await page.evaluate(()=>{fixture.cancelOciFile=true;});
-    await chooseSource('file');
-    await page.waitForFunction(()=>!document.querySelector('#oci-key-file').disabled);
-    assert.equal(await page.evaluate(()=>fixture.pendingOciKey),first);
-    await page.evaluate(()=>{fixture.cancelOciFile=false;fixture.rejectOciKey=true;});
+    assert.equal(await keyRow().getAttribute('data-pending'), '');
+    await page.evaluate(() => { fixture.cancelOciFile = false; fixture.rejectOciKey = true; });
     await chooseSource('clipboard');
-    await page.getByText('Invalid RSA PEM',{exact:true}).last().waitFor();
-    assert.equal(await page.evaluate(()=>fixture.pendingOciKey),first);
-    assert.match(await page.locator('#oci-key-status').innerText(),/pending/);
-    await assertKeyStatusLanguages('签名私钥待保存','Signing key pending save');
+    await page.getByText('Invalid RSA PEM', { exact: true }).last().waitFor();
+    assert.equal(await keyRow().getAttribute('data-pending'), '');
     await chooseSource('input');
-    await input.fill('SYNTHETIC-MANUAL-KEY-MARKER');
-    assert.equal(await save.isDisabled(),true);
-    await page.evaluate(()=>document.querySelector('#connection-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
-    assert.equal(await page.evaluate(()=>fixture.savedOci),undefined);
-    await page.locator('#oci-key-input-confirm').click();
-    await page.waitForFunction(()=>!document.querySelector('#oci-key-input-confirm').disabled);
-    assert.equal(await input.inputValue(),'SYNTHETIC-MANUAL-KEY-MARKER');
-    assert.equal(await page.evaluate(()=>fixture.pendingOciKey),first);
-    await input.press('Escape');
-    assert.equal(await input.inputValue(),'');
-    assert.equal(await inputPanel.isHidden(),true);
-    assert.equal(await editor.isVisible(),true);
-    assert.equal(await save.isEnabled(),true);
+    await keyRow().locator('[data-key-input]').fill('SYNTHETIC-INVALID-PEM');
+    assert.equal(await save.isDisabled(), true);
+    await keyRow().locator('[data-confirm-key-input]').click();
+    await page.waitForFunction(() => !document.querySelector('[data-confirm-key-input]').disabled);
+    assert.equal(await keyRow().locator('[data-key-input]').inputValue(), 'SYNTHETIC-INVALID-PEM');
+    await page.locator('#http-auth-type').selectOption('auto');
+    assert.equal(await keyRow().locator('[data-key-input]').isVisible(), true);
+    await keyRow().locator('[data-key-input]').press('Escape');
+    assert.equal(await save.isEnabled(), true);
+    await page.locator('#http-auth-type').selectOption('oci-signature');
+    await page.evaluate(() => { fixture.rejectOciKey = false; });
     await chooseSource('input');
-    await input.fill('SYNTHETIC-CANCELLED-INPUT');
-    await page.locator('#oci-key-input-cancel').click();
-    assert.equal(await input.inputValue(),'');
-    await chooseSource('input');
-    await input.fill('SYNTHETIC-CLOSE-INPUT');
-    await editor.locator('[data-close-modal]').first().click();
-    await editor.waitFor({state:'hidden'});
-    await page.waitForFunction(id=>fixture.discardedOciKey===id,first);
-    assert.equal(await input.inputValue(),'');
-    assert.equal(await page.evaluate(()=>fixture.drafts.length),0);
-    await page.evaluate(()=>{fixture.rejectOciKey=false;});
-    await openTemplate();
+    await keyRow().locator('[data-key-input]').fill('SYNTHETIC-RSA-PEM');
+    await keyRow().locator('[data-confirm-key-input]').click();
+    await page.waitForFunction(() => Boolean(document.querySelector('[data-kind="privateKey"]').dataset.pending));
+    await page.evaluate(() => { fixture.deferOciKey = true; });
     await chooseSource('clipboard');
-    await page.waitForFunction(()=>Boolean(fixture.pendingOciKey));
-    const clipboard = await page.evaluate(()=>fixture.pendingOciKey);
-    await chooseSource('input');
-    await input.fill('SYNTHETIC-MANUAL-KEY-MARKER');
-    await page.locator('#oci-key-input-confirm').click();
-    await page.waitForFunction(id=>fixture.pendingOciKey!==id,clipboard);
-    assert.equal(await input.inputValue(),'');
-    assert.equal(await inputPanel.isHidden(),true);
+    await page.waitForFunction(() => typeof fixture.resolveOciKey === 'function');
+    await editor.locator('[data-oci-binding="privateKey"]').selectOption('');
+    await page.evaluate(() => { fixture.resolveOciKey(); fixture.deferOciKey = false; });
+    await page.waitForFunction(() => !document.querySelector('#save-connection-button').disabled);
+    const pending = await keyRow().getAttribute('data-pending');
+    assert.equal(await page.evaluate(() => fixture.pendingOciKey), pending);
+    const keyId = await keyRow().getAttribute('data-module-id');
+    await editor.locator('[data-oci-binding="privateKey"]').selectOption('');
+    await page.evaluate(() => { fixture.failOciSave = true; });
+    await save.click();
+    await page.getByText('Synthetic save rejected', { exact: true }).waitFor();
+    assert.equal(await keyRow().getAttribute('data-pending'), pending);
+    await page.evaluate(() => { fixture.failOciSave = false; });
+    await save.click();
+    await editor.waitFor({ state: 'hidden' });
+    assert.equal(await page.evaluate(() => fixture.savedOci.pendingOciKeyModuleId), keyId);
+    assert.equal(await page.evaluate(() => fixture.savedOci.pendingOciKeyId), pending);
+    assert.equal(await page.evaluate(() => fixture.savedOci.input.ociBindings.privateKey), null);
+    await toggle('oci').click();
+    assert.equal(await keyRow().locator('[data-toggle-module-secret]').isEnabled(), true);
+    await keyRow().locator('[data-toggle-module-secret]').click();
+    assert.equal(await keyRow().locator('[data-secret-value]').evaluate(el => !el.classList.contains('secret-masked')), true);
+    await keyRow().locator('[data-copy-module-secret]').click();
+    assert.equal(await page.evaluate(() => fixture.copiedValue), 'SYNTHETIC-RSA-PEM');
+    await editor.locator('[data-oci-binding="privateKey"]').selectOption(keyId);
+    await module('oci_region').locator('[data-module-drag-handle]').focus();
+    await page.keyboard.press('ArrowDown');
+    assert.equal(await editor.locator('[data-oci-binding="region"]').inputValue(), regionId);
     await page.locator('#add-module-button').click();
-    assert.equal(await page.locator('#module-menu [data-add-module="url"]').isHidden(),true);
-    await page.locator('#module-menu [data-add-module="username"]').click();
-    await editor.locator('[data-kind="username"] [data-secret-value]').fill('oci-console-user');
-    await page.locator('#add-module-button').click();
+    assert.equal(await page.locator('#module-menu [data-add-module="url"]').isVisible(), true);
     await page.locator('#module-menu [data-add-module="customSecret"]').click();
-    const custom = editor.locator('[data-kind="customSecret"]');
-    await custom.locator('[data-module-name]').fill('auth_token');
-    await custom.locator('[data-secret-value]').fill('synthetic OCI extra value');
-    assert.equal(await custom.locator('[data-module-agent-visible]').getAttribute('aria-pressed'),'false');
+    const extra = rows.last();
+    await extra.locator('[data-module-name]').fill('auth_token');
+    await extra.locator('[data-secret-value]').fill('SYNTHETIC-EXTRA-TOKEN');
     await save.click();
-    await editor.waitFor({state:'hidden'});
-    const saved = await page.evaluate(()=>JSON.stringify(fixture.savedOci));
-    assert.ok(!saved.includes('SYNTHETIC-MANUAL-KEY-MARKER'));
-    for (const language of ['en','zh']) {
-      await page.locator(`[data-language="${language}"]`).click();
-      const check = row('oci').locator('[data-action="test"]');
-      assert.equal(await check.isEnabled(),true);
-      assert.match(await check.getAttribute('title'),language==='zh' ? /租户根区间/ : /tenancy root compartment/);
-      await check.click();
-      const success = language==='zh' ? 'OCI 租户根区间检查成功，HTTP 200' : 'OCI tenancy root compartment check successful, HTTP 200';
-      await page.locator('#toast-region .toast').filter({hasText:success}).waitFor();
-      await page.evaluate(()=>{fixture.ociCheckFailure=true;document.querySelector('#toast-region').replaceChildren();});
-      await check.click();
-      const failure = language==='zh' ? 'OCI 租户根区间检查失败，HTTP 403' : 'OCI tenancy root compartment check failed, HTTP 403';
-      await page.locator('#toast-region .toast.error').filter({hasText:failure}).waitFor();
-      const message = await page.locator('#toast-region').innerText();
-      assert.ok(message.includes('denied-fixture'));
-      assert.ok(!message.includes('OCI_CHECK_'));
-      assert.match(message,language==='zh' ? /不一定表示私钥无效/ : /does not necessarily mean the private key is invalid/);
-      await page.evaluate(()=>{fixture.ociCheckFailure=false;document.querySelector('#toast-region').replaceChildren();});
-    }
-    assert.deepEqual(await page.evaluate(()=>fixture.ociChecks),['oci','oci','oci','oci']);
-    await page.evaluate(async()=>{fixture.state.connections.find(item=>item.id==='oci').canTest=false;await refresh(false);});
-    assert.equal(await row('oci').locator('[data-action="test"]').isDisabled(),true);
-    await page.evaluate(async()=>{fixture.state.connections.find(item=>item.id==='oci').canTest=true;await refresh(false);});
-    await page.locator('[data-language="en"]').click();
+    await editor.waitFor({ state: 'hidden' });
+    assert.equal(await page.evaluate(() => fixture.savedOci.input.secrets.namedSecrets.auth_token), 'SYNTHETIC-EXTRA-TOKEN');
     await toggle('oci').click();
-    assert.match(await page.locator('#oci-key-status').innerText(),/configured/);
-    await assertKeyStatusLanguages('已配置签名私钥','Signing key configured');
-    await page.locator('#oci-region').selectOption('ap-osaka-1');
-    await page.locator('#oci-tenancy').fill('ocid1.tenancy.oc1..cancelled');
+    const before = await page.evaluate(() => JSON.stringify(fixture.savedOci));
+    await module('oci_region').locator('[data-secret-value]').fill('ap-osaka-1');
     await editor.locator('.modal-footer [data-close-modal]').click();
-    await editor.waitFor({state:'hidden'});
-    assert.equal(await page.evaluate(()=>JSON.stringify(fixture.savedOci)),saved);
+    await editor.waitFor({ state: 'hidden' });
+    assert.equal(await page.evaluate(() => JSON.stringify(fixture.savedOci)), before);
     await toggle('oci').click();
-    assert.equal(await page.locator('#oci-region').inputValue(),'ap-tokyo-1');
-    assert.equal(await page.locator('#oci-tenancy').inputValue(),'ocid1.tenancy.oc1..test');
-    assert.match(await page.locator('#oci-key-status').innerText(),/configured/);
-    await page.evaluate(()=>{fixture.rejectOciKey=true;});
-    await chooseSource('clipboard');
-    await page.waitForFunction(()=>!document.querySelector('#oci-key-clipboard').disabled);
-    assert.match(await page.locator('#oci-key-status').innerText(),/configured/);
-    assert.equal(await page.evaluate(()=>JSON.stringify(fixture.savedOci)),saved);
-    await page.evaluate(()=>{fixture.rejectOciKey=false;fixture.failOciSave=true;});
-    await chooseSource('input');
-    await input.fill('SYNTHETIC-REPLACEMENT-INPUT');
-    await page.locator('#oci-key-input-confirm').click();
-    await page.waitForFunction(()=>Boolean(fixture.pendingOciKey));
-    await save.click();
-    await page.getByText('Synthetic save rejected',{exact:true}).waitFor();
-    assert.equal(await page.evaluate(()=>JSON.stringify(fixture.savedOci)),saved);
-    assert.equal(await editor.isVisible(),true);
-    assert.match(await page.locator('#oci-key-status').innerText(),/pending/);
-    await page.evaluate(()=>{fixture.failOciSave=false;});
-    await save.click();
-    await editor.waitFor({state:'hidden'});
-    await toggle('oci').click();
-    assert.equal(await page.locator('#oci-region').inputValue(),'ap-tokyo-1');
-    assert.equal(await custom.locator('[data-module-name]').inputValue(),'auth_token');
-    await chooseSource('input');
-    await input.fill('SYNTHETIC-LOCK-INPUT');
-    await page.evaluate(async()=>{fixture.owner={pinConfigured:true,unlocked:false};await refreshOwnerLock(false);});
-    assert.equal(await input.inputValue(),'');
-    assert.equal(await editor.isHidden(),true);
-    await page.evaluate(async()=>{fixture.owner={pinConfigured:false,unlocked:true};await refreshOwnerLock(false);});
-    await openTemplate();
-    await page.evaluate(()=>{fixture.deferOciKey=true;});
-    await chooseSource('clipboard');
-    await page.waitForFunction(()=>typeof fixture.resolveOciKey==='function');
-    assert.equal(await save.isDisabled(),true);
-    await page.evaluate(()=>document.querySelector('#connection-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
-    await editor.locator('[data-close-modal]').first().click();
-    await editor.waitFor({state:'hidden'});
-    await page.evaluate(()=>{fixture.deferOciKey=false;});
-    await openTemplate();
-    assert.equal(await page.locator('#oci-key-clipboard').isDisabled(),true);
-    assert.equal(await save.isDisabled(),true);
-    await page.evaluate(()=>fixture.resolveOciKey());
-    await page.waitForFunction(()=>fixture.pendingOciKey===null);
-    assert.equal(await page.locator('#oci-key-clipboard').isEnabled(),true);
-    assert.match(await page.locator('#oci-key-status').innerText(),/NOT IMPORTED|No signing|not imported/);
-    await assertKeyStatusLanguages('尚未导入签名私钥','No signing key imported');
-    for (const language of ['en','zh']) {
-      await page.locator(`[data-language="${language}"]`).evaluate(button=>button.click());
-      const templateCopy = await page.locator('[data-item-template="oci"]').textContent();
-      assert.match(templateCopy, language==='zh' ? /接口和操作由 Agent 决定/ : /agent chooses API operations/);
-      assert.ok(!templateCopy.includes('List instances'));
-      for (const source of ['clipboard','input']) {
-        await page.evaluate(()=>{
-          document.querySelector('#toast-region').replaceChildren();
-          fixture.ociKeyError='OCI_KEY_ALGORITHM: OCI signing requires an RSA key with a supported algorithm';
-        });
-        await chooseSource(source);
-        if (source==='input') {
-          await input.fill('SYNTHETIC-ERROR-INPUT');
-          await page.locator('#oci-key-input-confirm').click();
-        }
-        const expected = language==='zh' ? 'OCI 签名需要使用受支持算法的 RSA 私钥。' : 'OCI signing requires an RSA key with a supported algorithm.';
-        await page.locator('#toast-region .toast').filter({hasText:expected}).waitFor();
-        const displayed = await page.locator('#toast-region').innerText();
-        assert.ok(!displayed.includes('OCI_KEY_'));
-        assert.ok(!displayed.includes('SYNTHETIC-ERROR-INPUT'));
-        assert.equal(await page.evaluate(()=>fixture.pendingOciKey),null);
-        if (source==='input') {
-          assert.equal(await input.inputValue(),'SYNTHETIC-ERROR-INPUT');
-          assert.equal(await save.isDisabled(),true);
-          await page.locator('#oci-key-input-cancel').click();
-        }
-      }
-    }
-    await page.evaluate(()=>{fixture.ociKeyError=null;document.querySelector('#toast-region').replaceChildren();});
     await page.locator('#add-module-button').click();
     await page.locator('#module-menu [data-add-module="username"]').click();
-    await editor.locator('[data-kind="username"] [data-secret-value]').fill('SYNTHETIC-ACCOUNT');
-    await page.locator('#add-module-button').click();
-    await page.locator('#module-menu [data-add-module="password"]').click();
-    await editor.locator('[data-kind="password"] [data-secret-value]').fill('SYNTHETIC-PASSWORD');
-    for (const mode of ['modal','inline']) {
-      if (mode==='inline') {
-        await editor.locator('.modal-footer [data-close-modal]').click();
-        await editor.waitFor({state:'hidden'});
-        await toggle('oci').click();
-      }
-    for (const width of [690,460]) {
-      await page.setViewportSize({width,height:1000});
-      for (const language of ['en','zh']) {
-        await page.locator(`[data-language="${language}"]`).evaluate(button=>button.click());
-        await page.evaluate(()=>{document.documentElement.dataset.textSize='large';});
-        for (const theme of ['dark','light']) {
-          if (await page.locator('html').getAttribute('data-theme')!==theme) await page.locator('#theme-toggle').evaluate(button=>button.click());
-          await chooseSource('input');
-          await inputPanel.scrollIntoViewIfNeeded();
-          assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
-          const panelGeometry = await inputPanel.evaluate(el=>({width:el.clientWidth,scroll:el.scrollWidth,children:[...el.querySelectorAll('*')].map(x=>({tag:x.tagName,id:x.id,w:x.clientWidth,s:x.scrollWidth}))}));
-          assert.ok(panelGeometry.scroll<=panelGeometry.width+1,JSON.stringify(panelGeometry));
-          assert.equal(await inputPanel.locator('button').evaluateAll(buttons=>buttons.every(button=>button.scrollWidth<=button.clientWidth+1&&button.scrollHeight<=button.clientHeight+1)),true);
-          const configGeometry = await page.locator('#oci-config').evaluate(el=>({width:el.clientWidth,scroll:el.scrollWidth,rows:[...el.querySelectorAll('.oci-config-row')].map(row=>({width:row.clientWidth,scroll:row.scrollWidth,identityBottom:row.querySelector('.module-identity').getBoundingClientRect().bottom,controlTop:row.querySelector('.module-control').getBoundingClientRect().top}))}));
-          assert.ok(configGeometry.scroll<=configGeometry.width+1,JSON.stringify(configGeometry));
-          assert.ok(configGeometry.rows.every(row=>row.scroll<=row.width+1&&row.controlTop>=row.identityBottom-1),JSON.stringify(configGeometry));
-          const parity = await editor.evaluate(el=>{
-            const metrics = row=>{
-              const r=row.getBoundingClientRect(), identity=row.querySelector('.module-identity'), control=row.querySelector('.module-control');
-              const input=row.querySelector('.input'), style=getComputedStyle(row);
-              return {titleX:identity.getBoundingClientRect().left-r.left,controlX:control.getBoundingClientRect().left-r.left,controlWidth:control.getBoundingClientRect().width,inputWidth:input.getBoundingClientRect().width,gap:row.nextElementSibling?.getBoundingClientRect().top-r.bottom,titleFont:getComputedStyle(identity.querySelector('strong')).fontSize,metadataFont:getComputedStyle(identity.querySelector('small')).fontSize,background:style.backgroundColor,padding:style.padding,border:style.borderTopWidth,inputBackground:getComputedStyle(input).backgroundColor};
-            };
-            return {baseline:metrics(el.querySelector('#module-list [data-kind="username"]')),rows:[...el.querySelectorAll('.oci-config-row')].map(metrics)};
-          });
-          for (const actual of parity.rows) {
-            for (const key of ['titleX','controlX','controlWidth','inputWidth','titleFont','metadataFont','background','padding','inputBackground']) assert.equal(actual[key],parity.baseline[key],`${mode} ${key}: ${JSON.stringify(parity)}`);
-          }
-          for (const actual of parity.rows.slice(0,-1)) assert.equal(actual.gap,parity.baseline.gap,`${mode} row gap: ${JSON.stringify(parity)}`);
-          await editor.screenshot({path:path.join(artifacts,`oci-key-input-${mode}-${width}-${language}-${theme}.png`)});
-          await page.locator('#oci-key-input-cancel').click();
-          await page.locator('#oci-import-key').click();
-          await page.locator('#oci-key-source-menu').screenshot({path:path.join(artifacts,`oci-key-sources-${mode}-${width}-${language}-${theme}.png`)});
-          await page.locator('#oci-import-key').click();
+    await page.evaluate(() => { document.querySelector('#toast-region').replaceChildren(); document.querySelector('#oci-bindings').open = false; });
+    for (const width of [690, 460]) {
+      await page.setViewportSize({ width, height: 1000 });
+      for (const language of ['en', 'zh']) {
+        await page.locator(`[data-language="${language}"]`).evaluate(button => button.click());
+        for (const theme of ['dark', 'light']) {
+          if (await page.locator('html').getAttribute('data-theme') !== theme) await page.locator('#theme-toggle').evaluate(button => button.click());
+          await page.evaluate(() => { document.documentElement.dataset.textSize = 'large'; });
+          assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+          await module('oci_region').scrollIntoViewIfNeeded();
+          await page.screenshot({ path: path.join(artifacts, `oci-modules-${width}-${language}-${theme}.png`) });
         }
       }
     }
+    await module('fingerprint').locator('[data-remove-module]').click();
+    await page.locator('#confirmation-accept').click();
+    await save.click();
+    await editor.waitFor({ state: 'hidden' });
+    assert.equal(await page.evaluate(() => fixture.savedOci.input.modules.some(module => module.name === 'fingerprint')), false);
+    assert.ok(await page.evaluate(() => fixture.savedOci.input.ociBindings.fingerprint));
+    for (const language of ['en', 'zh']) {
+      await page.locator(`[data-language="${language}"]`).click();
+      for (const failed of [false, true]) {
+        await page.evaluate(failed => { fixture.ociCheckFailure = failed; document.querySelector('#toast-region').replaceChildren(); }, failed);
+        await row('oci').locator('[data-action="test"]').click();
+        const expected = language === 'zh' ? (failed ? '检查失败' : '检查成功') : (failed ? 'check failed' : 'check successful');
+        await page.locator('#toast-region').filter({ hasText: expected }).waitFor();
+      }
     }
-    const sources = await page.evaluate(()=>fixture.ociSources);
-    assert.ok(sources.some(call=>call.source==='file'&&!call.hasText));
-    assert.ok(sources.some(call=>call.source==='clipboard'&&!call.hasText));
-    assert.ok(sources.some(call=>call.source==='input'&&call.hasText));
-    assert.deepEqual(errors,[]);
-    console.log(`OCI key sources passed: ${artifacts}`);
+    await toggle('oci').click();
+    await page.evaluate(() => { fixture.deferOciKey = true; delete fixture.resolveOciKey; });
+    await chooseSource('clipboard');
+    await page.waitForFunction(() => typeof fixture.resolveOciKey === 'function');
+    await editor.locator('.modal-footer [data-close-modal]').click();
+    await editor.waitFor({ state: 'hidden' });
+    await toggle('oci').click();
+    assert.equal(await keyRow().locator('[data-stage-key="clipboard"]').isDisabled(), true);
+    await page.evaluate(() => { fixture.resolveOciKey(); fixture.deferOciKey = false; });
+    await page.waitForFunction(() => fixture.pendingOciKey === null);
+    assert.equal(await keyRow().getAttribute('data-pending'), '');
+    await chooseSource('clipboard');
+    await page.waitForFunction(() => Boolean(document.querySelector('[data-kind="privateKey"]').dataset.pending));
+    assert.equal(await page.evaluate(() => fixture.pendingOciKey), await keyRow().getAttribute('data-pending'));
+    await editor.locator('.modal-footer [data-close-modal]').click();
+    await editor.waitFor({ state: 'hidden' });
+    assert.equal(await page.evaluate(() => fixture.drafts.some(draft => JSON.stringify(draft).includes('test-oci-key-'))), false);
+    await page.evaluate(async () => { fixture.state.connections.find(item => item.id === 'alpha').httpAuthType = 'basic'; await refresh(false); });
+    await toggle('alpha').click();
+    assert.equal(await page.locator('#http-auth-type').inputValue(), 'basic');
+    await page.locator('#http-auth-type').selectOption('oci-signature');
+    await page.locator('#http-auth-type').selectOption('basic');
+    assert.equal(await page.locator('#http-auth-type').inputValue(), 'basic');
+    assert.deepEqual(errors, []);
+    console.log(`OCI standard modules passed: ${artifacts}`);
   } else if (process.argv.includes('--readability')) {
     await page.locator('[data-page="settings"]').click();
     const size = page.locator('#text-size');

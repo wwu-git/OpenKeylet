@@ -27,9 +27,84 @@ pub struct LoginRule {
     pub uri: String,
     pub match_type: String,
 }
+#[derive(Clone, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OciBindingsPatch {
+    #[serde(default, deserialize_with = "nullable_jump_id")]
+    pub region: Option<Option<String>>,
+    #[serde(default, deserialize_with = "nullable_jump_id")]
+    pub service_url: Option<Option<String>>,
+    #[serde(default, deserialize_with = "nullable_jump_id")]
+    pub tenancy_ocid: Option<Option<String>>,
+    #[serde(default, deserialize_with = "nullable_jump_id")]
+    pub user_ocid: Option<Option<String>>,
+    #[serde(default, deserialize_with = "nullable_jump_id")]
+    pub fingerprint: Option<Option<String>>,
+    #[serde(default, deserialize_with = "nullable_jump_id")]
+    pub private_key: Option<Option<String>>,
+}
+impl OciBindingsPatch {
+    fn apply(self, bindings: &mut crate::model::OciModuleBindings) -> Result<()> {
+        if let Some(value) = self.region {
+            bindings.region = value
+                .map(|id| {
+                    Uuid::parse_str(&id)
+                        .map_err(|_| anyhow::anyhow!("Invalid OCI module binding ID"))
+                })
+                .transpose()?;
+        }
+        if let Some(value) = self.service_url {
+            bindings.service_url = value
+                .map(|id| {
+                    Uuid::parse_str(&id)
+                        .map_err(|_| anyhow::anyhow!("Invalid OCI module binding ID"))
+                })
+                .transpose()?;
+        }
+        if let Some(value) = self.tenancy_ocid {
+            bindings.tenancy_ocid = value
+                .map(|id| {
+                    Uuid::parse_str(&id)
+                        .map_err(|_| anyhow::anyhow!("Invalid OCI module binding ID"))
+                })
+                .transpose()?;
+        }
+        if let Some(value) = self.user_ocid {
+            bindings.user_ocid = value
+                .map(|id| {
+                    Uuid::parse_str(&id)
+                        .map_err(|_| anyhow::anyhow!("Invalid OCI module binding ID"))
+                })
+                .transpose()?;
+        }
+        if let Some(value) = self.fingerprint {
+            bindings.fingerprint = value
+                .map(|id| {
+                    Uuid::parse_str(&id)
+                        .map_err(|_| anyhow::anyhow!("Invalid OCI module binding ID"))
+                })
+                .transpose()?;
+        }
+        if let Some(value) = self.private_key {
+            bindings.private_key = value
+                .map(|id| {
+                    Uuid::parse_str(&id)
+                        .map_err(|_| anyhow::anyhow!("Invalid OCI module binding ID"))
+                })
+                .transpose()?;
+        }
+        Ok(())
+    }
+}
+fn nullable_oci_bindings<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<Option<OciBindingsPatch>>, D::Error> {
+    Option::<OciBindingsPatch>::deserialize(deserializer).map(Some)
+}
 #[derive(Clone, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateInput {
+    pub oci_bindings: Option<crate::model::OciModuleBindings>,
     /// Existing enabled direct SSH project ID. Omit for direct connection.
     pub ssh_jump_item_id: Option<String>,
     pub name: String,
@@ -46,6 +121,8 @@ pub struct CreateInput {
 #[derive(Clone, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateInput {
+    #[serde(default, deserialize_with = "nullable_oci_bindings")]
+    pub oci_bindings: Option<Option<OciBindingsPatch>>,
     /// Omit to preserve the route, null to clear it, or an existing direct SSH project ID.
     #[serde(default, deserialize_with = "nullable_jump_id")]
     pub ssh_jump_item_id: Option<Option<String>>,
@@ -133,7 +210,7 @@ impl Vault {
             operations:vec!["create".into(),"update".into(),"move via update".into()],
             item_types:vec!["ssh".into(),"api".into(),"login".into(),"custom".into()],
             modules:["host","port","username","password","privateKey","passphrase","url","apiCredential","totp","customSecret"].map(str::to_owned).to_vec(),
-            ssh_auth_types:vec!["password".into(),"privateKey".into()], http_auth_types:vec!["bearer".into(),"apiKey".into(),"basic".into()],
+            ssh_auth_types:vec!["password".into(),"privateKey".into()], http_auth_types:vec!["bearer".into(),"apiKey".into(),"basic".into(),"oci-signature".into()],
             rules:vec![
                 "sshJumpItemId selects an existing enabled direct SSH project. Update omits it to preserve or uses null to clear. Single-hop only; host trust is device-local and cannot be modified through MCP.".into(),
                 "Create requires name, itemType, folder and modules; update requires item ID and expectedRevision. Omitted fields are preserved.".into(),
@@ -143,7 +220,7 @@ impl Vault {
                 "New secrets are hidden. Cannot change visibility, delete items/modules, or configure write permissions. Never repeat submitted secrets.".into(),
                 "Moves require both current and destination folders. Revision conflicts require a fresh query; never automatically replay stale writes.".into(),
                 "Encrypted private keys require their passphrase in the same request. Unencrypted replacements clear the old passphrase.".into(),
-                "OCI: only existing item metadata and independent ordinary modules can be patched. Signing configuration, derived URL, item type and auth mode cannot change; no OCI creation/conversion/signing-key replacement.".into(),
+                "OCI uses httpAuthType oci-signature and ociBindings, a map from authentication fields to stable module IDs. Create the modules first, then update ociBindings using returned module IDs and the latest revision. Omitted bindings preserve values; null clears a binding. OCI modules can be edited and signing keys replaced under the same folder and revision rules; visibility cannot change. Missing bindings may be saved, but signed execution requires every bound field.".into(),
             ],
         })
     }
@@ -151,14 +228,15 @@ impl Vault {
         self.update_document_with_result(|document| {
             authorize(&document.settings, request.folder.trim())?;
             let mut input: ConnectionInput=serde_json::from_value(serde_json::json!({"name":request.name,"itemType":request.item_type,"folder":request.folder.trim(),"description":request.description.unwrap_or_default(),"enabled":request.enabled.unwrap_or(true)}))?;
+            input.oci_bindings = request.oci_bindings;
             input.ssh_jump_item_id = jump_id(request.ssh_jump_item_id)?;
             set_auth(&mut input,request.ssh_auth_type,request.http_auth_type,request.auth_header)?;
             if let Some(rules)=request.login_uris { input.login_uris=login_rules(rules)?; }
-            apply_modules(&mut input, &request.modules, false)?;
+            apply_modules(&mut input, &request.modules)?;
             validate_credentials(&mut input, None, &request.modules)?;
-            validate_item(&input, false)?;
+            validate_item(&input, input.http_auth_type == crate::oci::AUTH_MODE)?;
             let key=input.secrets.private_key.clone().map(zeroize::Zeroizing::new);
-            let saved=self.save_connection_in_document(document,input,None,key.as_ref().map(|k|(k.as_str(),"SSH KEY")),None,false).map_err(|_|anyhow::anyhow!("Invalid item or module configuration; nothing was saved"))?;
+            let saved=self.save_connection_in_document(document,input,None,key.as_ref().map(|k|(k.as_str(),"SSH KEY"))).map_err(|_|anyhow::anyhow!("Invalid item or module configuration; nothing was saved"))?;
             Ok(saved.into())
         })
     }
@@ -180,20 +258,16 @@ impl Vault {
                 request.expected_revision == existing.revision,
                 "Project changed; query again before updating"
             );
-            let is_oci = existing.http_auth_type == crate::oci::AUTH_MODE;
-            if is_oci {
-                ensure!(
-                    request.item_type.is_none()
-                        && request.http_auth_type.is_none()
-                        && request.auth_header.is_none()
-                        && request.login_uris.is_none(),
-                    "OCI signing fields require the desktop OCI editor"
-                );
-            }
             let secrets = self.decrypt_stored(&existing)?;
             let mut input: ConnectionInput =
                 serde_json::from_value(serde_json::to_value(existing.portable())?)?;
             input.secrets = secrets.clone();
+            if let Some(patch) = request.oci_bindings {
+                match patch {
+                    None => input.oci_bindings = None,
+                    Some(patch) => { patch.apply(input.oci_bindings.get_or_insert_with(Default::default))?; }
+                }
+            }
             if let Some(value) = request.ssh_jump_item_id {
                 input.ssh_jump_item_id = jump_id(value)?;
                 input.ssh_jump_unresolved = false;
@@ -222,9 +296,9 @@ impl Vault {
             if let Some(rules) = request.login_uris {
                 input.login_uris = login_rules(rules)?;
             }
-            apply_modules(&mut input, &request.modules, is_oci)?;
+            apply_modules(&mut input, &request.modules)?;
             validate_credentials(&mut input, Some(&existing), &request.modules)?;
-            validate_item(&input, is_oci)?;
+            validate_item(&input, input.http_auth_type == crate::oci::AUTH_MODE)?;
             let key = input
                 .secrets
                 .private_key
@@ -241,8 +315,6 @@ impl Vault {
                     input,
                     None,
                     key.as_ref().map(|k| (k.as_str(), key_name)),
-                    None,
-                    is_oci,
                 )
                 .map_err(|_| {
                     anyhow::anyhow!("Invalid item or module configuration; nothing was saved")
@@ -275,7 +347,7 @@ fn set_auth(
     }
     if let Some(mode) = http {
         ensure!(
-            matches!(mode.as_str(), "bearer" | "apiKey" | "basic"),
+            matches!(mode.as_str(), "bearer" | "apiKey" | "basic" | "oci-signature"),
             "Unsupported API authentication mode"
         );
         input.http_auth_type = mode;
@@ -299,7 +371,7 @@ fn set_auth(
     }
     Ok(())
 }
-fn apply_modules(input: &mut ConnectionInput, patches: &[ModulePatch], oci: bool) -> Result<()> {
+fn apply_modules(input: &mut ConnectionInput, patches: &[ModulePatch]) -> Result<()> {
     let mut seen = std::collections::HashSet::new();
     let original_secrets = input.secrets.clone();
     for patch in patches {
@@ -359,10 +431,6 @@ fn apply_modules(input: &mut ConnectionInput, patches: &[ModulePatch], oci: bool
         ensure!(
             patch.kind.as_ref().is_none_or(|kind| kind == &module.kind),
             "Cannot change existing module kind"
-        );
-        ensure!(
-            !oci || module.kind != "url",
-            "OCI URL is derived from its region"
         );
         if let Some(addresses) = &patch.alternate_values {
             ensure!(matches!(module.kind.as_str(), "host" | "url"), "Only host and url modules support other addresses");
@@ -444,6 +512,10 @@ fn validate_credentials(
                     }))
         })
     };
+    if input.http_auth_type == crate::oci::AUTH_MODE {
+        crate::oci::validate_modules(&input.modules, &input.secrets, input.oci_bindings.as_ref())?;
+        return Ok(());
+    }
     let key_changed = changed("privateKey");
     let pass_changed = changed("passphrase");
     if key_changed || pass_changed {
@@ -451,7 +523,7 @@ fn validate_credentials(
             input.secrets.private_key.as_deref().ok_or_else(|| {
                 anyhow::anyhow!("Private key is required for passphrase validation")
             })?;
-        if key_changed && crate::ssh_keys::decode_private_key(key, None).is_ok() {
+        if key_changed && (crate::ssh_keys::decode_private_key(key, None).is_ok() || crate::oci::validate_pem(key).is_ok()) {
             input.secrets.passphrase = None;
             input.secrets.named_secrets.remove("passphrase");
             input.remove_secret_names.push("passphrase".into());
@@ -482,12 +554,7 @@ fn changed_totp(input: &ConnectionInput, patches: &[ModulePatch]) -> bool {
     })
 }
 fn validate_item(input: &ConnectionInput, oci: bool) -> Result<()> {
-    if !oci {
-        ensure!(
-            matches!(input.item_type.as_str(), "ssh" | "api" | "login" | "custom"),
-            "Unsupported project type for MCP writing"
-        );
-    }
+    ensure!(matches!(input.item_type.as_str(), "ssh" | "api" | "login" | "custom"), "Unsupported project type for MCP writing");
     let has = |name: &str| input.secrets.get(name).is_some_and(|s| !s.is_empty());
     if input.item_type == "ssh" {
         ensure!(

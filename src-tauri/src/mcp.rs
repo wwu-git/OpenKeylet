@@ -316,14 +316,23 @@ impl VaultMcp {
                     actions.push("http_send".to_owned());
                 }
                 let oci_context = if decrypted.stored.http_auth_type == crate::oci::AUTH_MODE {
-                    decrypted.secrets.oci.as_ref().map(|credential| OciContext {
-                        region: credential.config.region.clone(),
-                        tenancy_ocid: credential.config.tenancy_ocid.clone(),
+                    decrypted.stored.oci_bindings.as_ref().and_then(|bindings| {
+                        let visible = |id| {
+                            decrypted.stored.modules.iter()
+                                .find(|module| Some(module.id) == id)
+                                .filter(|module| module.agent_visible())
+                                .and_then(|_| crate::oci::binding_value(&decrypted.stored.modules, &decrypted.secrets, id))
+                                .map(str::to_owned)
+                        };
+                        let context = OciContext {
+                            region: visible(bindings.region),
+                            tenancy_ocid: visible(bindings.tenancy_ocid),
+                        };
+                        (context.region.is_some() || context.tenancy_ocid.is_some()).then_some(context)
                     })
-                } else {
-                    None
-                };
+                } else { None };
                 Ok(ItemOutput {
+                    oci_bindings: decrypted.stored.oci_bindings.clone(),
                     ssh_jump_item_id: decrypted.stored.ssh_jump_item_id.map(|id|id.to_string()),
                     ssh_jump_unresolved: decrypted.stored.ssh_jump_unresolved,
                     id: decrypted.stored.id.to_string(),
@@ -879,6 +888,8 @@ struct ItemsSearchOutput {
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct ItemOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    oci_bindings: Option<crate::model::OciModuleBindings>,
     ssh_jump_item_id: Option<String>,
     ssh_jump_unresolved: bool,
     id: String,
@@ -887,15 +898,17 @@ struct ItemOutput {
     modules: Vec<ItemModuleOutput>,
     actions: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(description = "Non-secret OCI request context. tenancyOcid is the root compartment OCID; region determines the allowed regional service endpoints. The signing private key is never returned.")]
+    #[schemars(description = "Non-secret OCI request context. tenancyOcid is the root compartment OCID; region determines the allowed regional service endpoints. Only context fields whose bound modules are agent-visible are included.")]
     oci_context: Option<OciContext>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct OciContext {
-    region: String,
-    tenancy_ocid: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    region: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tenancy_ocid: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1365,7 +1378,7 @@ impl VaultMcp {
 
     #[tool(
         name = "items_search",
-        description = "Discover or select enabled OpenKeylet projects, modules, and available actions. A query that finds one project makes it the current project for this MCP session, so later compatible actions can omit item. When the user already named a project and the intended action is clear, call that action directly instead. Query may be the project name or the user's natural-language phrase containing it. Exact case-insensitive name matches win. Only modules explicitly marked agentVisible include value. OCI projects also return non-secret ociContext with region and tenancyOcid for constructing API requests; no signing key is returned.",
+        description = "Discover or select enabled OpenKeylet projects, modules, and available actions. A query that finds one project makes it the current project for this MCP session, so later compatible actions can omit item. When the user already named a project and the intended action is clear, call that action directly instead. Query may be the project name or the user's natural-language phrase containing it. Exact case-insensitive name matches win. Only modules explicitly marked agentVisible include value. OCI projects also return non-secret ociContext with region and tenancyOcid for constructing API requests; hidden module values are never returned; a signing key is returned only when the owner explicitly enables its module visibility.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<ItemsSearchOutput>(),
         annotations(title = "Find OpenKeylet projects", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
@@ -2020,7 +2033,7 @@ impl VaultMcp {
 
     #[tool(
         name = "http_send",
-        description = "Send an authenticated HTTP request without returning hidden stored credentials. Omit item after selecting a compatible project, or pass its name. OCI projects provide general API signing, not a fixed list of operations: choose the method, path, query, headers and one body format from the OCI API documentation. Relative URLs use the default Compute base; absolute URLs select another OCI service in ociContext.region. Only HTTPS port 443 regional oraclecloud.com endpoints are allowed for OCI; redirects and proxies are disabled. Signing headers are generated locally. Use items_search to discover ociContext.region and tenancyOcid when needed. Resolve named resources through the appropriate OCI APIs, handle pagination using service response headers, and ask only when resource matches remain ambiguous. Do not treat an empty root-compartment result as all resources. OCI IAM controls permissions; do not bypass a denial. OpenKeylet sends one request and does not choose operations, enumerate resources or follow pages automatically. Built-in API/Basic authentication is also injected automatically. Hidden ordinary modules may be referenced as {{openkeylet:password}} or {{openkeylet:service token}} in URL, headers, query or body values; secretBindings provides optional aliases. The OCI signing private key cannot be referenced. Large responses may use saveResponseTo. For non-OCI projects, HTTP/HTTPS URLs and redirects follow the existing general HTTP behavior. No address failover occurs.",
+        description = "Send an authenticated HTTP request without returning hidden stored credentials. Omit item after selecting a compatible project, or pass its name. OCI projects provide general API signing, not a fixed list of operations: choose the method, path, query, headers and one body format from the OCI API documentation. Relative URLs use the default Compute base; absolute URLs select another OCI service in ociContext.region. Only HTTPS port 443 regional oraclecloud.com endpoints are allowed for OCI; redirects and proxies are disabled. Signing headers are generated locally. Use items_search to discover ociContext.region and tenancyOcid when needed. Resolve named resources through the appropriate OCI APIs, handle pagination using service response headers, and ask only when resource matches remain ambiguous. Do not treat an empty root-compartment result as all resources. OCI IAM controls permissions; do not bypass a denial. OpenKeylet sends one request and does not choose operations, enumerate resources or follow pages automatically. Built-in API/Basic authentication is also injected automatically. Hidden ordinary modules may be referenced as {{openkeylet:password}} or {{openkeylet:service token}} in URL, headers, query or body values; secretBindings provides optional aliases. OCI signing fields follow ordinary module visibility and placeholder rules. Large responses may use saveResponseTo. For non-OCI projects, HTTP/HTTPS URLs and redirects follow the existing general HTTP behavior. No address failover occurs.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<ApiResponse>(),
         annotations(title = "Send an authenticated API request", read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = true)
     )]
@@ -2069,7 +2082,7 @@ impl ServerHandler for VaultMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("openkeylet", env!("CARGO_PKG_VERSION")).with_title("OpenKeylet"))
             .with_instructions(
-            "OpenKeylet lets agents use locally saved credentials without receiving hidden plaintext. An explicit item or unique items_search result becomes the current project; later compatible actions may omit item, and a terminal keeps its own binding. When the user names a project and the action is clear, call it directly. Use items_search only for discovery, selection, inspection, or genuine ambiguity. For OCI, http_send is a general signed request executor. The agent reads the OCI API documentation and chooses operations, methods, parameters, pagination and filtering; OpenKeylet validates the target, signs locally and returns the response. items_search exposes non-secret ociContext.region and tenancyOcid. Use the relevant OCI APIs to discover named compartments or resources rather than asking the user for OCIDs that can be retrieved; ask when matches are ambiguous. Use an absolute regional OCI service URL when the API is not under the default Compute base. OCI requests stay within the configured region on HTTPS port 443, never follow redirects, and never use proxies. Resource permissions remain with OCI IAM. Do not bypass IAM denials or claim an empty root-compartment page means the tenancy has no instances. Each call sends one request; handle service pagination and filter returned data as required by the user. The signing private key is not a readable module. credential_fill understands common module phrases and may infer a sole secret; omit target to use the current running OpenKeylet terminal, otherwise a connected browser or foreground control, and use submit=true to complete the login. terminal_start makes the opened PTY current, so terminal_write, terminal_read, terminal_stop, and terminal credential fills should omit sessionId unless deliberately switching among multiple terminals. Use terminal_run for one-shot local commands and PTY tools only for persistent interaction. Direct {{openkeylet:module}} placeholders work in commands, stdin, paths, terminal input, SSH, and HTTP values; OpenKeylet substitutes and redacts them locally. terminal_run.stdin and ssh_run.stdin pass scripts, JSON, or other text without shell escaping or temporary files. Host and service URL modules may save other addresses in alternateValues; value is the default. Omitted SSH host or HTTP URL uses that default, relative HTTP paths use the default service URL, and explicit host or absolute URL selects another target. Addresses share project credentials and SSH port; there is no automatic failover. A password or private-key project can use SSH without saved target metadata: pass host, optional port, and username at runtime; saved values are defaults and port 22 is the fallback. For a saved SSH jump route, call ssh_run, ssh_upload, or ssh_download with target project B directly. OpenKeylet automatically routes through jump project A and authenticates each endpoint with its own credentials. items_search exposes the saved route; items_create/items_update configure sshJumpItemId under the existing write permissions and revision rules. If either host fingerprint is missing or mismatched, stop and ask the user to verify it against a trusted source and confirm it through the OpenKeylet client or local ssh-trust CLI, confirming A before probing B when needed. Never auto-trust keys or bypass the route with a direct or nested ssh connection. Use secretEnv only when a program needs an environment variable, and HTTP secretBindings only for aliases. Never ask the user to reveal a hidden value. terminal_read.until waits without polling and has no deadline unless waitSeconds is supplied. For vault writing, consult vault_write_capabilities, then items_create/items_update. Writing requires desktop folder authorization, uses stable project/module IDs and expectedRevision, and cannot change visibility. Never echo submitted secrets. OpenKeylet has no observation, diagnostic, restricted, or execution modes.",
+            "OpenKeylet lets agents use locally saved credentials without receiving hidden plaintext. An explicit item or unique items_search result becomes the current project; later compatible actions may omit item, and a terminal keeps its own binding. When the user names a project and the action is clear, call it directly. Use items_search only for discovery, selection, inspection, or genuine ambiguity. For OCI, http_send is a general signed request executor. The agent reads the OCI API documentation and chooses operations, methods, parameters, pagination and filtering; OpenKeylet validates the target, signs locally and returns the response. items_search exposes non-secret ociContext.region and tenancyOcid. Use the relevant OCI APIs to discover named compartments or resources rather than asking the user for OCIDs that can be retrieved; ask when matches are ambiguous. Use an absolute regional OCI service URL when the API is not under the default Compute base. OCI requests stay within the configured region on HTTPS port 443, never follow redirects, and never use proxies. Resource permissions remain with OCI IAM. Do not bypass IAM denials or claim an empty root-compartment page means the tenancy has no instances. Each call sends one request; handle service pagination and filter returned data as required by the user. OCI signing fields are ordinary modules bound by stable module IDs. Module visibility controls all plaintext returned to the agent, including the signing key and OCI request context. Hidden modules can still be used locally without revealing plaintext. credential_fill understands common module phrases and may infer a sole secret; omit target to use the current running OpenKeylet terminal, otherwise a connected browser or foreground control, and use submit=true to complete the login. terminal_start makes the opened PTY current, so terminal_write, terminal_read, terminal_stop, and terminal credential fills should omit sessionId unless deliberately switching among multiple terminals. Use terminal_run for one-shot local commands and PTY tools only for persistent interaction. Direct {{openkeylet:module}} placeholders work in commands, stdin, paths, terminal input, SSH, and HTTP values; OpenKeylet substitutes and redacts them locally. terminal_run.stdin and ssh_run.stdin pass scripts, JSON, or other text without shell escaping or temporary files. Host and service URL modules may save other addresses in alternateValues; value is the default. Omitted SSH host or HTTP URL uses that default, relative HTTP paths use the default service URL, and explicit host or absolute URL selects another target. Addresses share project credentials and SSH port; there is no automatic failover. A password or private-key project can use SSH without saved target metadata: pass host, optional port, and username at runtime; saved values are defaults and port 22 is the fallback. For a saved SSH jump route, call ssh_run, ssh_upload, or ssh_download with target project B directly. OpenKeylet automatically routes through jump project A and authenticates each endpoint with its own credentials. items_search exposes the saved route; items_create/items_update configure sshJumpItemId under the existing write permissions and revision rules. If either host fingerprint is missing or mismatched, stop and ask the user to verify it against a trusted source and confirm it through the OpenKeylet client or local ssh-trust CLI, confirming A before probing B when needed. Never auto-trust keys or bypass the route with a direct or nested ssh connection. Use secretEnv only when a program needs an environment variable, and HTTP secretBindings only for aliases. Never ask the user to reveal a hidden value. terminal_read.until waits without polling and has no deadline unless waitSeconds is supplied. For vault writing, consult vault_write_capabilities, then items_create/items_update. Writing requires desktop folder authorization, uses stable project/module IDs and expectedRevision, and cannot change visibility. Never echo submitted secrets. OpenKeylet has no observation, diagnostic, restricted, or execution modes.",
         )
     }
 
@@ -2248,10 +2261,10 @@ mod tests {
                 query: Some("OCI test".into()),
             })
             .unwrap();
-        assert_eq!(discovered.items[0].actions, ["http_send"]);
+        assert_eq!(discovered.items[0].actions, ["credential_fill", "http_send"]);
         let context = discovered.items[0].oci_context.as_ref().unwrap();
-        assert_eq!(context.region, "ap-tokyo-1");
-        assert_eq!(context.tenancy_ocid, crate::oci::tests::config().tenancy_ocid);
+        assert_eq!(context.region.as_deref(), Some("ap-tokyo-1"));
+        assert_eq!(context.tenancy_ocid, Some(crate::oci::tests::config().tenancy_ocid));
         assert_eq!(serde_json::to_value(context).unwrap(), serde_json::json!({
             "region": "ap-tokyo-1",
             "tenancyOcid": "ocid1.tenancy.oc1..test"
@@ -2261,7 +2274,7 @@ mod tests {
             assert!(!discovered_json.contains(hidden));
         }
         let modules = &discovered.items[0].modules;
-        assert_eq!(modules.len(), 5);
+        assert_eq!(modules.len(), 10);
         assert!(modules.iter().any(|m| m.kind == "username" && m.configured));
         assert!(
             modules
@@ -2279,8 +2292,21 @@ mod tests {
         assert!(
             server
                 .resolve_item_for_action("OCI test", Some("fill"))
-                .is_err()
+                .is_ok()
         );
+
+        let id = discovered.items[0].id.parse().unwrap();
+        let mut input: ConnectionInput = serde_json::from_value(serde_json::to_value(server.vault.get_connection(id).unwrap().stored.portable()).unwrap()).unwrap();
+        let bindings = input.oci_bindings.clone().unwrap();
+        for module in &mut input.modules {
+            if [bindings.region, bindings.tenancy_ocid].contains(&Some(module.id)) { module.agent_visible = Some(false); }
+            if Some(module.id) == bindings.private_key { module.agent_visible = Some(true); }
+        }
+        server.vault.save_connection(input).unwrap();
+        let visible_key = server.search_items(ItemsSearchInput { query: Some("OCI test".into()) }).unwrap();
+        assert!(visible_key.items[0].oci_context.is_none());
+        assert!(visible_key.items[0].modules.iter().any(|module| Some(module.id.as_str()) == bindings.private_key.map(|id| id.to_string()).as_deref() && module.value.as_deref() == Some(crate::oci::tests::KEY)));
+        assert!(server.resolve_item_for_action("OCI test", Some("ssh")).is_err());
 
         let mut connection = server.resolve_item_for_action("OCI test", Some("http")).unwrap();
         let mut request: HttpSendInput = serde_json::from_value(serde_json::json!({
@@ -2401,6 +2427,7 @@ mod tests {
         secrets.named_secrets = named;
         let saved = vault
             .save_connection(ConnectionInput {
+                oci_bindings: None,
                 ssh_jump_item_id: None,
                 ssh_jump_unresolved: false,
                 ssh_auth_type: String::new(),
@@ -2559,6 +2586,7 @@ mod tests {
         api_secrets.named_secrets = api_named;
         let api_saved = vault
             .save_connection(ConnectionInput {
+                oci_bindings: None,
                 ssh_jump_item_id: None,
                 ssh_jump_unresolved: false,
                 ssh_auth_type: String::new(),
@@ -2665,6 +2693,7 @@ mod tests {
         secrets.password = Some("runtime-ssh-password-marker".into());
         let public = vault
             .save_connection(ConnectionInput {
+                oci_bindings: None,
                 ssh_jump_item_id: None,
                 ssh_jump_unresolved: false,
                 ssh_auth_type: String::new(),
@@ -2814,6 +2843,7 @@ mod tests {
         secrets.named_secrets = named;
         vault
             .save_connection(ConnectionInput {
+                oci_bindings: None,
                 ssh_jump_item_id: None,
                 ssh_jump_unresolved: false,
                 ssh_auth_type: String::new(),
@@ -2959,6 +2989,7 @@ mod tests {
         secrets.password = Some("single-secret-terminal-marker".into());
         vault
             .save_connection(ConnectionInput {
+                oci_bindings: None,
                 ssh_jump_item_id: None,
                 ssh_jump_unresolved: false,
                 ssh_auth_type: String::new(),
@@ -3029,6 +3060,7 @@ mod tests {
         secrets.named_secrets = named;
         let saved = vault
             .save_connection(ConnectionInput {
+                oci_bindings: None,
                 ssh_jump_item_id: None,
                 ssh_jump_unresolved: false,
                 ssh_auth_type: String::new(),
@@ -3195,6 +3227,7 @@ mod tests {
         secrets.password = Some(secret.to_owned());
         vault
             .save_connection(ConnectionInput {
+                oci_bindings: None,
                 ssh_jump_item_id: None,
                 ssh_jump_unresolved: false,
                 ssh_auth_type: String::new(),
@@ -3227,6 +3260,7 @@ mod tests {
         other_secrets.password = Some("other-terminal-secret-marker".into());
         vault
             .save_connection(ConnectionInput {
+                oci_bindings: None,
                 ssh_jump_item_id: None,
                 ssh_jump_unresolved: false,
                 ssh_auth_type: String::new(),
@@ -3490,9 +3524,7 @@ mod tests {
         let schema = serde_json::to_value(router.get("items_search").unwrap().output_schema.as_ref().unwrap()).unwrap();
         assert!(schema.to_string().contains("ociContext"));
         assert!(schema.to_string().contains("tenancyOcid"));
-        for absent in ["\"userOcid\":", "\"fingerprint\":", "\"privateKey\":"] {
-            assert!(!schema.to_string().contains(absent));
-        }
+        assert!(schema.to_string().contains("ociBindings"));
     }
 
     #[test]

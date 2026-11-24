@@ -58,7 +58,7 @@ fn validates_every_address_and_preserves_saved_data_on_failure() {
 }
 
 #[test]
-fn version14_single_address_remains_readable_and_rewrites_as15() {
+fn version14_single_address_remains_readable_and_rewrites_as16() {
     let directory = tempfile::tempdir().unwrap();
     let vault = Vault::open(directory.path().into()).unwrap();
     let saved = vault.save_connection(input("legacy", "host", "a.example", &[])).unwrap();
@@ -73,7 +73,7 @@ fn version14_single_address_remains_readable_and_rewrites_as15() {
     assert!(vault.get_connection(saved.id).unwrap().stored.modules[0].alternate_values.is_empty());
     vault.save_connection(input("new", "host", "b.example", &["c.example"])).unwrap();
     let document: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(document["version"], 15);
+    assert_eq!(document["version"], 16);
 }
 
 #[test]
@@ -111,21 +111,20 @@ fn backups_preserve_default_and_other_addresses_and_restore_idempotently() {
 }
 
 #[test]
-fn oci_cannot_accept_other_service_addresses_in_restore() {
+fn oci_addresses_use_standard_modules_and_requests_validate_targets() {
     let directory = tempfile::tempdir().unwrap();
-    let vault = Vault::open(directory.path().into()).unwrap();
-    let mut oci = input("OCI", "url", "https://iaas.us-ashburn-1.oraclecloud.com/20160918/", &["https://other.example/"]);
-    oci.http_auth_type = crate::oci::AUTH_MODE.into();
-    assert!(normalize_connection(oci.clone(), None, &SecretBundle::default(), String::new(), "now".into()).is_err());
-    let mut portable = serde_json::to_value(oci).unwrap();
-    portable["id"] = json!(Uuid::new_v4());
-    portable["createdAt"] = json!("now");
-    portable["updatedAt"] = json!("now");
-    portable["privateKeyName"] = json!("");
-    for name in ["secrets","privateKeyImportPath","removeSecretNames"] { portable.as_object_mut().unwrap().remove(name); }
-    let portable: PortableConnection = serde_json::from_value(portable).unwrap();
-    assert!(vault.merge_connections(vec![(portable, SecretBundle::default())]).is_err());
-    assert!(vault.list_connections().unwrap().is_empty());
+    let vault = Vault::open(directory.path().join("source")).unwrap();
+    let saved = vault.save_oci_connection(serde_json::from_value(json!({"name":"OCI"})).unwrap(), None, crate::oci::tests::config(), Some(crate::oci::tests::KEY), None).unwrap();
+    let old = vault.get_connection(saved.id).unwrap();
+    let mut input: ConnectionInput = serde_json::from_value(serde_json::to_value(old.stored.portable()).unwrap()).unwrap();
+    input.modules.iter_mut().find(|module| module.kind == "url").unwrap().alternate_values = vec!["https://other.example/".into()];
+    vault.save_connection(input).unwrap();
+    let target = Vault::open(directory.path().join("target")).unwrap();
+    crate::backup::restore_cloud_snapshot(&target, &crate::backup::cloud_snapshot(&vault).unwrap()).unwrap();
+    let restored = target.get_connection(saved.id).unwrap();
+    assert_eq!(restored.stored.modules.iter().find(|module| module.kind == "url").unwrap().alternate_values, ["https://other.example/"]);
+    let request = reqwest::Request::new(reqwest::Method::GET, url::Url::parse("https://other.example/").unwrap());
+    assert!(crate::oci::validate_request(&crate::oci::tests::config(), &request).is_err());
 }
 
 #[test]

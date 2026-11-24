@@ -193,14 +193,12 @@ fn private_key_validation_and_clear_old_passphrase() {
     );
 }
 #[test]
-fn oci_ordinary_patch_preserves_signing_data() {
+fn oci_modules_use_standard_write_permissions_and_authentication_fields() {
     let (_dir, vault) = fixture();
     allow(&vault, &["Agent"]);
-    let input =
-        serde_json::from_value(json!({"name":"OCI","folder":"Agent","modules":[]})).unwrap();
     let item = vault
         .save_oci_connection(
-            input,
+            serde_json::from_value(json!({"name":"OCI","folder":"Agent"})).unwrap(),
             None,
             crate::oci::tests::config(),
             Some(crate::oci::tests::KEY),
@@ -208,32 +206,41 @@ fn oci_ordinary_patch_preserves_signing_data() {
         )
         .unwrap();
     let before = vault.get_connection(item.id).unwrap();
-    let config = serde_json::to_value(&before.secrets.oci).unwrap();
+    let bindings = before.stored.oci_bindings.clone().unwrap();
     let output: WriteOutput = item.into();
-    let next=update(&vault,&output,json!({"description":"ordinary","modules":[{"kind":"customSecret","name":"region","value":"just metadata"}]})).unwrap();
+    let next = update(&vault, &output, json!({"description":"ordinary","modules":[{"kind":"customSecret","name":"extra_region","value":"just metadata"}]})).unwrap();
     let after = vault.get_connection(output.id.parse().unwrap()).unwrap();
-    assert_eq!(serde_json::to_value(&after.secrets.oci).unwrap(), config);
-    assert_eq!(after.stored.base_url, before.stored.base_url);
-    let mut invalid: ConnectionInput = serde_json::from_value(serde_json::to_value(after.stored.portable()).unwrap()).unwrap();
-    invalid.modules[0].alternate_values = vec!["https://other.invalid/".into()];
-    assert!(vault.save_oci_connection(invalid, None, crate::oci::tests::config(), None, None).is_err());
-    for patch in [
-        json!({"httpAuthType":"bearer"}),
-        json!({"itemType":"ssh"}),
-        json!({"modules":[{"id":after.stored.modules[0].id,"value":"https://evil.invalid"}]}),
-        json!({"modules":[{"id":after.stored.modules[0].id,"alternateValues":["https://other.invalid/"]}]}),
-    ] {
-        assert!(update(&vault, &next, patch).is_err());
-    }
+    assert_eq!(after.stored.oci_bindings, Some(bindings.clone()));
     assert_eq!(
-        vault
-            .get_connection(output.id.parse().unwrap())
-            .unwrap()
-            .stored
-            .revision,
-        next.revision
+        after.secrets.get("privateKey"),
+        Some(crate::oci::tests::KEY)
     );
+    let changed = update(
+        &vault,
+        &next,
+        json!({"modules":[{"id":bindings.region,"value":"ap-osaka-1"}]}),
+    )
+    .unwrap();
+    let after = vault.get_connection(output.id.parse().unwrap()).unwrap();
+    assert_eq!(
+        crate::oci::Credential::from_modules(&after.stored, &after.secrets)
+            .unwrap()
+            .config
+            .region,
+        "ap-osaka-1"
+    );
+    assert!(
+        update(
+            &vault,
+            &changed,
+            json!({"modules":[{"id":bindings.private_key,"value":"bad replacement"}]})
+        )
+        .is_err()
+    );
+    let converted = update(&vault, &changed, json!({"itemType":"custom","httpAuthType":"bearer","modules":[{"kind":"apiCredential","value":"synthetic token"}]})).unwrap();
+    assert!(converted.revision > changed.revision);
 }
+
 #[test]
 fn custom_modules_cross_item_ids_and_api_modes() {
     let (_dir, vault) = fixture();

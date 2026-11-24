@@ -22,7 +22,10 @@ use url::Url;
 use uuid::Uuid;
 
 const MAX_ACTIVITIES: usize = 3_000;
-const VAULT_VERSION: u8 = 15;
+const VAULT_VERSION: u8 = 16;
+#[cfg(test)]
+#[path = "oci_module_tests.rs"]
+mod oci_module_tests;
 #[cfg(test)]
 #[path = "vault_lifecycle_tests.rs"]
 mod lifecycle_tests;
@@ -95,6 +98,7 @@ impl Vault {
                 vault.with_exclusive_lock(|_| vault.write_document_unlocked(&document))?;
             } else {
                 vault.require_supported_version()?;
+                vault.migrate_oci_modules()?;
             }
             Ok(vault)
         })();
@@ -180,15 +184,65 @@ impl Vault {
         let bytes = fs::read(&self.inner.vault_path).context("Could not read vault")?;
         let document: VaultDocument =
             serde_json::from_slice(&bytes).context("Invalid vault file format")?;
-        if !matches!(document.version, 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | VAULT_VERSION) {
+        if !matches!(document.version, 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | VAULT_VERSION) {
             bail!(
-                "OpenKeylet supports vault versions 7 through 15; current file version is {}",
+                "OpenKeylet supports vault versions 7 through 16; current file version is {}",
                 document.version
             );
         }
         Ok(())
     }
 
+    fn migrate_oci_modules(&self) -> Result<()> {
+        self.with_exclusive_lock(|_| {
+            let raw: VaultDocument = serde_json::from_slice(&fs::read(&self.inner.vault_path)?)?;
+            if raw.version == VAULT_VERSION {
+                return Ok(());
+            }
+            let mut document = self.read_document_unlocked()?;
+            for stored in document
+                .connections
+                .iter_mut()
+                .chain(document.trash.iter_mut().map(|entry| &mut entry.connection))
+            {
+                let secrets: SecretBundle = self.inner.key.decrypt(&stored.encrypted_secrets)?;
+                if secrets.oci.is_none() {
+                    continue;
+                }
+                let mut input: ConnectionInput =
+                    serde_json::from_value(serde_json::to_value(stored.portable())?)?;
+                input.secrets = secrets;
+                migrate_legacy_oci_input(&mut input)?;
+                stored.modules = input.modules;
+                stored.oci_bindings = input.oci_bindings;
+                stored.secret = Some(SecretProfile {
+                    fields: module_fields(&stored.modules),
+                });
+                stored.encrypted_secrets = self.inner.key.encrypt(&input.secrets)?;
+            }
+            let backup = self
+                .inner
+                .data_dir
+                .join(format!("before-oci-modules-{}", Uuid::new_v4()));
+            fs::create_dir(&backup).context("Could not create OCI migration backup")?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&backup, fs::Permissions::from_mode(0o700))?;
+            }
+            fs::copy(&self.inner.vault_path, backup.join("vault.json"))
+                .context("Could not back up vault before OCI migration")?;
+            fs::copy(
+                self.inner.data_dir.join("master.key"),
+                backup.join("master.key"),
+            )
+            .context("Could not back up master key before OCI migration")?;
+            File::open(backup.join("vault.json"))?.sync_all()?;
+            File::open(backup.join("master.key"))?.sync_all()?;
+            document.version = VAULT_VERSION;
+            self.write_document_unlocked(&document)
+        })
+    }
     pub fn owner_pin_configured(&self) -> Result<bool> {
         Ok(self.read_document()?.owner_pin.is_some())
     }
@@ -492,19 +546,37 @@ impl Vault {
         expected_updated_at: Option<&str>,
         private_key: Option<(&str, &str)>,
     ) -> Result<PublicConnection> {
-        self.save_connection_inner(input, expected_updated_at, private_key, None)
+        self.save_connection_inner(input, expected_updated_at, private_key)
     }
 
-    #[cfg(any(feature = "gui", test))]
+    #[cfg(test)]
     pub(crate) fn save_oci_connection(
         &self,
-        input: ConnectionInput,
+        mut input: ConnectionInput,
         expected: Option<&str>,
         config: crate::oci::Config,
         key: Option<&str>,
-        ssh_key: Option<(&str, &str)>,
+        _ssh_key: Option<(&str, &str)>,
     ) -> Result<PublicConnection> {
-        self.save_connection_inner(input, expected, ssh_key, Some((config, key)))
+        let key = if let Some(key) = key {
+            key.to_owned()
+        } else {
+            let id = input.id.context("Import an OCI signing private key")?;
+            let old = self.get_connection(id)?;
+            crate::oci::Credential::from_modules(&old.stored, &old.secrets)?
+                .key_pem
+                .as_deref()
+                .unwrap_or_default()
+                .to_owned()
+        };
+        input.secrets.oci = Some(crate::oci::Credential::new(config.clone(), &key)?);
+        input.oci_bindings = None;
+        input.http_auth_type = crate::oci::AUTH_MODE.to_owned();
+        input.item_type = "api".to_owned();
+        input.modules.retain(|module| module.kind != "url");
+        push_module(&mut input.modules, "url", "", config.base_url()?.as_str());
+        migrate_legacy_oci_input(&mut input)?;
+        self.save_connection_inner(input, expected, None)
     }
 
     fn save_connection_inner(
@@ -512,11 +584,11 @@ impl Vault {
         input: ConnectionInput,
         expected_updated_at: Option<&str>,
         private_key: Option<(&str, &str)>,
-        oci: Option<(crate::oci::Config, Option<&str>)>,
     ) -> Result<PublicConnection> {
-        self.update_document_with_result(|document| self.save_connection_in_document(document, input, expected_updated_at, private_key, oci, false))
+        self.update_document_with_result(|document| {
+            self.save_connection_in_document(document, input, expected_updated_at, private_key)
+        })
     }
-
     pub(crate) fn decrypt_stored(&self, item: &StoredConnection) -> Result<SecretBundle> {
         self.inner.key.decrypt(&item.encrypted_secrets)
     }
@@ -527,8 +599,6 @@ impl Vault {
         mut input: ConnectionInput,
         expected_updated_at: Option<&str>,
         private_key: Option<(&str, &str)>,
-        oci: Option<(crate::oci::Config, Option<&str>)>,
-        preserve_oci: bool,
     ) -> Result<PublicConnection> {
             let existing_index = input.id.and_then(|id| {
                 document
@@ -558,53 +628,7 @@ impl Vault {
             } else {
                 SecretBundle::default()
             };
-            if let Some((config, key)) = oci {
-                let editing_oci = existing
-                    .as_ref()
-                    .is_none_or(|item| item.http_auth_type == crate::oci::AUTH_MODE);
-                if !editing_oci {
-                    bail!("Create a separate OCI API project");
-                }
-                config.validate()?;
-                if input.modules.iter().any(|module| module.kind == "url" && !module.alternate_values.is_empty()) {
-                    bail!("OCI URL is derived from its region and cannot have other addresses");
-                }
-                let base = config.base_url()?;
-                if let Some(key) = key {
-                    secrets.oci = Some(crate::oci::Credential::new(config, key)?);
-                } else {
-                    let credential = secrets
-                        .oci
-                        .as_mut()
-                        .filter(|key| key.is_configured())
-                        .context("Import an OCI signing private key")?;
-                    if credential.config.fingerprint != config.fingerprint
-                        || credential.config.user_ocid != config.user_ocid
-                        || credential.config.tenancy_ocid != config.tenancy_ocid
-                    {
-                        bail!("Reimport the OCI private key when changing its identity");
-                    }
-                    credential.config = config;
-                }
-                // Only the region-derived URL determines the signing origin.
-                input.modules.retain(|module| module.kind != "url");
-                push_module(&mut input.modules, "url", "", base.as_str());
-                input.item_type = "api".to_owned();
-                input.http_auth_type = crate::oci::AUTH_MODE.to_owned();
-                input.login_uris.clear();
-                input.auth_header.clear();
-                input.auth_location.clear();
-                input.auth_prefix.clear();
-                input.api_auth_headers.clear();
-                input.test_path.clear();
-                input.private_key_import_path.clear();
-            } else if !preserve_oci && (input.http_auth_type == crate::oci::AUTH_MODE
-                || existing
-                    .as_ref()
-                    .is_some_and(|item| item.http_auth_type == crate::oci::AUTH_MODE))
-            {
-                bail!("Edit OCI API projects using the OCI signing form");
-            }
+            anyhow::ensure!(input.secrets.oci.is_none(), "Legacy OCI configuration must be migrated before editing");
             let previous_password =
                 zeroize::Zeroizing::new(secrets.get("password").map(str::to_owned));
             if let Some(old) = &existing {
@@ -616,7 +640,7 @@ impl Vault {
                     }
                 }
             }
-            if !input.modules.is_empty() {
+            {
                 input.modules = normalize_modules(input.modules.clone())?;
                 if let Some(connection) = &existing {
                     let retained = input
@@ -631,6 +655,17 @@ impl Vault {
                         .filter(|name| !retained.contains(name))
                     {
                         input.remove_secret_names.push(removed.to_owned());
+                    }
+                }
+            }
+            if let Some(old) = &existing {
+                for module in &input.modules {
+                    if let Some(previous) = old.modules.iter().find(|previous| previous.id == module.id && previous.name != module.name && previous.kind == module.kind) {
+                        if let (Some(old_name), Some(new_name)) = (previous.secret_name(), module.secret_name()) {
+                            if input.secrets.get(new_name).is_none() {
+                                if let Some(value) = secrets.get(old_name) { input.secrets.named_secrets.insert(new_name.to_owned(), value.to_owned()); }
+                            }
+                        }
                     }
                 }
             }
@@ -669,7 +704,7 @@ impl Vault {
             {
                 bail!("Project name already exists; use a different name");
             }
-            if input.modules.is_empty() {
+            if input.modules.is_empty() && input.http_auth_type != crate::oci::AUTH_MODE {
                 bail!("Project must have at least one module");
             }
 
@@ -936,13 +971,10 @@ impl Vault {
             .connections
             .into_iter()
             .map(|connection| {
-                let mut secrets = self
+                let secrets = self
                     .inner
                     .key
                     .decrypt::<SecretBundle>(&connection.encrypted_secrets)?;
-                if let Some(oci) = &mut secrets.oci {
-                    oci.forget_key();
-                }
                 Ok((connection.portable(), secrets))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -950,13 +982,10 @@ impl Vault {
             .trash
             .into_iter()
             .map(|entry| {
-                let mut secrets = self
+                let secrets = self
                     .inner
                     .key
                     .decrypt::<SecretBundle>(&entry.connection.encrypted_secrets)?;
-                if let Some(oci) = &mut secrets.oci {
-                    oci.forget_key();
-                }
                 Ok(crate::model::PortableTrashItem {
                     deleted_at: entry.deleted_at,
                     connection: entry.connection.portable(),
@@ -1060,12 +1089,13 @@ impl Vault {
                     if let Some(mapped) = id_map.get(&id) { stored.ssh_jump_item_id = Some(*mapped); }
                     else { stored.ssh_jump_unresolved = true; }
                 }
+                let imported_secrets: SecretBundle = self.inner.key.decrypt(&stored.encrypted_secrets)?;
                 let mut duplicate = false;
                 for existing in document.trash.iter().map(|entry| &entry.connection) {
                     if same_item_name(&existing.name, &stored.name) {
                         let secrets: SecretBundle =
                             self.inner.key.decrypt(&existing.encrypted_secrets)?;
-                        if same_portable_content(existing, &secrets, &stored, &entry.secrets) {
+                        if same_portable_content(existing, &secrets, &stored, &imported_secrets) {
                             duplicate = true;
                             break;
                         }
@@ -1122,7 +1152,7 @@ impl Vault {
         let bytes = fs::read(&self.inner.vault_path).context("Could not read vault")?;
         let mut document: VaultDocument =
             serde_json::from_slice(&bytes).context("Invalid vault file format")?;
-        if !matches!(document.version, 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | VAULT_VERSION) {
+        if !matches!(document.version, 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | VAULT_VERSION) {
             bail!("Unsupported vault version {}", document.version);
         }
         document.version = VAULT_VERSION;
@@ -1198,6 +1228,115 @@ impl Vault {
     }
 }
 
+fn migrate_legacy_oci_input(input: &mut ConnectionInput) -> Result<()> {
+    let Some(credential) = input.secrets.oci.take() else {
+        return Ok(());
+    };
+    anyhow::ensure!(
+        input.oci_bindings.is_none(),
+        "Legacy OCI configuration conflicts with module bindings"
+    );
+    for module in &mut input.modules {
+        if module.id.is_nil() {
+            module.id = Uuid::new_v4();
+        }
+    }
+    let mut add = |name: &str, value: &str, visible: bool| {
+        let mut unique = name.to_owned();
+        let mut suffix = 2;
+        while input.modules.iter().any(|module| {
+            module
+                .secret_name()
+                .is_some_and(|name| normalized_field_name(name) == normalized_field_name(&unique))
+        }) || input
+            .secrets
+            .named_secrets
+            .keys()
+            .any(|name| normalized_field_name(name) == normalized_field_name(&unique))
+        {
+            unique = format!("{name}_{suffix}");
+            suffix += 1;
+        }
+        let id = Uuid::new_v4();
+        input.modules.push(ItemModule {
+            id,
+            kind: "customSecret".into(),
+            name: unique.clone(),
+            value: String::new(),
+            agent_visible: Some(visible),
+            alternate_values: Vec::new(),
+        });
+        if !value.is_empty() {
+            input.secrets.named_secrets.insert(unique, value.to_owned());
+        }
+        id
+    };
+    let region = add("region", &credential.config.region, true);
+    let tenancy = add("tenancy_ocid", &credential.config.tenancy_ocid, true);
+    let user = add("user_ocid", &credential.config.user_ocid, false);
+    let fingerprint = add("fingerprint", &credential.config.fingerprint, false);
+    let signing_key = add(
+        "oci_signing_private_key",
+        credential.key_pem.as_deref().unwrap_or_default(),
+        false,
+    );
+    if !input
+        .modules
+        .iter()
+        .any(|module| module.kind == "privateKey")
+    {
+        let module = input
+            .modules
+            .iter_mut()
+            .find(|module| module.id == signing_key)
+            .unwrap();
+        let value = input.secrets.named_secrets.get(&module.name).cloned();
+        input.secrets.named_secrets.remove(&module.name);
+        module.kind = "privateKey".to_owned();
+        module.name = "privateKey".to_owned();
+        input.secrets.private_key = value;
+    }
+    let url = if let Some(module) = input.modules.iter().find(|module| module.kind == "url") {
+        module.id
+    } else {
+        let id = Uuid::new_v4();
+        input.modules.push(ItemModule {
+            id,
+            kind: "url".into(),
+            name: String::new(),
+            value: credential.config.base_url()?.to_string(),
+            agent_visible: Some(true),
+            alternate_values: Vec::new(),
+        });
+        id
+    };
+    input.oci_bindings = Some(crate::model::OciModuleBindings {
+        region: Some(region),
+        service_url: Some(url),
+        tenancy_ocid: Some(tenancy),
+        user_ocid: Some(user),
+        fingerprint: Some(fingerprint),
+        private_key: Some(signing_key),
+    });
+    Ok(())
+}
+
+fn same_oci_bindings(left: &StoredConnection, right: &StoredConnection) -> bool {
+    let positions = |item: &StoredConnection| {
+        item.oci_bindings.as_ref().map(|binding| {
+            [
+                binding.region,
+                binding.service_url,
+                binding.tenancy_ocid,
+                binding.user_ocid,
+                binding.fingerprint,
+                binding.private_key,
+            ]
+            .map(|id| id.and_then(|id| item.modules.iter().position(|module| module.id == id)))
+        })
+    };
+    positions(left) == positions(right)
+}
 fn canonical_secret_module_name(kind: &str) -> Option<&str> {
     match kind {
         "username" => Some("username"),
@@ -1404,10 +1543,32 @@ pub(crate) fn normalize_connection(
     now: String,
 ) -> Result<StoredConnection> {
     crate::login_uri::validate(&input.login_uris)?;
-    if input.http_auth_type == crate::oci::AUTH_MODE && input.modules.iter().any(|module| module.kind == "url" && !module.alternate_values.is_empty()) {
-        bail!("OCI URL is derived from its region and cannot have other addresses");
-    }
     let modules = normalize_modules(input.modules)?;
+    let mut oci_bindings = input.oci_bindings;
+    if let Some(bindings) = &mut oci_bindings {
+        for binding in [
+            &mut bindings.region,
+            &mut bindings.service_url,
+            &mut bindings.tenancy_ocid,
+            &mut bindings.user_ocid,
+            &mut bindings.fingerprint,
+            &mut bindings.private_key,
+        ] {
+            if let Some(id) = *binding {
+                if !modules.iter().any(|module| module.id == id) {
+                    anyhow::ensure!(
+                        existing
+                            .is_some_and(|old| old.modules.iter().any(|module| module.id == id)),
+                        "OCI binding must reference a module in this project"
+                    );
+                    *binding = None;
+                }
+            }
+        }
+    }
+    if input.http_auth_type == crate::oci::AUTH_MODE {
+        crate::oci::validate_modules(&modules, secrets, oci_bindings.as_ref())?;
+    }
     let item_type = crate::item_types::normalize(&input.item_type, &modules)?;
 
     let id = existing
@@ -1423,7 +1584,14 @@ pub(crate) fn normalize_connection(
     let port = module_value(&modules, "port")
         .and_then(|value| value.parse::<u16>().ok())
         .unwrap_or(0);
-    let base_url = if let Some(raw) = module_value(&modules, "url") {
+    let service_url = if input.http_auth_type == crate::oci::AUTH_MODE {
+        oci_bindings
+            .as_ref()
+            .and_then(|bindings| crate::oci::binding_value(&modules, secrets, bindings.service_url))
+    } else {
+        module_value(&modules, "url")
+    };
+    let base_url = if let Some(raw) = service_url {
         let normalized = api_catalog::normalize_base_url(raw, "")?;
         let parsed = Url::parse(&normalized).context("Invalid API URL")?;
         if !matches!(parsed.scheme(), "http" | "https")
@@ -1447,19 +1615,26 @@ pub(crate) fn normalize_connection(
     }
     .to_owned();
     let requested_ssh_auth_type = if input.ssh_auth_type.is_empty() {
-        existing.map(|old| old.ssh_auth_type.as_str()).unwrap_or_default()
+        existing
+            .map(|old| old.ssh_auth_type.as_str())
+            .unwrap_or_default()
     } else {
-        if !matches!(input.ssh_auth_type.as_str(), "password" | "privateKey") { bail!("Invalid SSH authentication mode"); }
+        if !matches!(input.ssh_auth_type.as_str(), "password" | "privateKey") {
+            bail!("Invalid SSH authentication mode");
+        }
         &input.ssh_auth_type
     };
     // Manual edits can remove the selected credential. Preserve explicit choice only
     // while it remains usable; MCP validates its explicit choice before this layer.
     let ssh_auth_type = if module_secret_configured(&modules, secrets, requested_ssh_auth_type) {
         requested_ssh_auth_type.to_owned()
-    } else { inferred_ssh_auth_type };
+    } else {
+        inferred_ssh_auth_type
+    };
     let http_auth_type = input.http_auth_type.clone();
     let name = fallback_item_name(&input.name, id, &modules, secrets);
     Ok(StoredConnection {
+        oci_bindings,
         ssh_jump_item_id: input.ssh_jump_item_id,
         ssh_jump_unresolved: input.ssh_jump_unresolved,
         revision: existing.map_or(1, |old| old.revision.saturating_add(1)),
@@ -1501,7 +1676,8 @@ fn stored_from_portable(
     secrets: &SecretBundle,
     key: &MasterKey,
 ) -> Result<StoredConnection> {
-    let input = ConnectionInput {
+    let mut input = ConnectionInput {
+        oci_bindings: portable.oci_bindings.clone(),
         ssh_jump_item_id: portable.ssh_jump_item_id,
         ssh_jump_unresolved: portable.ssh_jump_unresolved,
         ssh_auth_type: portable.ssh_auth_type.clone(),
@@ -1524,19 +1700,17 @@ fn stored_from_portable(
         remove_secret_names: Vec::new(),
         secrets: secrets.clone(),
     };
+    migrate_legacy_oci_input(&mut input)?;
+    let secrets = input.secrets.clone();
     let mut stored = normalize_connection(
         input,
         None,
-        secrets,
+        &secrets,
         portable.private_key_name.clone(),
         portable.updated_at.clone(),
     )?;
     stored.created_at = portable.created_at.clone();
     stored.revision = portable.revision.max(1);
-    let mut secrets = secrets.clone();
-    if let Some(oci) = &mut secrets.oci {
-        oci.forget_key();
-    }
     stored.encrypted_secrets = key.encrypt(&secrets)?;
     Ok(stored)
 }
@@ -1547,7 +1721,8 @@ fn same_portable_content(
     right: &StoredConnection,
     right_secrets: &SecretBundle,
 ) -> bool {
-    if left.ssh_jump_item_id != right.ssh_jump_item_id
+    if !same_oci_bindings(left, right)
+        || left.ssh_jump_item_id != right.ssh_jump_item_id
         || left.ssh_jump_unresolved != right.ssh_jump_unresolved
         || left.login_uris != right.login_uris
         || !left.modules.iter().zip(&right.modules).all(|(a,b)| {
@@ -1653,6 +1828,8 @@ fn empty_envelope() -> crate::model::SecretEnvelope {
 }
 
 fn merge_secret_bundle(current: &mut SecretBundle, next: &SecretBundle) {
+    if next.private_key.as_ref().is_some_and(|value| !value.is_empty()) { current.private_key = next.private_key.clone(); }
+
     if next.password.as_ref().is_some_and(|v| !v.is_empty()) {
         current.password = next.password.clone();
     }
@@ -1859,6 +2036,7 @@ mod tests {
             .named_secrets
             .insert("apiCredential".into(), token.to_owned());
         ConnectionInput {
+            oci_bindings: None,
             ssh_jump_item_id: None,
             ssh_jump_unresolved: false,
             ssh_auth_type: String::new(),
@@ -1902,6 +2080,7 @@ mod tests {
             .named_secrets
             .insert("username".into(), "root".into());
         ConnectionInput {
+            oci_bindings: None,
             ssh_jump_item_id: None,
             ssh_jump_unresolved: false,
             ssh_auth_type: String::new(),
@@ -1977,7 +2156,7 @@ mod tests {
     }
 
     #[test]
-    fn v7_vault_upgrades_on_write_without_changing_secrets() {
+    fn v7_vault_upgrades_with_backup_without_changing_secrets() {
         let directory = tempdir().unwrap();
         let vault_dir = directory.path().join("vault");
         let vault = Vault::open(vault_dir.clone()).unwrap();
@@ -2015,7 +2194,8 @@ mod tests {
         let public = reopened.list_connections().unwrap();
         assert_eq!(public[0].capabilities, ["fill", "http"]);
         assert!(public[0].can_test);
-        assert_eq!(fs::read(&path).unwrap(), old_bytes);
+        let backup = fs::read_dir(&vault_dir).unwrap().flatten().find(|entry| entry.file_name().to_string_lossy().starts_with("before-oci-modules-")).unwrap();
+        assert_eq!(fs::read(backup.path().join("vault.json")).unwrap(), old_bytes);
         reopened.set_connection_enabled(saved.id, false).unwrap();
         let rewritten: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
@@ -2386,7 +2566,7 @@ mod tests {
         drop(vault);
 
         let error = Vault::open(vault_dir).err().expect("version 6 must fail");
-        assert!(format!("{error:#}").contains("supports vault versions 7 through 15"));
+        assert!(format!("{error:#}").contains("supports vault versions 7 through 16"));
     }
 
     #[test]
@@ -2552,6 +2732,7 @@ mod tests {
         let vault = Vault::open(vault_dir.clone()).unwrap();
         let saved = vault
             .save_connection(ConnectionInput {
+                oci_bindings: None,
                 ssh_jump_item_id: None,
                 ssh_jump_unresolved: false,
                 ssh_auth_type: String::new(),
@@ -2626,6 +2807,7 @@ mod tests {
             .named_secrets
             .insert("username".into(), "developer@example.test".into());
         let input = |id, secrets, remove_secret_names| ConnectionInput {
+            oci_bindings: None,
             ssh_jump_item_id: None,
             ssh_jump_unresolved: false,
             ssh_auth_type: String::new(),

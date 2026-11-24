@@ -354,9 +354,34 @@ pub struct PasswordHistoryEntry {
     pub changed_at: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OciModuleBindings {
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    pub region: Option<Uuid>,
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    pub service_url: Option<Uuid>,
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    pub tenancy_ocid: Option<Uuid>,
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    pub user_ocid: Option<Uuid>,
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    pub fingerprint: Option<Uuid>,
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    pub private_key: Option<Uuid>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredConnection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oci_bindings: Option<OciModuleBindings>,
     #[serde(default)]
     pub ssh_jump_item_id: Option<Uuid>,
     #[serde(default)]
@@ -424,6 +449,8 @@ pub struct ApiAuthHeader {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PortableConnection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oci_bindings: Option<OciModuleBindings>,
     #[serde(default)]
     pub ssh_jump_item_id: Option<Uuid>,
     #[serde(default)]
@@ -459,6 +486,8 @@ pub struct PortableConnection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicConnection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oci_bindings: Option<OciModuleBindings>,
     #[serde(default)]
     pub ssh_jump_item_id: Option<Uuid>,
     #[serde(default)]
@@ -504,6 +533,7 @@ pub struct PublicConnection {
 impl StoredConnection {
     pub fn portable(&self) -> PortableConnection {
         PortableConnection {
+            oci_bindings: self.oci_bindings.clone(),
             ssh_jump_item_id: self.ssh_jump_item_id,
             ssh_jump_unresolved: self.ssh_jump_unresolved,
             revision: self.revision,
@@ -546,17 +576,6 @@ impl StoredConnection {
     }
 
     pub fn capabilities(&self, secrets: &SecretBundle) -> Vec<String> {
-        if self.http_auth_type == crate::oci::AUTH_MODE {
-            return if secrets
-                .oci
-                .as_ref()
-                .is_some_and(crate::oci::Credential::is_configured)
-            {
-                vec!["http".to_owned()]
-            } else {
-                Vec::new()
-            };
-        }
         let can_fill = self.modules.iter().any(|module| {
             !crate::item_types::personal_field(&module.kind)
                 && module
@@ -565,6 +584,13 @@ impl StoredConnection {
                     .is_some()
         });
         let mut capabilities = Vec::new();
+        if self.http_auth_type == crate::oci::AUTH_MODE {
+            if can_fill {
+                capabilities.push("fill".to_owned());
+            }
+            capabilities.push("http".to_owned());
+            return capabilities;
+        }
         if can_fill {
             capabilities.push("fill".to_owned());
         }
@@ -587,11 +613,7 @@ impl StoredConnection {
 
     pub fn test_target(&self, secrets: &SecretBundle) -> Option<&'static str> {
         if self.http_auth_type == crate::oci::AUTH_MODE {
-            return secrets
-                .oci
-                .as_ref()
-                .filter(|credential| credential.is_configured())
-                .map(|_| "oci");
+            return Some("oci");
         }
         if self.has_capability(secrets, "ssh")
             && !self.host.trim().is_empty()
@@ -608,6 +630,7 @@ impl StoredConnection {
 
     pub fn public(&self, secrets: Option<&SecretBundle>) -> PublicConnection {
         PublicConnection {
+            oci_bindings: self.oci_bindings.clone(),
             ssh_jump_item_id: self.ssh_jump_item_id,
             ssh_jump_unresolved: self.ssh_jump_unresolved,
             revision: self.revision,
@@ -683,6 +706,8 @@ impl StoredConnection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oci_bindings: Option<OciModuleBindings>,
     #[serde(default)]
     pub ssh_jump_item_id: Option<Uuid>,
     #[serde(default)]

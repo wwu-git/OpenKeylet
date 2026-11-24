@@ -388,11 +388,7 @@ async fn execute_oci_request_with(
     if !connection.stored.enabled {
         bail!("This connection is disabled");
     }
-    let credential = connection
-        .secrets
-        .oci
-        .as_ref()
-        .context("Import an OCI signing private key")?;
+    let credential = crate::oci::Credential::from_modules(&connection.stored, &connection.secrets)?;
     let target = build_api_url(&connection.stored, &input.url, &input.query)
         .map_err(|_| anyhow::anyhow!("Invalid OCI request URL"))?;
     let method = Method::from_bytes(input.method.trim().to_ascii_uppercase().as_bytes())
@@ -433,7 +429,7 @@ async fn execute_oci_request_with(
     let date = chrono::Utc::now()
         .format("%a, %d %b %Y %H:%M:%S GMT")
         .to_string();
-    let (request, signature) = crate::oci::prepare(credential, request, &date)?;
+    let (request, signature) = crate::oci::prepare(&credential, request, &date)?;
     let mut response = client
         .execute(request)
         .await
@@ -1859,11 +1855,7 @@ pub async fn test_connection(vault: &Vault, connection: &DecryptedConnection) ->
 }
 
 fn oci_check_request(connection: &DecryptedConnection) -> Result<ApiRequestInput> {
-    let credential = connection
-        .secrets
-        .oci
-        .as_ref()
-        .context("Import an OCI signing private key")?;
+    let credential = crate::oci::Credential::from_modules(&connection.stored, &connection.secrets)?;
     Ok(ApiRequestInput {
         url: credential.config.base_url()?.join(crate::oci::INSTANCES_PATH)?.to_string(),
         method: "GET".to_owned(),
@@ -2086,6 +2078,7 @@ mod tests {
 
     fn stored(base_url: String) -> StoredConnection {
         StoredConnection {
+            oci_bindings: None,
             ssh_jump_item_id: None,
             ssh_jump_unresolved: false,
             revision: 0,
@@ -2907,9 +2900,8 @@ mod oci_transport_tests {
         assert_eq!(connection.stored.test_target(&connection.secrets), Some("oci"));
         assert!(connection.stored.public(Some(&connection.secrets)).can_test);
         let mut restored_secrets = connection.secrets.clone();
-        restored_secrets.oci.as_mut().unwrap().forget_key();
-        assert_eq!(connection.stored.test_target(&restored_secrets), None);
-        assert!(!connection.stored.public(Some(&restored_secrets)).can_test);
+        restored_secrets.private_key = None;
+        assert!(crate::oci::Credential::from_modules(&connection.stored, &restored_secrets).unwrap_err().to_string().contains("incomplete"));
         let base_request = ApiRequestInput {
             url: "instances?compartmentId=fixture".to_owned(),
             method: "GET".to_owned(),
