@@ -279,7 +279,9 @@ const api = {
   resetPair: () => invoke('reset_browser_pairing'),
   extensionFolder: () => invoke('open_browser_extension_folder'),
   exportBackup: (password) => invoke('export_backup', { password }),
-  importBackup: (password) => invoke('import_backup', { password }),
+  prepareBackupRestore: (id, password) => invoke('prepare_backup_restore', { id, password }),
+  commitBackupRestore: (id, selection) => invoke('commit_backup_restore', { id, selection }),
+  cancelBackupRestore: (id) => invoke('cancel_backup_restore', { id }),
   prepareImport: (format) => invoke('prepare_import', { format }),
   commitImport: (id) => invoke('commit_import', { id }),
   cancelImport: () => invoke('cancel_import'),
@@ -471,6 +473,7 @@ function renderOwnerLock() {
     if (!$('#migration-modal').classList.contains('hidden')) closeMigration();
     closeGenerator();
     finishBackupPassword(null);
+    closeBackupRestore();
     clearOwnerPlaintext();
     editorDrafts = [];
     renderDrafts();
@@ -2358,21 +2361,153 @@ async function exportBackup(button) {
   }
 }
 
+let backupRestore = null;
+
+function closeBackupRestore() {
+  const current = backupRestore;
+  backupRestore = null;
+  $('#backup-restore-modal').classList.add('hidden');
+  $('#backup-restore-items').replaceChildren();
+  $('#backup-restore-status').textContent = '';
+  $('#backup-restore-error').textContent = '';
+  $('#backup-restore-error').classList.add('hidden');
+  if (current) {
+    void api.cancelBackupRestore(current.id).catch(() => {});
+    if (ownerLockState.unlocked) current.button.focus();
+  }
+}
+
+function backupRestoreSelection() {
+  const selected = { active: [], trash: [] };
+  for (const box of $$('#backup-restore-items input:checked')) {
+    selected[box.dataset.group].push(Number(box.value));
+  }
+  return selected;
+}
+
+function updateBackupRestoreSelection() {
+  const selected = backupRestoreSelection();
+  const { active, trash } = backupRestore.preview;
+  const activeIds = new Set(selected.active);
+  const missing = [...selected.active.map(index => active[index]), ...selected.trash.map(index => trash[index])]
+    .find(row => row.jumpIndex != null && !activeIds.has(row.jumpIndex));
+  const count = selected.active.length + selected.trash.length;
+  $('#backup-restore-status').textContent = missing
+    ? localized(`「${missing.name}」需要同时选择跳板「${active[missing.jumpIndex].name}」。`, `Select jump host “${active[missing.jumpIndex].name}” for “${missing.name}”.`)
+    : localized(`已选择 ${count} 项`, `${count} selected`);
+  $('#backup-restore-confirm').disabled = Boolean(missing) || !count;
+}
+
+function showBackupRestore(preview) {
+  $('#backup-restore-title').textContent = localized('预览备份恢复', 'Preview backup restore');
+  $('#backup-restore-help').textContent = localized(
+    '仅恢复勾选的条目。内容不同的同名活动项目会以新名称添加。',
+    'Only checked entries will be restored. Active items with the same name and different content are added under a new name.');
+  for (const [key, label] of Object.entries({
+    all: localized('全选', 'Select all'),
+    none: localized('取消全选', 'Clear selection'),
+    cancel: localized('取消', 'Cancel'),
+    confirm: localized('恢复所选', 'Restore selected'),
+  })) $(`#backup-restore-${key}`).textContent = label;
+  const list = $('#backup-restore-items');
+  for (const [group, rows] of Object.entries({ active: preview.active, trash: preview.trash })) {
+    if (!rows.length) continue;
+    const fieldset = document.createElement('fieldset');
+    const legend = document.createElement('legend');
+    legend.textContent = group === 'active' ? localized('项目', 'Items') : localized('回收站', 'Trash');
+    fieldset.append(legend);
+    for (const row of rows) {
+      const label = document.createElement('label');
+      label.className = 'backup-restore-row';
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.value = String(row.index);
+      box.dataset.group = group;
+      const details = document.createElement('span');
+      details.textContent = row.name;
+      const metadata = document.createElement('small');
+      metadata.textContent = [itemTypeLabel(row.itemType), row.folder,
+        row.nameConflict && localized('同名项目，可能重命名', 'Name conflict, may be renamed'),
+        row.jumpUnresolved && localized('跳板引用未解析', 'Unresolved jump host'),
+        row.jumpIndex != null && localized(`跳板：${preview.active[row.jumpIndex].name}`, `Jump host: ${preview.active[row.jumpIndex].name}`),
+      ].filter(Boolean).join(' · ');
+      details.append(metadata);
+      label.append(box, details);
+      fieldset.append(label);
+    }
+    list.append(fieldset);
+  }
+  updateBackupRestoreSelection();
+  $('#backup-restore-modal').classList.remove('hidden');
+  $('#backup-restore-close').focus();
+}
+
 async function importBackup(button) {
+  if (backupRestore) return;
   button.disabled = true;
   try {
     const password = await askBackupPassword(false);
     if (password === null) return;
-    const result = await api.importBackup(password);
-    if (!result) return;
-    toastImportSummary(result);
-    await refresh();
+    const current = { id: crypto.randomUUID(), button };
+    backupRestore = current;
+    const result = await api.prepareBackupRestore(current.id, password);
+    if (backupRestore !== current) return;
+    if (!result) { closeBackupRestore(); return; }
+    current.preview = result.preview;
+    showBackupRestore(result.preview);
   } catch (error) {
+    closeBackupRestore();
     toast(cleanError(error), 'error');
   } finally {
     button.disabled = false;
   }
 }
+
+for (const key of ['close', 'cancel']) $(`#backup-restore-${key}`).onclick = closeBackupRestore;
+for (const key of ['all', 'none']) $(`#backup-restore-${key}`).onclick = () => {
+  for (const box of $$('#backup-restore-items input')) box.checked = key === 'all';
+  updateBackupRestoreSelection();
+};
+$('#backup-restore-items').onchange = updateBackupRestoreSelection;
+$('#backup-restore-confirm').onclick = async () => {
+  const current = backupRestore;
+  if (!current?.preview || current.committing) return;
+  current.committing = true;
+  const selection = backupRestoreSelection();
+  const modal = $('#backup-restore-modal');
+  const controls = $$('button:not(:disabled), input:not(:disabled)', modal);
+  controls.forEach(control => { control.disabled = true; });
+  $('#backup-restore-error').classList.add('hidden');
+  try {
+    const result = await api.commitBackupRestore(current.id, selection);
+    if (backupRestore !== current) return;
+    closeBackupRestore();
+    toastImportSummary(result);
+    await refresh();
+  } catch (error) {
+    if (backupRestore === current) {
+      $('#backup-restore-error').textContent = cleanError(error);
+      $('#backup-restore-error').classList.remove('hidden');
+    }
+  } finally {
+    controls.forEach(control => { control.disabled = false; });
+    current.committing = false;
+  }
+};
+$('#backup-restore-modal').addEventListener('keydown', event => {
+  if (event.key === 'Escape' && !backupRestore?.committing) {
+    event.preventDefault();
+    event.stopPropagation();
+    closeBackupRestore();
+  }
+  if (event.key !== 'Tab') return;
+  const controls = $$('button:not(:disabled), input:not(:disabled)', event.currentTarget);
+  const first = controls[0], last = controls.at(-1);
+  if (!controls.length || (event.shiftKey ? document.activeElement === first : document.activeElement === last)) {
+    event.preventDefault();
+    (event.shiftKey ? last : first)?.focus();
+  }
+});
 
 let vaultManagement = null, vaultManagementSequence = 0;
 function closeVaultManagement() {

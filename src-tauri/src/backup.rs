@@ -8,10 +8,16 @@ use atomic_write_file::AtomicWriteFile;
 use base64::{Engine, engine::general_purpose::STANDARD_NO_PAD};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::{fs, io::Write, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    io::{Read, Write},
+    path::Path,
+};
 use zeroize::{Zeroize, Zeroizing};
 
 const BACKUP_VERSION: u8 = 9;
+const MAX_BACKUP_BYTES: u64 = 64 * 1024 * 1024;
 const PASSWORD_BACKUP_AAD: &[u8] = b"openkeylet/password-backup/v1";
 
 #[derive(Serialize, Deserialize)]
@@ -65,15 +71,30 @@ pub fn export_protected(vault: &Vault, path: &Path, password: &str) -> Result<()
 }
 
 pub fn import_with_password(vault: &Vault, path: &Path, password: &str) -> Result<ImportSummary> {
+    prepare_restore(path, password)?.restore_all(vault)
+}
+
+pub fn prepare_restore(path: &Path, password: &str) -> Result<PreparedBackup> {
+    let file = fs::File::open(path).context("Unable to open backup")?;
+    let metadata = file.metadata().context("Unable to inspect backup")?;
+    ensure!(metadata.is_file(), "Choose a regular backup file");
+    ensure!(metadata.len() <= MAX_BACKUP_BYTES, "Backup exceeds 64 MiB");
+    let mut bytes = Zeroizing::new(Vec::new());
+    file.take(MAX_BACKUP_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .context("Unable to read backup")?;
     ensure!(
-        fs::metadata(path)?.len() <= 64 * 1024 * 1024,
+        bytes.len() as u64 <= MAX_BACKUP_BYTES,
         "Backup exceeds 64 MiB"
     );
-    let bytes = fs::read(path).context("Unable to read backup")?;
     let value: serde_json::Value =
         serde_json::from_slice(&bytes).context("Invalid backup format")?;
     if value["format"] != "openkeylet-password-backup" {
-        return import_from_file(vault, path);
+        let file: BackupFile =
+            serde_json::from_value(value).context("Invalid backup file format")?;
+        validate_backup_file(&file)?;
+        let plain = Zeroizing::new(decrypt_automatic_backup(&file)?);
+        return parse_backup_payload(&plain, Some(file.version));
     }
     let file: PasswordBackupFile = serde_json::from_value(value)?;
     ensure!(
@@ -88,7 +109,7 @@ pub fn import_with_password(vault: &Vault, path: &Path, password: &str) -> Resul
         decrypt_bytes(&key, &file.payload, PASSWORD_BACKUP_AAD)
             .context("Incorrect backup password or damaged backup")?,
     );
-    restore_cloud_snapshot(vault, &plain)
+    parse_backup_payload(&plain, None)
 }
 
 fn backup_aad(version: u8) -> Result<&'static [u8]> {
@@ -208,8 +229,7 @@ pub(crate) fn inspect_cloud_snapshot(plain: &[u8]) -> Result<(String, usize)> {
 }
 
 pub(crate) fn restore_cloud_snapshot(vault: &Vault, plain: &[u8]) -> Result<ImportSummary> {
-    let payload: BackupPayload = serde_json::from_slice(plain)?;
-    merge_backup_payload(vault, plain, payload.version)
+    parse_backup_payload(plain, None)?.restore_all(vault)
 }
 
 fn write_backup_file(path: &Path, file: &BackupFile) -> Result<()> {
@@ -289,13 +309,204 @@ fn decrypt_automatic_backup(file: &BackupFile) -> Result<Vec<u8>> {
 }
 
 fn merge_backup_payload(vault: &Vault, plain: &[u8], version: u8) -> Result<ImportSummary> {
-    if version == 3 {
+    parse_backup_payload(plain, Some(version))?.restore_all(vault)
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct PreparedBackup {
+    active: Vec<(PortableConnection, SecretBundle)>,
+    trash: Vec<crate::model::PortableTrashItem>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestorePreview {
+    pub active: Vec<RestorePreviewRow>,
+    pub trash: Vec<RestorePreviewRow>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestorePreviewRow {
+    pub index: usize,
+    pub name: String,
+    pub item_type: String,
+    pub folder: String,
+    pub deleted_at: Option<String>,
+    pub jump_index: Option<usize>,
+    pub jump_unresolved: bool,
+    pub name_conflict: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestoreSelection {
+    pub active: Vec<usize>,
+    pub trash: Vec<usize>,
+}
+
+impl PreparedBackup {
+    pub fn preview(&self, vault: &Vault) -> Result<RestorePreview> {
+        let active_indices = self.active_indices()?;
+        let active_names = vault
+            .list_connections()?
+            .into_iter()
+            .map(|item| name_key(&item.name))
+            .collect::<HashSet<_>>();
+        let trash_names = vault
+            .trash_items()?
+            .into_iter()
+            .map(|entry| name_key(&entry.item.name))
+            .collect::<HashSet<_>>();
+
+        let row = |index, item: &PortableConnection, deleted_at, names: &HashSet<String>| {
+            let jump_index = backup_jump_index(item, &active_indices);
+            let item_type = if item.item_type.is_empty() {
+                crate::item_types::infer(&item.modules).to_owned()
+            } else {
+                item.item_type.clone()
+            };
+            RestorePreviewRow {
+                index,
+                name: item.name.clone(),
+                item_type,
+                folder: item.folder.clone(),
+                deleted_at,
+                jump_index,
+                jump_unresolved: item.ssh_jump_unresolved
+                    || item.ssh_jump_item_id.is_some() && jump_index.is_none(),
+                name_conflict: names.contains(&name_key(&item.name)),
+            }
+        };
+        Ok(RestorePreview {
+            active: self
+                .active
+                .iter()
+                .enumerate()
+                .map(|(index, (item, _))| row(index, item, None, &active_names))
+                .collect(),
+            trash: self
+                .trash
+                .iter()
+                .enumerate()
+                .map(|(index, entry)| {
+                    row(
+                        index,
+                        &entry.connection,
+                        Some(entry.deleted_at.clone()),
+                        &trash_names,
+                    )
+                })
+                .collect(),
+        })
+    }
+
+    pub fn restore_selected(
+        self,
+        vault: &Vault,
+        selection: RestoreSelection,
+    ) -> Result<ImportSummary> {
+        let active = checked_indices(&selection.active, self.active.len())?;
+        let trash = checked_indices(&selection.trash, self.trash.len())?;
+        ensure!(
+            !active.is_empty() || !trash.is_empty(),
+            "Select at least one backup item"
+        );
+        let active_indices = self.active_indices()?;
+        let selected = self
+            .active
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| active.contains(index))
+            .map(|(_, (item, _))| item)
+            .chain(
+                self.trash
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| trash.contains(index))
+                    .map(|(_, entry)| &entry.connection),
+            );
+        for item in selected {
+            if let Some(jump) = backup_jump_index(item, &active_indices) {
+                ensure!(
+                    active.contains(&jump),
+                    "Select the SSH jump project required by {}",
+                    item.name
+                );
+            }
+        }
+        vault.merge_backup_entries(
+            self.active
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, entry)| active.contains(&index).then_some(entry))
+                .collect(),
+            self.trash
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, entry)| trash.contains(&index).then_some(entry))
+                .collect(),
+        )
+    }
+
+    fn restore_all(self, vault: &Vault) -> Result<ImportSummary> {
+        vault.merge_backup_entries(self.active, self.trash)
+    }
+
+    fn active_indices(&self) -> Result<HashMap<uuid::Uuid, usize>> {
+        let mut active = HashMap::new();
+        for (index, (item, _)) in self.active.iter().enumerate() {
+            ensure!(
+                active.insert(item.id, index).is_none(),
+                "Duplicate project IDs in backup"
+            );
+        }
+        let mut trash = HashSet::new();
+        for entry in &self.trash {
+            let id = entry.connection.id;
+            ensure!(
+                !active.contains_key(&id) && trash.insert(id),
+                "Duplicate project IDs in backup"
+            );
+        }
+        Ok(active)
+    }
+}
+
+fn name_key(name: &str) -> String {
+    name.trim().to_lowercase()
+}
+
+fn backup_jump_index(
+    item: &PortableConnection,
+    active_indices: &HashMap<uuid::Uuid, usize>,
+) -> Option<usize> {
+    if item.ssh_jump_unresolved {
+        return None;
+    }
+    item.ssh_jump_item_id
+        .and_then(|id| active_indices.get(&id).copied())
+}
+
+fn checked_indices(indices: &[usize], count: usize) -> Result<HashSet<usize>> {
+    let mut selection = HashSet::new();
+    for &index in indices {
+        ensure!(
+            index < count && selection.insert(index),
+            "Invalid backup item selection"
+        );
+    }
+    Ok(selection)
+}
+
+fn parse_backup_payload(plain: &[u8], expected_version: Option<u8>) -> Result<PreparedBackup> {
+    if expected_version == Some(3) {
         let payload: V3BackupPayload =
             serde_json::from_slice(plain).context("Backup contents are corrupted")?;
         if payload.format != "mcp-vault-portable" || payload.version != 3 {
             bail!("Unsupported backup content version");
         }
-        let mut connections = Vec::with_capacity(payload.connections.len());
+        let mut active = Vec::with_capacity(payload.connections.len());
         for mut item in payload.connections {
             if let Some(connection) = item.connection.as_object_mut() {
                 for obsolete in [
@@ -310,26 +521,32 @@ fn merge_backup_payload(vault: &Vault, plain: &[u8], version: u8) -> Result<Impo
             }
             let connection =
                 serde_json::from_value(item.connection).context("Invalid backup item format")?;
-            connections.push((connection, item.secrets));
+            active.push((connection, item.secrets));
         }
-        return vault.merge_connections(connections);
+        return Ok(PreparedBackup {
+            active,
+            trash: Vec::new(),
+        });
     }
     let payload: BackupPayload =
         serde_json::from_slice(plain).context("Backup contents are corrupted")?;
+    if expected_version.is_none() && payload.version == 3 {
+        return parse_backup_payload(plain, Some(3));
+    }
     if payload.format != "mcp-vault-portable"
         || !matches!(payload.version, 4 | 5 | 6 | 7 | 8 | BACKUP_VERSION)
-        || version != payload.version
+        || expected_version.is_some_and(|version| version != payload.version)
     {
         bail!("Unsupported backup content version");
     }
-    vault.merge_backup_entries(
-        payload
+    Ok(PreparedBackup {
+        active: payload
             .connections
             .into_iter()
             .map(|item| (item.connection, item.secrets))
             .collect(),
-        payload.trash,
-    )
+        trash: payload.trash,
+    })
 }
 
 #[cfg(test)]
@@ -361,6 +578,182 @@ mod tests {
             1
         );
     }
+    #[test]
+    fn protected_restore_previews_metadata_and_imports_only_selected_rows() {
+        let dir = tempdir().unwrap();
+        let source = Vault::open(dir.path().join("source")).unwrap();
+        let target = Vault::open(dir.path().join("target")).unwrap();
+        for name in ["Existing", "Restore this", "Skip this"] {
+            source
+                .save_connection(input(Uuid::new_v4(), name, "synthetic-token"))
+                .unwrap();
+        }
+        let deleted = source
+            .save_connection(input(Uuid::new_v4(), "In trash", "synthetic-token"))
+            .unwrap();
+        source.trash_connection(deleted.id, None).unwrap();
+        let unrelated = target
+            .save_connection(input(Uuid::new_v4(), "Existing", "local-token"))
+            .unwrap();
+        let path = dir.path().join("selection.mvault");
+        let password = "synthetic-backup-password";
+        export_protected(&source, &path, password).unwrap();
+
+        assert!(prepare_restore(&path, "wrong-password").is_err());
+        let prepared = prepare_restore(&path, password).unwrap();
+        let preview = prepared.preview(&target).unwrap();
+        assert_eq!(preview.active.len(), 3);
+        assert_eq!(preview.trash.len(), 1);
+        assert!(
+            preview
+                .active
+                .iter()
+                .find(|row| row.name == "Existing")
+                .unwrap()
+                .name_conflict
+        );
+        assert!(
+            !serde_json::to_string(&preview)
+                .unwrap()
+                .contains("synthetic-token")
+        );
+        assert_eq!(target.list_connections().unwrap().len(), 1);
+        assert!(target.trash_items().unwrap().is_empty());
+        let selected = preview
+            .active
+            .iter()
+            .find(|row| row.name == "Restore this")
+            .unwrap()
+            .index;
+
+        fs::write(&path, "{}").unwrap();
+        let result = prepared
+            .restore_selected(
+                &target,
+                RestoreSelection {
+                    active: vec![selected],
+                    trash: vec![preview.trash[0].index],
+                },
+            )
+            .unwrap();
+        assert_eq!((result.added, result.merged), (2, 0));
+        assert_eq!(
+            target
+                .list_connections()
+                .unwrap()
+                .into_iter()
+                .map(|item| item.name)
+                .collect::<Vec<_>>(),
+            ["Existing", "Restore this"]
+        );
+        assert_eq!(
+            target
+                .get_connection(unrelated.id)
+                .unwrap()
+                .secrets
+                .get("apiCredential"),
+            Some("local-token")
+        );
+        assert_eq!(target.trash_items().unwrap()[0].item.name, "In trash");
+    }
+
+    #[test]
+    fn selected_restore_requires_the_source_jump_and_remaps_conflicting_ids() {
+        fn ssh(name: &str) -> ConnectionInput {
+            serde_json::from_value(serde_json::json!({
+                "name": name, "itemType": "ssh", "sshAuthType": "password",
+                "modules": [
+                    {"kind":"host","value":"127.0.0.1"}, {"kind":"port","value":"22"},
+                    {"kind":"username"}, {"kind":"password"}
+                ],
+                "secrets": {"password":"synthetic-password", "namedSecrets":{"username":"fixture"}}
+            }))
+            .unwrap()
+        }
+
+        let dir = tempdir().unwrap();
+        let source = Vault::open(dir.path().join("source")).unwrap();
+        let target = Vault::open(dir.path().join("target")).unwrap();
+        let jump = source.save_connection(ssh("Jump")).unwrap();
+        let mut destination = ssh("Destination");
+        destination.ssh_jump_item_id = Some(jump.id);
+        let destination = source.save_connection(destination).unwrap();
+        let mut deleted = ssh("Deleted destination");
+        deleted.ssh_jump_item_id = Some(jump.id);
+        let deleted = source.save_connection(deleted).unwrap();
+        source.trash_connection(deleted.id, None).unwrap();
+        let mut local = ssh("Jump");
+        local.id = Some(jump.id);
+        local.description = "existing local jump".into();
+        target.save_connection(local).unwrap();
+
+        let path = dir.path().join("legacy.mvault");
+        export_to_file(&source, &path).unwrap();
+        let prepared = prepare_restore(&path, "").unwrap();
+        let preview = prepared.preview(&target).unwrap();
+        let row = preview
+            .active
+            .iter()
+            .find(|row| row.name == "Destination")
+            .unwrap();
+        let jump_index = row.jump_index.unwrap();
+        assert_eq!(preview.active[jump_index].name, "Jump");
+        assert_eq!(preview.trash[0].jump_index, Some(jump_index));
+
+        for selection in [
+            RestoreSelection {
+                active: vec![],
+                trash: vec![],
+            },
+            RestoreSelection {
+                active: vec![usize::MAX],
+                trash: vec![],
+            },
+            RestoreSelection {
+                active: vec![jump_index, jump_index],
+                trash: vec![],
+            },
+            RestoreSelection {
+                active: vec![row.index],
+                trash: vec![],
+            },
+            RestoreSelection {
+                active: vec![],
+                trash: vec![0],
+            },
+        ] {
+            assert!(
+                prepare_restore(&path, "")
+                    .unwrap()
+                    .restore_selected(&target, selection)
+                    .is_err()
+            );
+        }
+        assert_eq!(target.list_connections().unwrap().len(), 1);
+        assert!(target.trash_items().unwrap().is_empty());
+        assert_eq!(
+            prepared
+                .restore_selected(
+                    &target,
+                    RestoreSelection {
+                        active: vec![jump_index, row.index],
+                        trash: vec![0],
+                    }
+                )
+                .unwrap()
+                .added,
+            3
+        );
+        let destination = target.get_connection(destination.id).unwrap();
+        let restored_jump = target.ssh_jump_connection(&destination).unwrap().unwrap();
+        assert_ne!(restored_jump.stored.id, jump.id);
+        assert_eq!(restored_jump.stored.name, "Jump(2)");
+        assert_eq!(
+            target.trash_items().unwrap()[0].item.ssh_jump_item_id,
+            Some(restored_jump.stored.id)
+        );
+    }
+
     #[test]
     fn older_v4_v5_and_v8_backups_import_without_a_password() {
         let d = tempdir().unwrap();

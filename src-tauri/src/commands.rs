@@ -55,12 +55,27 @@ struct PendingImport {
     encrypted: crate::model::SecretEnvelope,
 }
 
+enum BackupRestoreState {
+    Preparing(Uuid),
+    Ready(PendingImport),
+}
+
+impl BackupRestoreState {
+    fn matches(&self, id: Uuid) -> bool {
+        match self {
+            Self::Preparing(current) => *current == id,
+            Self::Ready(pending) => pending.id == id.to_string(),
+        }
+    }
+}
+
 #[derive(Default)]
 struct OwnerState {
     session: OwnerSession,
     pending_private_key: Option<PendingPrivateKey>,
     pending_oci_key: Option<(Uuid, zeroize::Zeroizing<String>)>,
     pending_import: Option<PendingImport>,
+    pending_backup: Option<BackupRestoreState>,
 }
 
 impl OwnerState {
@@ -69,6 +84,7 @@ impl OwnerState {
         self.pending_private_key = None;
         self.pending_oci_key = None;
         self.pending_import = None;
+        self.pending_backup = None;
         runtime.clipboard.clear_on_lock(&runtime.app);
     }
 }
@@ -1287,12 +1303,17 @@ async fn github_backup_help(app: AppHandle, page: String) -> Result<(), String> 
 }
 
 #[tauri::command]
-async fn import_backup(
+async fn prepare_backup_restore(
     app: AppHandle,
     runtime: State<'_, AppRuntime>,
     password: String,
-) -> Result<Option<ImportSummary>, String> {
-    let epoch = runtime.owner_epoch().await?;
+    id: Uuid,
+) -> Result<Option<serde_json::Value>, String> {
+    let epoch = {
+        let mut owner = runtime.authorized_owner().await?;
+        owner.pending_backup = Some(BackupRestoreState::Preparing(id));
+        owner.session.epoch()
+    };
     let password = zeroize::Zeroizing::new(password);
     let selected = app
         .dialog()
@@ -1302,12 +1323,56 @@ async fn import_backup(
     let Some(path) = selected else {
         return Ok(None);
     };
-    let _owner = runtime.same_owner(epoch).await?;
+    drop(runtime.same_owner(epoch).await?);
     let path = path.into_path().map_err(command_error)?;
-    let summary =
-        backup::import_with_password(&runtime.vault, &path, &password).map_err(command_error)?;
+    let prepared = tauri::async_runtime::spawn_blocking(move || backup::prepare_restore(&path, &password))
+        .await
+        .map_err(command_error)?
+        .map_err(command_error)?;
+    let mut owner = runtime.same_owner(epoch).await?;
+    if !matches!(owner.pending_backup, Some(BackupRestoreState::Preparing(current)) if current == id) {
+        return Err("Backup preview changed; choose the file again".into());
+    }
+    let preview = prepared.preview(&runtime.vault).map_err(command_error)?;
+    owner.pending_backup = Some(BackupRestoreState::Ready(PendingImport {
+        id: id.to_string(),
+        created: Instant::now(),
+        encrypted: runtime.vault.protect_local_state(&prepared).map_err(command_error)?,
+    }));
+    Ok(Some(serde_json::json!({ "id": id, "preview": preview })))
+}
+
+#[tauri::command]
+async fn commit_backup_restore(
+    app: AppHandle,
+    runtime: State<'_, AppRuntime>,
+    id: Uuid,
+    selection: backup::RestoreSelection,
+) -> Result<ImportSummary, String> {
+    let mut owner = runtime.authorized_owner().await?;
+    let slot = &mut owner.pending_backup;
+    let Some(BackupRestoreState::Ready(pending)) = slot.as_ref().filter(|state| state.matches(id)) else {
+        return Err("Backup preview changed; choose the file again".into());
+    };
+    if pending.created.elapsed().as_secs() >= 300 {
+        *slot = None;
+        return Err("Backup preview expired; choose the file again".into());
+    }
+    let prepared: backup::PreparedBackup = runtime.vault
+        .unprotect_local_state(&pending.encrypted).map_err(command_error)?;
+    let summary = prepared.restore_selected(&runtime.vault, selection).map_err(command_error)?;
+    *slot = None;
     emit_changed(&app);
-    Ok(Some(summary))
+    Ok(summary)
+}
+
+#[tauri::command]
+async fn cancel_backup_restore(runtime: State<'_, AppRuntime>, id: Uuid) -> Result<(), String> {
+    let mut owner = runtime.owner.lock().await;
+    if owner.pending_backup.as_ref().is_some_and(|pending| pending.matches(id)) {
+        owner.pending_backup = None;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1720,7 +1785,9 @@ pub fn run_gui() -> Result<()> {
             drag_browser_extension,
             export_backup,
             generate_password,
-            import_backup,
+            prepare_backup_restore,
+            commit_backup_restore,
+            cancel_backup_restore,
             prepare_import,
             commit_import,
             cancel_import,

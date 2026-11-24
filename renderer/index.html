@@ -387,6 +387,19 @@
         </form>
       </div>
     </div>
+    <div class="modal-backdrop hidden" id="backup-restore-modal" role="dialog" aria-modal="true" aria-labelledby="backup-restore-title">
+      <div class="modal-card generator-card">
+        <div class="modal-header"><h2 id="backup-restore-title"></h2><button class="icon-button" id="backup-restore-close" type="button" aria-label="Close">×</button></div>
+        <div class="generator-body migration-body">
+          <p id="backup-restore-help"></p>
+          <div class="button-row"><button class="button" id="backup-restore-all" type="button"></button><button class="button" id="backup-restore-none" type="button"></button></div>
+          <div id="backup-restore-items"></div>
+          <p id="backup-restore-status" role="status"></p>
+          <p id="backup-restore-error" class="hidden" role="alert"></p>
+          <div class="button-row"><button class="button" id="backup-restore-cancel" type="button"></button><button class="button primary" id="backup-restore-confirm" type="button" disabled></button></div>
+        </div>
+      </div>
+    </div>
     <div class="modal-backdrop hidden" id="migration-modal" role="dialog" aria-modal="true" aria-labelledby="migration-title">
       <div class="modal-card generator-card">
         <div class="modal-header"><h2 id="migration-title">迁入密码库 / Import vault</h2><button class="icon-button" id="migration-close" type="button" aria-label="Close">×</button></div>

@@ -50,7 +50,13 @@ try {
       if(command==="quick_pair_browser") {fixture.pairings.push(args.port);if(fixture.failPairing)throw Error("Pairing failed");state.settings.browserEnabled=true;state.settings.browserPort=args.port;return;}
       if(command==="open_chromium_browser") {fixture.browserOpens++;if(fixture.failBrowser)throw Error("Browser failed");return;}
       if(command==="export_backup") {fixture.exports.push(args.password);return "fixture.mvault";}
-      if(command==="import_backup") return {added:0,merged:0};
+      if(command==="prepare_backup_restore") return {id:args.id,preview:{active:[
+        {index:0,name:"Synthetic jump",itemType:"ssh"},
+        {index:1,name:"Synthetic target",itemType:"ssh",jumpIndex:0},
+        {index:2,name:"Synthetic note",itemType:"secureNote",nameConflict:true},
+      ],trash:[{index:0,name:"Synthetic deleted item",itemType:"login"}]}};
+      if(command==="commit_backup_restore") { (fixture.restores ??= []).push(args.selection); return {added:2,merged:0}; }
+      if(command==="cancel_backup_restore") { (fixture.restoreCancels ??= []).push(args.id); return; }
       if(command==="prepare_import") return {id:"fixture-import",preview:{total:4,types:{login:1,card:1,identity:1,secureNote:1},passkeys:1,skippedDeleted:1,warnings:["defaultDomainMatch","passwordHistory"]}};
       if(command==="commit_import") {fixture.imports.push(args.id);return {added:4,merged:0};}
       if(command==="owner_secret_view") return {fields:[]};
@@ -440,6 +446,31 @@ try {
   assert.equal(await page.evaluate(()=>fixture.exports[0]),"synthetic-test-password");
   assert.equal(await page.locator("#backup-password").inputValue(),"");
   await page.setViewportSize({width:460,height:690});
+  async function openRestorePreview() {
+    await page.locator("#header-import-backup-button").click();
+    await page.locator('#backup-password-form button[type="submit"]').click();
+    await page.locator("#backup-restore-modal").waitFor();
+  }
+  await openRestorePreview();
+  const restore = page.locator("#backup-restore-modal");
+  const confirmRestore = restore.locator("#backup-restore-confirm");
+  assert.equal(await confirmRestore.isDisabled(), true);
+  await restore.getByRole("checkbox", { name: /Synthetic target/ }).check();
+  assert.equal(await confirmRestore.isDisabled(), true);
+  assert.match(await restore.locator('[role="status"]').textContent(), /Synthetic jump/);
+  await restore.getByRole("checkbox", { name: /^Synthetic jump/ }).check();
+  assert.equal(await confirmRestore.isEnabled(), true);
+  await page.screenshot({ path: path.join(artifacts, "backup-restore-preview.png") });
+  await restore.locator("#backup-restore-cancel").click();
+  await restore.waitFor({ state: "hidden" });
+  assert.equal(await page.evaluate(() => fixture.restores?.length ?? 0), 0);
+  assert.equal(await page.evaluate(() => fixture.restoreCancels.length), 1);
+  await openRestorePreview();
+  await restore.getByRole("checkbox", { name: /Synthetic note/ }).check();
+  await restore.getByRole("checkbox", { name: /Synthetic deleted item/ }).check();
+  await confirmRestore.click();
+  await restore.waitFor({ state: "hidden" });
+  assert.deepEqual(await page.evaluate(() => fixture.restores), [{ active: [2], trash: [0] }]);
   await page.locator("#migration-open").click();
   await page.locator("#migration-select").click();
   await page.locator("#migration-confirm").waitFor({state:"visible"});
