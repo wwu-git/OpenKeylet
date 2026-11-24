@@ -22,6 +22,7 @@ struct TestServer {
     forward_port: Option<u16>,
     allow_forward: bool,
     public: ssh_key::PublicKey,
+    certificate_authority: Option<ssh_key::PublicKey>,
 }
 struct TestHandler {
     server: TestServer,
@@ -85,6 +86,25 @@ impl server::Handler for TestHandler {
                 server::Auth::reject()
             },
         )
+    }
+    async fn auth_openssh_certificate(
+        &mut self,
+        user: &str,
+        certificate: &ssh_key::Certificate,
+    ) -> Result<server::Auth> {
+        self.server.auth.fetch_add(1, Ordering::SeqCst);
+        let expected_user = if self.server.forward_port.is_some() { "jump-user" } else { "target-user" };
+        let expected_key = if self.server.forward_port.is_some() { key(4) } else { key(3) };
+        let trusted = self.server.certificate_authority.as_ref().is_some_and(|ca| {
+            let fingerprint = ca.fingerprint(ssh_key::HashAlg::Sha256);
+            certificate.validate_at(chrono::Utc::now().timestamp() as u64, [&fingerprint]).is_ok()
+        });
+        Ok(if trusted && user == expected_user
+            && certificate.cert_type() == ssh_key::certificate::CertType::User
+            && certificate.public_key() == expected_key.public_key().key_data()
+            && certificate.valid_principals().iter().any(|principal| principal == "service-principal")
+            && certificate.critical_options().is_empty()
+        { server::Auth::Accept } else { server::Auth::reject() })
     }
     async fn channel_open_direct_tcpip(
         &mut self,
@@ -210,6 +230,16 @@ async fn start(
     forward_port: Option<u16>,
     allow_forward: bool,
 ) -> (u16, TestServer, tokio::task::JoinHandle<()>) {
+    start_with_certificates(seed, forward_port, allow_forward, None, None).await
+}
+
+async fn start_with_certificates(
+    seed: u8,
+    forward_port: Option<u16>,
+    allow_forward: bool,
+    host_certificate: Option<ssh_key::Certificate>,
+    certificate_authority: Option<ssh_key::PublicKey>,
+) -> (u16, TestServer, tokio::task::JoinHandle<()>) {
     let mut server = TestServer {
         auth: Default::default(),
         active: Default::default(),
@@ -217,12 +247,14 @@ async fn start(
         forward_port,
         allow_forward,
         public: key(3).public_key().clone(),
+        certificate_authority,
     };
     let copy = server.clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let config = Arc::new(server::Config {
         keys: vec![key(seed)],
+        certificates: host_certificate.into_iter().collect(),
         ..Default::default()
     });
     let task = tokio::spawn(async move {
@@ -345,7 +377,7 @@ async fn pinned_plain_key_does_not_implicitly_trust_a_host_certificate() {
         observed: Default::default(),
     };
     assert!(!client::Handler::check_server_key(&mut handler, &certificate.into()).await.unwrap());
-    assert!(handler.observed.lock().unwrap().is_none());
+    assert!(handler.observed.lock().unwrap().as_ref().unwrap().rejection.is_some());
 }
 
 #[tokio::test]
@@ -760,3 +792,6 @@ async fn jump_and_target_secrets_are_redacted_together_longest_first() {
         fixture.closed().await;
     }
 }
+
+#[path = "ssh_certificate_tests.rs"]
+mod certificate_tests;

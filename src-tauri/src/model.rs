@@ -23,6 +23,8 @@ pub struct OwnerPinVerifier {
 #[serde(rename_all = "camelCase")]
 #[serde(default)]
 pub struct Settings {
+    pub agent_signing_enabled: bool,
+    pub agent_signing_grants: Vec<SigningGrant>,
     pub agent_write_enabled: bool,
     pub agent_write_folders: Vec<String>,
     pub language: String,
@@ -52,6 +54,8 @@ impl Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            agent_signing_enabled: false,
+            agent_signing_grants: Vec::new(),
             agent_write_enabled: false,
             agent_write_folders: Vec::new(),
             language: "en".to_owned(),
@@ -381,6 +385,8 @@ pub struct OciModuleBindings {
 #[serde(rename_all = "camelCase")]
 pub struct StoredConnection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate_authority: Option<CertificateAuthorityBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oci_bindings: Option<OciModuleBindings>,
     #[serde(default)]
     pub ssh_jump_item_id: Option<Uuid>,
@@ -450,6 +456,8 @@ pub struct ApiAuthHeader {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PortableConnection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate_authority: Option<CertificateAuthorityBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oci_bindings: Option<OciModuleBindings>,
     #[serde(default)]
     pub ssh_jump_item_id: Option<Uuid>,
@@ -486,6 +494,8 @@ pub struct PortableConnection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicConnection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate_authority: Option<CertificateAuthorityBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oci_bindings: Option<OciModuleBindings>,
     #[serde(default)]
@@ -533,6 +543,7 @@ pub struct PublicConnection {
 impl StoredConnection {
     pub fn portable(&self) -> PortableConnection {
         PortableConnection {
+            certificate_authority: self.certificate_authority.clone(),
             oci_bindings: self.oci_bindings.clone(),
             ssh_jump_item_id: self.ssh_jump_item_id,
             ssh_jump_unresolved: self.ssh_jump_unresolved,
@@ -630,6 +641,7 @@ impl StoredConnection {
 
     pub fn public(&self, secrets: Option<&SecretBundle>) -> PublicConnection {
         PublicConnection {
+            certificate_authority: self.certificate_authority.clone(),
             oci_bindings: self.oci_bindings.clone(),
             ssh_jump_item_id: self.ssh_jump_item_id,
             ssh_jump_unresolved: self.ssh_jump_unresolved,
@@ -706,6 +718,8 @@ impl StoredConnection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate_authority: Option<CertificateAuthorityBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oci_bindings: Option<OciModuleBindings>,
     #[serde(default)]
@@ -784,6 +798,8 @@ pub struct NewActivity {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultDocument {
+    #[serde(default)]
+    pub certificate_issuances: Vec<CertificateIssuanceRecord>,
     #[serde(default)]
     pub ssh_host_trust: Vec<SshHostTrust>,
     pub version: u8,
@@ -976,8 +992,51 @@ mod tests {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SshHostTrust {
+    #[serde(default)]
+    pub kind: SshHostTrustKind,
     pub item_id: Uuid,
     pub host: String,
     pub port: u16,
     pub fingerprint: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SshHostTrustKind { #[default] HostKey, CertificateAuthority }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum CertificateAuthorityKind { Ssh, Tls }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CertificateAuthorityBinding {
+    pub kind: CertificateAuthorityKind,
+    #[schemars(with = "String")]
+    pub private_key: Uuid,
+    #[schemars(with = "Option<String>")]
+    pub ca_certificate: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SigningGrant {
+    #[schemars(with = "String")]
+    pub item_id: Uuid,
+    pub binding: CertificateAuthorityBinding,
+    pub issuer_identity: crate::certificates::IssuerIdentity,
+    pub kinds: Vec<crate::certificates::CertificateKind>,
+    pub max_ttl_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CertificateIssuanceRecord {
+    pub request_id: Uuid,
+    pub issuer_item_id: Uuid,
+    pub issuer_identity: crate::certificates::IssuerIdentity,
+    pub request_digest: String,
+    pub serial: String,
+    pub encrypted_result: SecretEnvelope,
+    pub created_at: String,
 }

@@ -409,6 +409,7 @@ mod tests {
             .named_secrets
             .insert("apiCredential".into(), token.to_owned());
         ConnectionInput {
+            certificate_authority: None,
             oci_bindings: None,
             ssh_jump_item_id: None,
             ssh_jump_unresolved: false,

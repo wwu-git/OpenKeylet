@@ -209,14 +209,14 @@ impl Vault {
             enabled:settings.mcp_writes_enabled(), folders:settings.agent_write_folders,
             operations:vec!["create".into(),"update".into(),"move via update".into()],
             item_types:vec!["ssh".into(),"api".into(),"login".into(),"custom".into()],
-            modules:["host","port","username","password","privateKey","passphrase","url","apiCredential","totp","customSecret"].map(str::to_owned).to_vec(),
-            ssh_auth_types:vec!["password".into(),"privateKey".into()], http_auth_types:vec!["bearer".into(),"apiKey".into(),"basic".into(),"oci-signature".into()],
+            modules:["host","port","username","password","privateKey","passphrase","url","apiCredential","totp","customSecret","publicKey","sshCertificate","certificate","csr","caCertificate"].map(str::to_owned).to_vec(),
+            ssh_auth_types:vec!["password".into(),"privateKey".into(),"certificate".into()], http_auth_types:vec!["bearer".into(),"apiKey".into(),"basic".into(),"oci-signature".into()],
             rules:vec![
                 "sshJumpItemId selects an existing enabled direct SSH project. Update omits it to preserve or uses null to clear. Single-hop only; host trust is device-local and cannot be modified through MCP.".into(),
                 "Create requires name, itemType, folder and modules; update requires item ID and expectedRevision. Omitted fields are preserved.".into(),
                 "Host and url modules use value as the default address and alternateValues as other addresses. Omitted alternateValues is preserved; [] clears it. To switch defaults, submit the new value and remaining addresses together. No automatic failover. SSH addresses share the project port and credentials.".into(),
                 "New modules require kind and value; updates require module ID. port is an integer 1..65535; other values are strings. customSecret also requires a unique name.".into(),
-                "SSH requires username plus password/privateKey and explicit sshAuthType. API requires url plus explicit httpAuthType: bearer/apiKey use apiCredential; basic uses username/password; apiKey also requires authHeader.".into(),
+                "SSH requires username plus password/privateKey and explicit sshAuthType; certificate authentication also needs one sshCertificate matching privateKey. CA registration and signing grants are owner-only and cannot be changed through MCP writing. API requires url plus explicit httpAuthType: bearer/apiKey use apiCredential; basic uses username/password; apiKey also requires authHeader.".into(),
                 "New secrets are hidden. Cannot change visibility, delete items/modules, or configure write permissions. Never repeat submitted secrets.".into(),
                 "Moves require both current and destination folders. Revision conflicts require a fresh query; never automatically replay stale writes.".into(),
                 "Encrypted private keys require their passphrase in the same request. Unencrypted replacements clear the old passphrase.".into(),
@@ -340,7 +340,7 @@ fn set_auth(
 ) -> Result<()> {
     if let Some(mode) = ssh {
         ensure!(
-            matches!(mode.as_str(), "password" | "privateKey"),
+            matches!(mode.as_str(), "password" | "privateKey" | "certificate"),
             "Invalid SSH authentication mode"
         );
         input.ssh_auth_type = mode;
@@ -401,6 +401,7 @@ fn apply_modules(input: &mut ConnectionInput, patches: &[ModulePatch]) -> Result
                         | "apiCredential"
                         | "totp"
                         | "customSecret"
+                        | "publicKey" | "sshCertificate" | "certificate" | "csr" | "caCertificate"
                 ),
                 "Unsupported module kind"
             );
@@ -558,9 +559,9 @@ fn validate_item(input: &ConnectionInput, oci: bool) -> Result<()> {
     let has = |name: &str| input.secrets.get(name).is_some_and(|s| !s.is_empty());
     if input.item_type == "ssh" {
         ensure!(
-            matches!(input.ssh_auth_type.as_str(), "password" | "privateKey")
+            matches!(input.ssh_auth_type.as_str(), "password" | "privateKey" | "certificate")
                 && has("username")
-                && has(&input.ssh_auth_type),
+                && if input.ssh_auth_type == "certificate" { has("privateKey") && input.modules.iter().filter(|module| module.kind == "sshCertificate" && !module.value.trim().is_empty()).count() == 1 } else { has(&input.ssh_auth_type) },
             "SSH requires an explicit authentication mode, username and its credential"
         );
         ensure!(

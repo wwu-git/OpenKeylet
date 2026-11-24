@@ -22,7 +22,10 @@ use url::Url;
 use uuid::Uuid;
 
 const MAX_ACTIVITIES: usize = 3_000;
-const VAULT_VERSION: u8 = 16;
+const VAULT_VERSION: u8 = 17;
+#[path = "vault_certificates.rs"]
+mod certificates;
+pub use certificates::{CertificateActor, CertificateCapabilities, CertificateAuthorityStatus, SigningPermissionChange};
 #[cfg(test)]
 #[path = "oci_module_tests.rs"]
 mod oci_module_tests;
@@ -35,6 +38,10 @@ mod ssh_jump_tests;
 #[cfg(test)]
 #[path = "multi_address_tests.rs"]
 mod multi_address_tests;
+
+#[cfg(test)]
+#[path = "vault_certificate_tests.rs"]
+mod certificate_tests;
 
 #[derive(Clone)]
 pub struct Vault {
@@ -86,6 +93,7 @@ impl Vault {
             if !vault.inner.vault_path.exists() {
                 let document = VaultDocument {
                     version: VAULT_VERSION,
+                    certificate_issuances: Vec::new(),
                     ssh_host_trust: Vec::new(),
                     settings: Settings::default(),
                     browser_bridge_secret: None,
@@ -124,7 +132,7 @@ impl Vault {
             anyhow::ensure!(document.connections.iter().any(|item| item.id == item_id), "SSH project unavailable");
             document.ssh_host_trust.retain(|entry| entry.item_id != item_id || entry.host != host || entry.port != port);
             if let Some(fingerprint) = fingerprint {
-                document.ssh_host_trust.push(crate::model::SshHostTrust { item_id, host, port, fingerprint: fingerprint.to_owned() });
+                document.ssh_host_trust.push(crate::model::SshHostTrust { kind: crate::model::SshHostTrustKind::HostKey, item_id, host, port, fingerprint: fingerprint.to_owned() });
             }
             Ok(())
         })
@@ -184,9 +192,9 @@ impl Vault {
         let bytes = fs::read(&self.inner.vault_path).context("Could not read vault")?;
         let document: VaultDocument =
             serde_json::from_slice(&bytes).context("Invalid vault file format")?;
-        if !matches!(document.version, 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | VAULT_VERSION) {
+        if !matches!(document.version, 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | VAULT_VERSION) {
             bail!(
-                "OpenKeylet supports vault versions 7 through 16; current file version is {}",
+                "OpenKeylet supports vault versions 7 through 17; current file version is {}",
                 document.version
             );
         }
@@ -200,6 +208,10 @@ impl Vault {
                 return Ok(());
             }
             let mut document = self.read_document_unlocked()?;
+            if raw.version == 16 {
+                document.version = VAULT_VERSION;
+                return self.write_document_unlocked(&document);
+            }
             for stored in document
                 .connections
                 .iter_mut()
@@ -1152,7 +1164,7 @@ impl Vault {
         let bytes = fs::read(&self.inner.vault_path).context("Could not read vault")?;
         let mut document: VaultDocument =
             serde_json::from_slice(&bytes).context("Invalid vault file format")?;
-        if !matches!(document.version, 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | VAULT_VERSION) {
+        if !matches!(document.version, 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | VAULT_VERSION) {
             bail!("Unsupported vault version {}", document.version);
         }
         document.version = VAULT_VERSION;
@@ -1321,6 +1333,14 @@ fn migrate_legacy_oci_input(input: &mut ConnectionInput) -> Result<()> {
     Ok(())
 }
 
+fn same_certificate_authority(left: &StoredConnection, right: &StoredConnection) -> bool {
+    let binding = |item: &StoredConnection| item.certificate_authority.as_ref().map(|b| {
+        let position = |id| item.modules.iter().position(|m| m.id == id).map_or_else(|| format!("missing:{id}"), |n| format!("module:{n}"));
+        (b.kind, position(b.private_key), b.ca_certificate.map(position))
+    });
+    binding(left) == binding(right)
+}
+
 fn same_oci_bindings(left: &StoredConnection, right: &StoredConnection) -> bool {
     let positions = |item: &StoredConnection| {
         item.oci_bindings.as_ref().map(|binding| {
@@ -1372,6 +1392,7 @@ fn normalize_modules(modules: Vec<ItemModule>) -> Result<Vec<ItemModule>> {
                     | "host"
                     | "port"
                     | "url"
+                    | "publicKey" | "sshCertificate" | "certificate" | "csr" | "caCertificate"
             )
         {
             bail!("Unsupported module:{}", module.kind);
@@ -1619,14 +1640,14 @@ pub(crate) fn normalize_connection(
             .map(|old| old.ssh_auth_type.as_str())
             .unwrap_or_default()
     } else {
-        if !matches!(input.ssh_auth_type.as_str(), "password" | "privateKey") {
+        if !matches!(input.ssh_auth_type.as_str(), "password" | "privateKey" | "certificate") {
             bail!("Invalid SSH authentication mode");
         }
         &input.ssh_auth_type
     };
     // Manual edits can remove the selected credential. Preserve explicit choice only
     // while it remains usable; MCP validates its explicit choice before this layer.
-    let ssh_auth_type = if module_secret_configured(&modules, secrets, requested_ssh_auth_type) {
+    let ssh_auth_type = if requested_ssh_auth_type == "certificate" || module_secret_configured(&modules, secrets, requested_ssh_auth_type) {
         requested_ssh_auth_type.to_owned()
     } else {
         inferred_ssh_auth_type
@@ -1634,6 +1655,7 @@ pub(crate) fn normalize_connection(
     let http_auth_type = input.http_auth_type.clone();
     let name = fallback_item_name(&input.name, id, &modules, secrets);
     Ok(StoredConnection {
+        certificate_authority: existing.and_then(|old| old.certificate_authority.clone()).or(input.certificate_authority),
         oci_bindings,
         ssh_jump_item_id: input.ssh_jump_item_id,
         ssh_jump_unresolved: input.ssh_jump_unresolved,
@@ -1677,6 +1699,7 @@ fn stored_from_portable(
     key: &MasterKey,
 ) -> Result<StoredConnection> {
     let mut input = ConnectionInput {
+        certificate_authority: portable.certificate_authority.clone(),
         oci_bindings: portable.oci_bindings.clone(),
         ssh_jump_item_id: portable.ssh_jump_item_id,
         ssh_jump_unresolved: portable.ssh_jump_unresolved,
@@ -1721,7 +1744,8 @@ fn same_portable_content(
     right: &StoredConnection,
     right_secrets: &SecretBundle,
 ) -> bool {
-    if !same_oci_bindings(left, right)
+    if !same_certificate_authority(left, right)
+        || !same_oci_bindings(left, right)
         || left.ssh_jump_item_id != right.ssh_jump_item_id
         || left.ssh_jump_unresolved != right.ssh_jump_unresolved
         || left.login_uris != right.login_uris
@@ -2036,6 +2060,7 @@ mod tests {
             .named_secrets
             .insert("apiCredential".into(), token.to_owned());
         ConnectionInput {
+            certificate_authority: None,
             oci_bindings: None,
             ssh_jump_item_id: None,
             ssh_jump_unresolved: false,
@@ -2080,6 +2105,7 @@ mod tests {
             .named_secrets
             .insert("username".into(), "root".into());
         ConnectionInput {
+            certificate_authority: None,
             oci_bindings: None,
             ssh_jump_item_id: None,
             ssh_jump_unresolved: false,
@@ -2566,7 +2592,7 @@ mod tests {
         drop(vault);
 
         let error = Vault::open(vault_dir).err().expect("version 6 must fail");
-        assert!(format!("{error:#}").contains("supports vault versions 7 through 16"));
+        assert!(format!("{error:#}").contains("supports vault versions 7 through 17"));
     }
 
     #[test]
@@ -2732,6 +2758,7 @@ mod tests {
         let vault = Vault::open(vault_dir.clone()).unwrap();
         let saved = vault
             .save_connection(ConnectionInput {
+                certificate_authority: None,
                 oci_bindings: None,
                 ssh_jump_item_id: None,
                 ssh_jump_unresolved: false,
@@ -2807,6 +2834,7 @@ mod tests {
             .named_secrets
             .insert("username".into(), "developer@example.test".into());
         let input = |id, secrets, remove_secret_names| ConnectionInput {
+            certificate_authority: None,
             oci_bindings: None,
             ssh_jump_item_id: None,
             ssh_jump_unresolved: false,
@@ -2950,6 +2978,7 @@ pub fn ssh_config_complete(item: &StoredConnection, secrets: &SecretBundle) -> b
     !item.host.trim().is_empty() && item.port > 0 && secrets.get("username").is_some()
         && match item.ssh_auth_type.as_str() {
             "privateKey" => secrets.get("privateKey").is_some(),
+            "certificate" => secrets.get("privateKey").is_some() && item.modules.iter().filter(|module| module.kind == "sshCertificate" && !module.value.trim().is_empty()).count() == 1,
             "" | "password" => secrets.get("password").is_some(),
             _ => false,
         }

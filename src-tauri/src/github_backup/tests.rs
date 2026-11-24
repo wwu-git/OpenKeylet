@@ -286,6 +286,7 @@ fn add_item(vault: &Vault, id: Uuid, name: &str, secret: &str) {
         .insert("apiCredential".into(), secret.into());
     vault
         .save_connection(ConnectionInput {
+            certificate_authority: None,
             oci_bindings: None,
             ssh_jump_item_id: None,
             ssh_jump_unresolved: false,

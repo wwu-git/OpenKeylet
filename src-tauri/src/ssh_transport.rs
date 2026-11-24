@@ -1,5 +1,5 @@
 use crate::{
-    model::SshHostTrust,
+    model::{SshHostTrust, SshHostTrustKind},
     vault::{DecryptedConnection, Vault, ssh_endpoint_host},
 };
 use anyhow::{Context, Result, ensure};
@@ -141,77 +141,89 @@ fn route_secrets(
 enum ServerKeyPolicy {
     Probe,
     Pinned(String),
+    CertificateAuthority { fingerprint: String, hostname: String },
+}
+
+#[derive(Clone)]
+struct ObservedServerKey {
+    fingerprint: String,
+    ca_fingerprint: Option<String>,
+    rejection: Option<String>,
 }
 
 pub(crate) struct SshClient {
     policy: ServerKeyPolicy,
-    observed: Arc<Mutex<Option<String>>>,
+    observed: Arc<Mutex<Option<ObservedServerKey>>>,
 }
 impl client::Handler for SshClient {
     type Error = russh::Error;
-    async fn check_server_key(&mut self, key: &PublicKeyOrCertificate) -> Result<bool, Self::Error> {
-        let PublicKeyOrCertificate::PublicKey { key, .. } = key else {
-            return Ok(false);
+    async fn check_server_key(&mut self, presented: &PublicKeyOrCertificate) -> Result<bool, Self::Error> {
+        let fingerprint = presented.public_key().fingerprint(ssh_key::HashAlg::Sha256).to_string();
+        let ca_fingerprint = presented.certificate().map(|cert| cert.signature_key().fingerprint(ssh_key::HashAlg::Sha256).to_string());
+        let verdict = match (&self.policy, presented) {
+            (ServerKeyPolicy::Probe, _) => Ok(false),
+            (ServerKeyPolicy::Pinned(expected), PublicKeyOrCertificate::PublicKey { .. }) => Ok(expected == &fingerprint),
+            (ServerKeyPolicy::Pinned(_), PublicKeyOrCertificate::Certificate(_)) => Err(anyhow::anyhow!("Expected a pinned SSH host key, received a certificate")),
+            (ServerKeyPolicy::CertificateAuthority { fingerprint, hostname }, PublicKeyOrCertificate::Certificate(cert)) => {
+                crate::certificates::verify_ssh_host_certificate(cert, hostname, fingerprint, chrono::Utc::now().timestamp()).map(|_| true)
+            }
+            (ServerKeyPolicy::CertificateAuthority { .. }, PublicKeyOrCertificate::PublicKey { .. }) => Err(anyhow::anyhow!("Expected an SSH host certificate")),
         };
-        let actual = key.fingerprint(ssh_key::HashAlg::Sha256).to_string();
-        *self.observed.lock().unwrap() = Some(actual.clone());
-        Ok(match &self.policy {
-            ServerKeyPolicy::Probe => false,
-            ServerKeyPolicy::Pinned(expected) => expected == &actual,
-        })
+        let accepted = verdict.as_ref().copied().unwrap_or(false);
+        *self.observed.lock().unwrap() = Some(ObservedServerKey {
+            fingerprint,
+            ca_fingerprint,
+            rejection: verdict.err().map(|error| error.to_string()),
+        });
+        Ok(accepted)
     }
 }
 
-fn expected_key(trust: &[SshHostTrust], connection: &DecryptedConnection) -> Result<String> {
+fn expected_policy(trust: &[SshHostTrust], connection: &DecryptedConnection) -> Result<ServerKeyPolicy> {
     let host = ssh_endpoint_host(&connection.stored.host)?;
-    trust.iter().find(|entry| entry.item_id == connection.stored.id && entry.host == host && entry.port == connection.stored.port)
-        .map(|entry|entry.fingerprint.clone()).context("SSH host key is not trusted; verify the fingerprint using the local client or ssh-trust CLI")
+    let entry = trust.iter().find(|entry| entry.item_id == connection.stored.id && entry.host == host && entry.port == connection.stored.port)
+        .context("SSH host key is not trusted; verify the fingerprint using the local client or ssh-trust CLI")?;
+    Ok(match entry.kind {
+        SshHostTrustKind::HostKey => ServerKeyPolicy::Pinned(entry.fingerprint.clone()),
+        SshHostTrustKind::CertificateAuthority => ServerKeyPolicy::CertificateAuthority { fingerprint: entry.fingerprint.clone(), hostname: host },
+    })
 }
 
 async fn handshake<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     stream: S,
     policy: ServerKeyPolicy,
-    observed: Arc<Mutex<Option<String>>>,
+    observed: Arc<Mutex<Option<ObservedServerKey>>>,
 ) -> Result<SshSession> {
     let token = CancellationToken::new();
     let guard = CancelOnDrop(token.clone());
     let stream = CancellableStream::new(stream, &token);
-    let handler = SshClient {
-        policy: policy.clone(),
-        observed: observed.clone(),
-    };
-    let config = Arc::new(client::Config::default());
-    let handle = client::connect_stream(config, stream, handler)
+    let handler = SshClient { policy: policy.clone(), observed: observed.clone() };
+    let mut config = client::Config::default();
+    if matches!(policy, ServerKeyPolicy::Probe | ServerKeyPolicy::CertificateAuthority { .. }) {
+        config.preferred.host_key_certificates = config.preferred.key.clone();
+    }
+    let handle = client::connect_stream(Arc::new(config), stream, handler)
         .await
         .map_err(|error| {
-            if let (ServerKeyPolicy::Pinned(expected), Some(actual)) =
-                (policy, observed.lock().unwrap().as_ref())
-            {
-                if expected != *actual {
-                    return anyhow::anyhow!(
-                        "SSH host key mismatch; expected {expected}, received {actual}"
-                    );
+            if let Some(actual) = observed.lock().unwrap().as_ref() {
+                if let Some(rejection) = &actual.rejection {
+                    return anyhow::anyhow!("SSH host verification failed: {rejection}");
+                }
+                if let ServerKeyPolicy::Pinned(expected) = &policy {
+                    if expected != &actual.fingerprint {
+                        return anyhow::anyhow!("SSH host key mismatch; expected {expected}, received {}", actual.fingerprint);
+                    }
                 }
             }
             anyhow::anyhow!("SSH handshake failed: {error}")
         })?;
-    Ok(SshSession {
-        handle,
-        _cancel: guard,
-    })
+    Ok(SshSession { handle, _cancel: guard })
 }
 
-async fn direct(connection: &DecryptedConnection, expected: String) -> Result<SshSession> {
-    let stream =
-        tokio::net::TcpStream::connect((connection.stored.host.as_str(), connection.stored.port))
-            .await
-            .context("SSH TCP connection failed")?;
-    let mut session = handshake(
-        stream,
-        ServerKeyPolicy::Pinned(expected),
-        Default::default(),
-    )
-    .await?;
+async fn direct(connection: &DecryptedConnection, policy: ServerKeyPolicy) -> Result<SshSession> {
+    let stream = tokio::net::TcpStream::connect((connection.stored.host.as_str(), connection.stored.port))
+        .await.context("SSH TCP connection failed")?;
+    let mut session = handshake(stream, policy, Default::default()).await?;
     authenticate(&mut session, connection).await?;
     Ok(session)
 }
@@ -221,7 +233,7 @@ async fn authenticate(session: &mut SshSession, connection: &DecryptedConnection
         .secrets
         .get("username")
         .context("No SSH username in vault")?;
-    let result = if connection.stored.ssh_auth_type == "privateKey" {
+    let result = if matches!(connection.stored.ssh_auth_type.as_str(), "privateKey" | "certificate") {
         let key = decode_secret_key(
             connection
                 .secrets
@@ -231,10 +243,24 @@ async fn authenticate(session: &mut SshSession, connection: &DecryptedConnection
             connection.secrets.passphrase.as_deref(),
         )
         .context("Unable to parse SSH private key or incorrect passphrase")?;
-        let hash = session.best_supported_rsa_hash().await?.flatten();
-        session
-            .authenticate_publickey(username, PrivateKeyWithHashAlg::new(Arc::new(key), hash))
-            .await?
+        if connection.stored.ssh_auth_type == "certificate" {
+            let mut modules = connection.stored.modules.iter().filter(|module| module.kind == "sshCertificate" && !module.value.trim().is_empty());
+            let module = modules.next().context("No SSH user certificate in vault")?;
+            ensure!(modules.next().is_none(), "Multiple configured SSH user certificates");
+            ensure!(module.value.len() <= 1024 * 1024, "SSH user certificate is too large");
+            let certificate = ssh_key::Certificate::from_openssh(module.value.trim()).context("Invalid SSH user certificate")?;
+            ensure!(certificate.cert_type() == ssh_key::certificate::CertType::User, "SSH authentication requires a user certificate");
+            ensure!(key.public_key().key_data() == certificate.public_key(), "SSH certificate does not match the private key");
+            let now = u64::try_from(chrono::Utc::now().timestamp()).context("Invalid local clock")?;
+            ensure!(certificate.valid_after() <= now && now < certificate.valid_before(), "SSH user certificate is outside its validity period");
+            ensure!(certificate.critical_options().is_empty(), "SSH user certificate critical options are not supported");
+            // The server decides which CA and principals authorize this account.
+            certificate.verify_signature().context("Invalid SSH user certificate signature")?;
+            session.authenticate_openssh_cert(username, Arc::new(key), certificate).await?
+        } else {
+            let hash = session.best_supported_rsa_hash().await?.flatten();
+            session.authenticate_publickey(username, PrivateKeyWithHashAlg::new(Arc::new(key), hash)).await?
+        }
     } else {
         session
             .authenticate_password(
@@ -259,8 +285,8 @@ pub(crate) async fn connect(
     let operation = async {
         if let Some(jump) = &jump {
             let trust = vault.ssh_host_trust()?;
-            let a_key = expected_key(&trust, jump).context("Jump host A")?;
-            let b_key = expected_key(&trust, connection).context("Target host B")?;
+            let a_key = expected_policy(&trust, jump).context("Jump host A")?;
+            let b_key = expected_policy(&trust, connection).context("Target host B")?;
             let a = direct(jump, a_key).await.context("Jump host A")?;
             let channel = a
                 .channel_open_direct_tcpip(
@@ -273,7 +299,7 @@ pub(crate) async fn connect(
                 .context("Jump host A forwarding to target B failed")?;
             let mut b = handshake(
                 channel.into_stream(),
-                ServerKeyPolicy::Pinned(b_key),
+                b_key,
                 Default::default(),
             )
             .await
@@ -287,7 +313,7 @@ pub(crate) async fn connect(
                 secrets: route_secrets(connection, Some(jump)),
             })
         } else {
-            let expected = expected_key(&vault.ssh_host_trust()?, connection)?;
+            let expected = expected_policy(&vault.ssh_host_trust()?, connection)?;
             Ok(SshConnection {
                 target: direct(connection, expected).await?,
                 _jump: None,
@@ -311,7 +337,12 @@ pub(crate) async fn connect(
 pub struct SshHostProbe {
     pub host: String,
     pub port: u16,
+    /// SHA256 of the underlying host public key, including certificate presentations.
     pub fingerprint: String,
+    pub kind: SshHostTrustKind,
+    /// Observed signer only; selecting CA trust requires explicit owner approval.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ca_fingerprint: Option<String>,
 }
 
 pub async fn probe(vault: &Vault, id: Uuid) -> Result<SshHostProbe> {
@@ -322,7 +353,7 @@ pub async fn probe(vault: &Vault, id: Uuid) -> Result<SshHostProbe> {
         let a;
         let observed = Arc::new(Mutex::new(None));
         if let Some(jump) = &jump {
-            a = direct(jump, expected_key(&vault.ssh_host_trust()?, jump)?)
+            a = direct(jump, expected_policy(&vault.ssh_host_trust()?, jump)?)
                 .await
                 .context("Jump host A")?;
             let channel = a
@@ -347,7 +378,7 @@ pub async fn probe(vault: &Vault, id: Uuid) -> Result<SshHostProbe> {
                     .context("SSH TCP connection failed")?;
             let _ = handshake(stream, ServerKeyPolicy::Probe, observed.clone()).await;
         }
-        let fingerprint = observed
+        let observation = observed
             .lock()
             .unwrap()
             .clone()
@@ -355,7 +386,9 @@ pub async fn probe(vault: &Vault, id: Uuid) -> Result<SshHostProbe> {
         Ok(SshHostProbe {
             host: ssh_endpoint_host(&target.stored.host)?,
             port: target.stored.port,
-            fingerprint,
+            fingerprint: observation.fingerprint,
+            kind: if observation.ca_fingerprint.is_some() { SshHostTrustKind::CertificateAuthority } else { SshHostTrustKind::HostKey },
+            ca_fingerprint: observation.ca_fingerprint,
         })
     })
     .await

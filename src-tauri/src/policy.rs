@@ -108,6 +108,7 @@ mod tests {
 
     fn connection() -> StoredConnection {
         StoredConnection {
+            certificate_authority: None,
             oci_bindings: None,
             ssh_jump_item_id: None,
             ssh_jump_unresolved: false,
