@@ -5,7 +5,7 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use russh::{
     client,
-    keys::{PrivateKeyWithHashAlg, decode_secret_key, ssh_key},
+    keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate, decode_secret_key, ssh_key},
 };
 use serde::Serialize;
 use std::{
@@ -149,7 +149,10 @@ pub(crate) struct SshClient {
 }
 impl client::Handler for SshClient {
     type Error = russh::Error;
-    async fn check_server_key(&mut self, key: &ssh_key::PublicKey) -> Result<bool, Self::Error> {
+    async fn check_server_key(&mut self, key: &PublicKeyOrCertificate) -> Result<bool, Self::Error> {
+        let PublicKeyOrCertificate::PublicKey { key, .. } = key else {
+            return Ok(false);
+        };
         let actual = key.fingerprint(ssh_key::HashAlg::Sha256).to_string();
         *self.observed.lock().unwrap() = Some(actual.clone());
         Ok(match &self.policy {

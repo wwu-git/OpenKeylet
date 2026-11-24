@@ -287,7 +287,7 @@ OpenKeylet is not a sandbox. It does not defend against a malicious agent, a com
 
 ## Build from source
 
-Requirements: Rust 1.88+, Node.js 22+, and the [Tauri 2 platform prerequisites](https://v2.tauri.app/start/prerequisites/).
+Requirements: Rust 1.89+, Node.js 22+, and the [Tauri 2 platform prerequisites](https://v2.tauri.app/start/prerequisites/).
 
 ```bash
 npm install

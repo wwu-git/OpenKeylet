@@ -524,8 +524,9 @@ async fn saved_ssh_credentials_authenticate_using_selected_mode_on_loopback() {
         async fn auth_publickey(
             &mut self,
             user: &str,
-            key: &russh::keys::ssh_key::PublicKey,
+            key: server::VerifiedPublicKey<'_>,
         ) -> Result<server::Auth, Self::Error> {
+            let key = key.public_key;
             if user == "deploy" && key == &self.public {
                 self.seen.lock().unwrap().push((self.endpoint, "privateKey"));
                 Ok(server::Auth::Accept)

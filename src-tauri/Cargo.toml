@@ -5,7 +5,7 @@ description = "Local password and credential manager for AI agents"
 authors = ["OpenKeylet contributors"]
 license = "MIT"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 
 [lib]
 name = "mcp_vault"
@@ -60,7 +60,7 @@ csv = "1.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
 ring = "0.17"
 rmcp = { version = "3.1", features = ["server", "macros", "transport-io"] }
-russh = { version = "0.62", default-features = false, features = ["ring", "rsa"] }
+russh = { version = "=0.65.4", default-features = false, features = ["ring", "rsa"] }
 russh-sftp = "2.4"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }

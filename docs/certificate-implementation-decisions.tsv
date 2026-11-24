@@ -1,0 +1,5 @@
+ts	phase	decision	why	evidence	result
+2026-11-24T17:27:09+08:00	frame	保留现有保险库并实现证书首版	避免重复存储和特殊编辑组件	docs/certificates.md	进行中
+2026-11-24T17:27:09+08:00	baseline	记录现有回归结果	后续每个单元与实际基线比较	dbcbdc3; cargo test --manifest-path src-tauri/Cargo.toml --locked --offline	239 库测试、1 二进制、3 集成测试通过
+2026-11-24T17:27:09+08:00	design	采用标准模块和受保护 CA 绑定	普通项目编辑不能替代 CA 使用授权	docs/certificates.md	已确定
+2026-11-24T17:27:09+08:00	design	签发结果先持久化后返回	重试和并发必须返回相同结果	docs/certificates.md	待实现

@@ -290,7 +290,7 @@ OpenKeylet 不是沙箱，也不抵抗恶意 Agent、已被攻陷的系统或浏
 
 ## 从源码构建
 
-需要 Rust 1.88+、Node.js 22+ 以及 [Tauri 2 平台依赖](https://v2.tauri.app/start/prerequisites/)。
+需要 Rust 1.89+、Node.js 22+ 以及 [Tauri 2 平台依赖](https://v2.tauri.app/start/prerequisites/)。
 
 ```bash
 npm install

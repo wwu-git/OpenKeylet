@@ -68,8 +68,9 @@ impl server::Handler for TestHandler {
     async fn auth_publickey(
         &mut self,
         user: &str,
-        public: &ssh_key::PublicKey,
+        public: server::VerifiedPublicKey<'_>,
     ) -> Result<server::Auth> {
+        let public = public.public_key;
         self.server.auth.fetch_add(1, Ordering::SeqCst);
         Ok(
             if (self.server.forward_port.is_none()
@@ -322,6 +323,29 @@ impl Fixture {
         .await
         .expect("A and B connections must close");
     }
+}
+
+#[tokio::test]
+async fn pinned_plain_key_does_not_implicitly_trust_a_host_certificate() {
+    let host = key(2);
+    let mut builder = ssh_key::certificate::Builder::new(
+        vec![1; 32],
+        host.public_key().key_data().clone(),
+        0,
+        u64::MAX,
+    )
+    .unwrap();
+    builder.cert_type(ssh_key::certificate::CertType::Host).unwrap();
+    builder.valid_principal("test.invalid").unwrap();
+    let certificate = builder.sign(&key(1)).unwrap();
+    let mut handler = SshClient {
+        policy: ServerKeyPolicy::Pinned(
+            host.public_key().fingerprint(ssh_key::HashAlg::Sha256).to_string(),
+        ),
+        observed: Default::default(),
+    };
+    assert!(!client::Handler::check_server_key(&mut handler, &certificate.into()).await.unwrap());
+    assert!(handler.observed.lock().unwrap().is_none());
 }
 
 #[tokio::test]
