@@ -342,6 +342,18 @@ try {
       }
     }
     await page.evaluate(()=>{fixture.ociKeyError=null;document.querySelector('#toast-region').replaceChildren();});
+    await page.locator('#add-module-button').click();
+    await page.locator('#module-menu [data-add-module="username"]').click();
+    await editor.locator('[data-kind="username"] [data-secret-value]').fill('SYNTHETIC-ACCOUNT');
+    await page.locator('#add-module-button').click();
+    await page.locator('#module-menu [data-add-module="password"]').click();
+    await editor.locator('[data-kind="password"] [data-secret-value]').fill('SYNTHETIC-PASSWORD');
+    for (const mode of ['modal','inline']) {
+      if (mode==='inline') {
+        await editor.locator('.modal-footer [data-close-modal]').click();
+        await editor.waitFor({state:'hidden'});
+        await toggle('oci').click();
+      }
     for (const width of [690,460]) {
       await page.setViewportSize({width,height:1000});
       for (const language of ['en','zh']) {
@@ -358,13 +370,26 @@ try {
           const configGeometry = await page.locator('#oci-config').evaluate(el=>({width:el.clientWidth,scroll:el.scrollWidth,rows:[...el.querySelectorAll('.oci-config-row')].map(row=>({width:row.clientWidth,scroll:row.scrollWidth,identityBottom:row.querySelector('.module-identity').getBoundingClientRect().bottom,controlTop:row.querySelector('.module-control').getBoundingClientRect().top}))}));
           assert.ok(configGeometry.scroll<=configGeometry.width+1,JSON.stringify(configGeometry));
           assert.ok(configGeometry.rows.every(row=>row.scroll<=row.width+1&&row.controlTop>=row.identityBottom-1),JSON.stringify(configGeometry));
-          await editor.screenshot({path:path.join(artifacts,`oci-key-input-${width}-${language}-${theme}.png`)});
+          const parity = await editor.evaluate(el=>{
+            const metrics = row=>{
+              const r=row.getBoundingClientRect(), identity=row.querySelector('.module-identity'), control=row.querySelector('.module-control');
+              const input=row.querySelector('.input'), style=getComputedStyle(row);
+              return {titleX:identity.getBoundingClientRect().left-r.left,controlX:control.getBoundingClientRect().left-r.left,controlWidth:control.getBoundingClientRect().width,inputWidth:input.getBoundingClientRect().width,gap:row.nextElementSibling?.getBoundingClientRect().top-r.bottom,titleFont:getComputedStyle(identity.querySelector('strong')).fontSize,metadataFont:getComputedStyle(identity.querySelector('small')).fontSize,background:style.backgroundColor,padding:style.padding,border:style.borderTopWidth,inputBackground:getComputedStyle(input).backgroundColor};
+            };
+            return {baseline:metrics(el.querySelector('#module-list [data-kind="username"]')),rows:[...el.querySelectorAll('.oci-config-row')].map(metrics)};
+          });
+          for (const actual of parity.rows) {
+            for (const key of ['titleX','controlX','controlWidth','inputWidth','titleFont','metadataFont','background','padding','inputBackground']) assert.equal(actual[key],parity.baseline[key],`${mode} ${key}: ${JSON.stringify(parity)}`);
+          }
+          for (const actual of parity.rows.slice(0,-1)) assert.equal(actual.gap,parity.baseline.gap,`${mode} row gap: ${JSON.stringify(parity)}`);
+          await editor.screenshot({path:path.join(artifacts,`oci-key-input-${mode}-${width}-${language}-${theme}.png`)});
           await page.locator('#oci-key-input-cancel').click();
           await page.locator('#oci-import-key').click();
-          await page.locator('#oci-key-source-menu').screenshot({path:path.join(artifacts,`oci-key-sources-${width}-${language}-${theme}.png`)});
+          await page.locator('#oci-key-source-menu').screenshot({path:path.join(artifacts,`oci-key-sources-${mode}-${width}-${language}-${theme}.png`)});
           await page.locator('#oci-import-key').click();
         }
       }
+    }
     }
     const sources = await page.evaluate(()=>fixture.ociSources);
     assert.ok(sources.some(call=>call.source==='file'&&!call.hasText));

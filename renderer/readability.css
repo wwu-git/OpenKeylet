@@ -110,6 +110,8 @@ html[lang] .modal-card .field > span {
 }
 
 #connection-modal .oci-config {
+  display: grid;
+  gap: 2px;
   min-width: 0;
   margin: 0;
   padding: 0;
@@ -118,9 +120,8 @@ html[lang] .modal-card .field > span {
 #connection-modal .oci-config legend { padding: 0; font-size: var(--reading-label); }
 #connection-modal .oci-config p { margin: 6px 0; font-size: var(--reading-help); line-height: 1.4; }
 #connection-modal #oci-config-note { padding-inline: .5em; }
-#connection-modal .oci-config-row .module-identity { grid-column: 1 / -1; }
-#connection-modal .oci-config-row .module-control { grid-column: 1 / -1; }
-#connection-modal .oci-config-row .module-identity small { font-size: var(--reading-help); line-height: 1.4; white-space: normal; overflow-wrap: anywhere; }
+#connection-modal .oci-config-row .module-identity small { margin: 0; font-size: var(--reading-help); line-height: 1.4; }
+#connection-modal .oci-key-row .module-identity small { white-space: normal; overflow-wrap: anywhere; }
 #connection-modal .oci-key-row .module-key-control { height: auto; grid-template-columns: minmax(0, 1fr) auto; }
 #connection-modal #oci-import-key { font-size: var(--reading-label); display: flex; height: 100%; align-items: center; margin: 0; }
 #connection-modal .oci-key-row .key-source-options { z-index: 5; }
