@@ -193,3 +193,21 @@ html[data-item-layout="grid"] #connections-list.is-reordering > .connection-card
 @media (max-width: 560px) {
   .api-service-modal .field-grid.two { grid-template-columns: minmax(0, 1fr); }
 }
+#certificate-panel .small-button {
+  width: auto;
+  height: auto;
+  min-height: 36px;
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  white-space: nowrap;
+  font-size: var(--reading-label, 12px);
+  line-height: 1.4;
+}
+#certificate-panel details { margin-top: 12px; }
+#certificate-panel summary { cursor: pointer; margin-bottom: 10px; }
+#certificate-panel .button-row { margin: 10px 0; }
+#certificate-panel textarea { resize: vertical; overflow-wrap: anywhere; }
+#certificate-panel .field { min-width: 0; }
+@media (max-width: 600px) {
+  #certificate-panel .field-grid.two { grid-template-columns: minmax(0, 1fr); }
+}

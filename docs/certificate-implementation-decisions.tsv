@@ -9,3 +9,5 @@ ts	phase	decision	why	evidence	result
 2026-11-24T17:50:06+08:00	vault	CA 用途与独立授权绑定材料; 原子加密签发日志	普通 MCP 写入不能扩大 CA 密钥用途; 重试和并发一致	src-tauri/src/vault_certificate_tests.rs	7 专项和62 保险库测试通过; 版本17迁移及备份限制通过
 2026-11-24T17:50:06+08:00	ssh	显式区分主机公钥与主机 CA 信任	避免隐式降级和跳板认证混用	src-tauri/src/ssh_certificate_tests.rs	21 项通过; 独立本机 OpenSSH 用例通过; 直连/跳板命令和 SFTP 通过
 2026-11-24T17:50:54+08:00	mcp-cli	以固定 Agent/Owner 适配器区分调用者	MCP 不能选择 Owner 或更改签发授权	src-tauri/tests/headless_certificates.rs; src-tauri/src/mcp_certificate_tests.rs	真实 stdio MCP 与 CLI 2项通过; MCP证书5项通过; 不重连撤权生效
+2026-11-24T17:54:02+08:00	gui	复用标准模块和本地用户命令; 设置单独管理签发	模板仅组合字段; 避免特殊编辑组件和隐式授权	scripts/test-certificates-ui.mjs; scripts/test-ssh-jump-ui.mjs	Chrome 隔离夹具通过; 460px 无水平溢出; 按钮单行; CA 候选不自动信任
+2026-11-24T17:54:02+08:00	review	拆分界面输入的多张 TLS 中间证书	核心验证每个数组元素必须恰好一张证书	renderer/certificates.js; scripts/test-certificates-ui.mjs	两张中间证书分别提交; 混入其他材料拒绝

@@ -41,11 +41,11 @@ try {
         state.connections[index] = saved; return saved;
       }
       if (command === 'ssh_host_trust') return structuredClone(fixture.trust);
-      if (command === 'probe_ssh_host') { fixture.probes.push(args.id); return { host: state.connections.find(item => item.id === args.id).host, port: 22, fingerprint: 'SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }; }
-      if (command === 'set_ssh_host_trust') {
-        fixture.trustWrites.push(structuredClone(args));
+      if (command === 'probe_ssh_host') { fixture.probes.push(args.id); return { host: state.connections.find(item => item.id === args.id).host, port: 22, fingerprint: 'SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', kind: 'certificateAuthority', caFingerprint: 'SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB' }; }
+      if (command === 'set_ssh_host_trust' || command === 'set_ssh_host_ca_trust') {
+        fixture.trustWrites.push({ ...structuredClone(args), kind: command === 'set_ssh_host_ca_trust' ? 'certificateAuthority' : 'hostKey' });
         fixture.trust = fixture.trust.filter(entry => entry.itemId !== args.id || entry.host !== args.host || entry.port !== args.port);
-        if (args.fingerprint) fixture.trust.push({ itemId: args.id, host: args.host, port: args.port, fingerprint: args.fingerprint });
+        if (args.fingerprint) fixture.trust.push({ itemId: args.id, host: args.host, port: args.port, fingerprint: args.fingerprint, kind: command === 'set_ssh_host_ca_trust' ? 'certificateAuthority' : 'hostKey' });
         return;
       }
       return {};
@@ -83,6 +83,17 @@ try {
   await page.locator('#ssh-trust-save').click();
   await page.waitForFunction(() => fixture.trustWrites.length === 1);
   assert.equal(await page.evaluate(() => fixture.trust[0].itemId), 'b');
+  await page.locator('#ssh-trust-kind').selectOption('certificateAuthority');
+  assert.equal(await page.locator('#ssh-trust-verified').isChecked(), false);
+  await page.locator('#ssh-trust-probe').click();
+  await page.waitForFunction(() => fixture.probes.length === 2);
+  assert.equal(await page.locator('#ssh-trust-fingerprint').inputValue(), 'SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB');
+  assert.equal(await page.evaluate(() => fixture.trustWrites.length), 1);
+  await page.locator('#ssh-trust-verified').check();
+  await page.locator('#ssh-trust-save').click();
+  await page.waitForFunction(() => fixture.trustWrites.length === 2);
+  assert.equal(await page.evaluate(() => fixture.trust[0].kind), 'certificateAuthority');
+
   await page.locator('#ssh-route-mode').selectOption('direct');
   assert.equal(await page.locator('#ssh-trust-save').isDisabled(), true);
   await page.locator('#connection-form .modal-footer [data-close-modal]').click();

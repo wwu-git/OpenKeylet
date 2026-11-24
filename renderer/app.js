@@ -1135,7 +1135,11 @@ function applySettingsSearch() {
   $('#settings-search-empty').classList.toggle('hidden', visible > 0);
 }
 
+let certificatePanel;
 function renderSettings() {
+  certificatePanel ??= createCertificatePanel({ invoke, getState: () => state, localized, escapeHtml, toast, cleanError, refresh: () => refresh() });
+  certificatePanel.render();
+  if (ownerLockState.unlocked) void certificatePanel.load().catch(() => {});
   renderAgentWriteSettings();
   githubBackup.render();
   $('#mcp-endpoint').textContent = `${state.mcp.stdioCommand} mcp stdio`;
@@ -1226,6 +1230,11 @@ const MODULE_DEFS = {
   host: { code: 'HST', zh: '主机 / IP', en: 'HOST / IP', secret: false },
   port: { code: 'PRT', zh: '端口', en: 'PORT', secret: false },
   url: { code: 'URL', zh: '服务 URL', en: 'SERVICE URL', secret: false },
+  publicKey: { code: 'PUB', zh: '公钥', en: 'PUBLIC KEY', secret: false, multiline: true },
+  sshCertificate: { code: 'SSH', zh: 'SSH 证书', en: 'SSH CERTIFICATE', secret: false, multiline: true },
+  certificate: { code: 'CRT', zh: 'X.509 证书', en: 'X.509 CERTIFICATE', secret: false, multiline: true },
+  csr: { code: 'CSR', zh: '证书签名请求', en: 'CERTIFICATE REQUEST', secret: false, multiline: true },
+  caCertificate: { code: 'CA', zh: 'CA 证书', en: 'CA CERTIFICATE', secret: false, multiline: true },
 };
 const PERSONAL_FIELDS = Object.keys(MODULE_DEFS).slice(0, Object.keys(MODULE_DEFS).indexOf('username'));
 const ITEM_TYPES = { login: ['登录', 'Login'], card: ['信用卡', 'Card'], identity: ['身份资料', 'Identity'], secureNote: ['安全笔记', 'Secure note'], ssh: ['SSH', 'SSH'], api: ['API', 'API'], custom: ['自定义', 'Custom'], passkey: ['Passkey', 'Passkey'] };
@@ -1233,7 +1242,7 @@ function itemTypeLabel(kind) { const labels = ITEM_TYPES[kind] || ITEM_TYPES.cus
 function typeOptions(emptyLabel, selected, includePasskey = false) {
   return `${emptyLabel ? `<option value="">${emptyLabel}</option>` : ''}${Object.keys(ITEM_TYPES).filter(k => includePasskey || k !== 'passkey').map(k => `<option value="${k}" ${k === selected ? 'selected' : ''}>${itemTypeLabel(k)}</option>`).join('')}`;
 }
-for (const kind of PERSONAL_FIELDS) {
+for (const kind of [...PERSONAL_FIELDS, 'publicKey', 'sshCertificate', 'certificate', 'csr', 'caCertificate']) {
   const button = document.createElement('button'); button.type = 'button'; button.dataset.addModule = kind;
   button.textContent = moduleLabel(kind); $('#module-menu').append(button);
   staticCopy.push([`#module-menu [data-add-module="${kind}"]`, 'text', MODULE_DEFS[kind].zh, MODULE_DEFS[kind].en]);
@@ -1341,6 +1350,9 @@ function renderModules() {
         const removeAddressLabel = localized(`删除${addressLabel}`, `Remove ${addressLabel}`);
         return `<div class="module-address-line"><input class="input" ${addressIndex === 0 ? 'data-module-value' : 'data-module-alternate-value'} type="text" value="${escapeHtml(address)}" placeholder="${placeholder}" aria-label="${escapeHtml(addressLabel)}" /><button type="button" class="small-button module-address-default" data-default-address="${addressIndex}" aria-label="${escapeHtml(`${defaultLabel} ${addressLabel}`)}" aria-pressed="${addressIndex === 0}" ${addressIndex === 0 ? 'disabled' : ''}>${addressIndex === 0 ? localized('默认', 'Default') : defaultLabel}</button><button type="button" class="small-button module-address-remove" data-remove-address="${addressIndex}" aria-label="${escapeHtml(removeAddressLabel)}">×</button></div>`;
       }).join('')}<div class="module-address-buttons"><button type="button" class="small-button module-address-add" data-add-address>${localized('添加地址', 'Add address')}</button>${module.kind === 'url' ? `<button type="button" class="small-button" data-select-api-service>${localized('选择服务', 'Choose service')}</button>` : ''}</div></div>`;
+      actions = `<span class="module-action-spacer" aria-hidden="true"></span>${secretActionButton('copy', false)}`;
+    } else if (definition.multiline) {
+      control = `<textarea class="input textarea" data-module-value rows="5" maxlength="1048576" spellcheck="false" autocomplete="off">${escapeHtml(module.value || '')}</textarea>`;
       actions = `<span class="module-action-spacer" aria-hidden="true"></span>${secretActionButton('copy', false)}`;
     } else {
       const inputType = module.kind === 'port' ? 'number' : 'text';
@@ -1568,7 +1580,8 @@ function sshJumpCandidate(item) {
   const configured = kind => item.modules?.some(module => module.kind === kind && (module.configured || module.value));
   const mode = item.sshAuthType || 'password';
   return item.id !== editorExistingItem?.id && item.enabled && !item.sshJumpItemId && !item.sshJumpUnresolved
-    && item.host && item.port > 0 && configured('username') && configured(mode);
+    && item.host && item.port > 0 && configured('username')
+    && (mode === 'certificate' ? configured('privateKey') && configured('sshCertificate') : configured(mode));
 }
 
 function selectedSshJumpId() {
@@ -1588,6 +1601,9 @@ function sshTrustReady() {
 function renderSshRoute() {
   const show = value('#connection-type') === 'ssh' || currentModules.some(module => module.kind === 'host') || editorSshRouteMode === 'jump';
   $('#ssh-route-config').classList.toggle('hidden', !show);
+  value('#ssh-auth-type', editorSourceInput?.sshAuthType || '');
+  $('#ssh-auth-label').textContent = localized('认证方式', 'Authentication');
+  $('#ssh-trust-kind-label').textContent = localized('信任类型', 'Trust kind');
   $('#ssh-route-legend').textContent = localized('SSH 连接', 'SSH connection');
   $('#ssh-route-mode-label').textContent = localized('连接方式', 'Connection method');
   $('#ssh-route-mode option[value="direct"]').textContent = localized('直接连接', 'Direct');
@@ -1623,9 +1639,12 @@ async function refreshSshTrust() {
   const entries = await api.sshTrust();
   if (editorExistingItem?.id !== id) return;
   const entry = entries.find(entry => entry.itemId === id && entry.host === editorExistingItem.host.trim().replace(/^\[|\]$/g, '').toLowerCase() && entry.port === editorExistingItem.port);
-  $('#ssh-trust-status').textContent = entry ? localized(`已信任 ${entry.fingerprint}`, `Trusted ${entry.fingerprint}`) : localized('尚未信任。跳板连接会在认证前拒绝。', 'Not trusted. Jump connections stop before authentication.');
+  if (entry) value('#ssh-trust-kind', entry.kind || 'hostKey');
+  $('#ssh-trust-status').textContent = entry ? localized(`已信任 ${entry.fingerprint}`, `Trusted ${entry.fingerprint}`) : localized('尚未信任。连接会在认证前拒绝。', 'Not trusted. Connections stop before authentication.');
 }
 
+$('#ssh-auth-type').addEventListener('change', () => { editorSourceInput = { ...editorSourceInput, sshAuthType: value('#ssh-auth-type') }; });
+$('#ssh-trust-kind').addEventListener('change', () => { $('#ssh-trust-verified').checked = false; value('#ssh-trust-fingerprint', ''); });
 $('#ssh-route-mode').addEventListener('change', () => { editorSshRouteMode = value('#ssh-route-mode'); renderSshRoute(); });
 $('#ssh-jump-item').addEventListener('change', () => { editorJumpSelection = value('#ssh-jump-item'); renderSshRoute(); });
 $('#connection-form').addEventListener('input', event => {
@@ -1639,7 +1658,7 @@ $('#ssh-trust-probe').addEventListener('click', async () => {
     const savedItem = editorExistingItem;
     const result = await api.probeSshHost(savedItem.id);
     if (editorExistingItem !== savedItem || !sshTrustReady()) return;
-    value('#ssh-trust-fingerprint', result.fingerprint);
+    value('#ssh-trust-fingerprint', value('#ssh-trust-kind') === 'certificateAuthority' ? result.caFingerprint || '' : result.fingerprint);
     $('#ssh-trust-verified').checked = false;
     $('#ssh-trust-status').textContent = localized('候选指纹尚未验证，读取操作不会自动信任。', 'Candidate fingerprint is unverified. Reading it does not establish trust.');
   } catch (error) { toast(cleanError(error), 'error'); }
@@ -1649,7 +1668,7 @@ $('#ssh-trust-save').addEventListener('click', async () => {
   try {
     if (!sshTrustReady()) return;
     if (!$('#ssh-trust-verified').checked) throw new Error(localized('请先从可信来源核对指纹并勾选确认。', 'Verify the fingerprint against a trusted source and check the confirmation.'));
-    await api.setSshTrust(editorExistingItem.id, editorExistingItem.host, editorExistingItem.port, value('#ssh-trust-fingerprint').trim());
+    await invoke(value('#ssh-trust-kind') === 'certificateAuthority' ? 'set_ssh_host_ca_trust' : 'set_ssh_host_trust', { id: editorExistingItem.id, host: editorExistingItem.host, port: editorExistingItem.port, fingerprint: value('#ssh-trust-fingerprint').trim() });
     $('#ssh-trust-verified').checked = false;
     await refreshSshTrust();
     toast(localized('已保存本机信任。项目修改仍需点击保存。', 'Local trust saved. Item changes still require Save.'));
@@ -1771,9 +1790,14 @@ function applyTemplate(template) {
     secureNote: ['secureNote'],
     ssh: ['host', 'port', 'username', 'password'],
     api: ['url', 'apiCredential'],
+    sshCertificate: ['host', 'port', 'username', 'privateKey', 'sshCertificate'],
+    tlsCertificate: ['privateKey', 'publicKey', 'certificate', 'csr', 'caCertificate'],
+    sshAuthority: ['privateKey', 'publicKey'],
+    tlsAuthority: ['privateKey', 'caCertificate'],
     blank: [],
   };
-  value('#connection-type', template === 'blank' ? 'custom' : template);
+  value('#connection-type', template === 'sshCertificate' ? 'ssh' : ['blank', 'tlsCertificate', 'sshAuthority', 'tlsAuthority'].includes(template) ? 'custom' : template);
+  if (template === 'sshCertificate') editorSourceInput = { ...editorSourceInput, sshAuthType: 'certificate' };
   currentModules = (presets[template] || []).map((kind) => ({ id: crypto.randomUUID(), kind, name: kind, value: kind === 'port' ? '22' : '', alternateValues: [], secretValue: '', configured: false, existing: false, privateKeyName: '', pending: '', agentVisible: defaultModuleAgentVisible(kind) }));
   $('#template-picker').classList.add('hidden');
   renderModules();

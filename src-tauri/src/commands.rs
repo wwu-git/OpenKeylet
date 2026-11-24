@@ -385,6 +385,118 @@ async fn probe_ssh_host(runtime: State<'_, AppRuntime>, id: Uuid) -> Result<crat
 }
 
 #[tauri::command]
+async fn certificate_capabilities(
+    runtime: State<'_, AppRuntime>,
+) -> Result<crate::vault::CertificateCapabilities, String> {
+    require_owner_unlocked(&runtime).await?;
+    runtime
+        .vault
+        .certificate_capabilities()
+        .map_err(command_error)
+}
+
+#[tauri::command]
+async fn set_certificate_authority(
+    runtime: State<'_, AppRuntime>,
+    id: Uuid,
+    binding: Option<crate::model::CertificateAuthorityBinding>,
+) -> Result<(), String> {
+    require_owner_unlocked(&runtime).await?;
+    runtime
+        .vault
+        .set_certificate_authority(id, binding)
+        .map_err(command_error)
+}
+
+#[tauri::command]
+async fn certificate_permissions(
+    runtime: State<'_, AppRuntime>,
+    enabled: Option<bool>,
+    id: Option<Uuid>,
+    kinds: Option<Vec<crate::certificates::CertificateKind>>,
+    max_ttl_seconds: Option<u64>,
+) -> Result<crate::vault::CertificateCapabilities, String> {
+    require_owner_unlocked(&runtime).await?;
+    use crate::vault::SigningPermissionChange;
+    let change = match (enabled, id, kinds, max_ttl_seconds) {
+        (Some(value), None, None, None) => SigningPermissionChange::Enable(value),
+        (None, Some(item_id), Some(kinds), Some(max_ttl_seconds)) => {
+            SigningPermissionChange::Allow {
+                item_id,
+                kinds,
+                max_ttl_seconds,
+            }
+        }
+        (None, Some(item_id), None, None) => SigningPermissionChange::Remove(item_id),
+        _ => return Err("Choose one signing permission operation".into()),
+    };
+    runtime
+        .vault
+        .change_signing_permissions(change)
+        .map_err(command_error)
+}
+
+#[tauri::command]
+async fn certificate_issue(
+    runtime: State<'_, AppRuntime>,
+    id: Uuid,
+    request_id: Uuid,
+    request: crate::certificates::CertificateRequest,
+    ttl_seconds: u64,
+) -> Result<crate::certificates::IssuedCertificate, String> {
+    require_owner_unlocked(&runtime).await?;
+    runtime
+        .vault
+        .issue_certificate(
+            crate::vault::CertificateActor::Owner,
+            id,
+            request_id,
+            request,
+            ttl_seconds,
+        )
+        .map_err(command_error)
+}
+
+#[tauri::command]
+async fn certificate_verify(
+    runtime: State<'_, AppRuntime>,
+    request: crate::certificates::VerifyRequest,
+) -> Result<crate::certificates::VerificationReport, String> {
+    require_owner_unlocked(&runtime).await?;
+    crate::certificates::verify_certificate(&request, chrono::Utc::now().timestamp())
+        .map_err(command_error)
+}
+
+#[tauri::command]
+async fn certificate_key_check(
+    runtime: State<'_, AppRuntime>,
+    id: Uuid,
+    key_module_id: Option<Uuid>,
+    public_or_certificate: String,
+) -> Result<crate::certificates::KeyMatchReport, String> {
+    require_owner_unlocked(&runtime).await?;
+    runtime
+        .vault
+        .check_item_key(id, key_module_id, &public_or_certificate)
+        .map_err(command_error)
+}
+
+#[tauri::command]
+async fn set_ssh_host_ca_trust(
+    runtime: State<'_, AppRuntime>,
+    id: Uuid,
+    host: String,
+    port: u16,
+    fingerprint: Option<String>,
+) -> Result<(), String> {
+    require_owner_unlocked(&runtime).await?;
+    runtime
+        .vault
+        .set_ssh_host_ca_trust(id, &host, port, fingerprint.as_deref())
+        .map_err(command_error)
+}
+
+#[tauri::command]
 async fn save_connection(
     app: AppHandle,
     runtime: State<'_, AppRuntime>,
@@ -1522,6 +1634,13 @@ pub fn run_gui() -> Result<()> {
             ssh_host_trust,
             set_ssh_host_trust,
             probe_ssh_host,
+            set_ssh_host_ca_trust,
+            certificate_capabilities,
+            set_certificate_authority,
+            certificate_permissions,
+            certificate_issue,
+            certificate_verify,
+            certificate_key_check,
             oci_regions,
             api_service_catalog,
             stage_oci_key,
