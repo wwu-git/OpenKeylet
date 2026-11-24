@@ -67,6 +67,8 @@ OpenKeylet follows HTTP/HTTPS redirects, including redirects to another Origin, 
 
 The vault and master-key files remain in the current user's application-data directory. PIN protects GUI plaintext viewing and extension vault access, and verifies each passkey operation. It is not a separate encryption key and does not stop another process running as the same user.
 
+The desktop PIN session locks after five minutes without keyboard, pointer, or scroll input. Five incorrect PIN attempts trigger a 30-second cooldown for the running desktop session. Locking hides projects and activity and discards pending imports and staged keys. Sensitive copies are cleared after 30 seconds or on lock when the clipboard still matches. This cannot clear clipboard history or identify a copy of identical text made by another app.
+
 New desktop `.mvault` exports use a separate user password, a random 128-bit salt, Argon2id (64 MiB, 3 iterations, 1 lane), and XChaCha20-Poly1305 with version-bound associated data. No password or unlock key is included in the file. An incorrect password does not modify the local vault. Legacy and current CLI automatically unlocked packages still include their unlock material and must be protected like plaintext secrets. Both containers remain importable.
 
 Card, identity and secure-note fields use the existing encrypted secret envelope and default to hidden from agents. These fields alone do not enable generic SSH/HTTP/agent-fill capabilities. Browser access requires an unlocked session and a user-selected operation. Autofill checks the current origin, allows only HTTPS or local development addresses, skips hidden fields and never submits forms.
