@@ -1295,16 +1295,29 @@ fn install_tray(app: &tauri::App) -> Result<()> {
     let separator = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "tray-quit", "QUIT", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &lock, &separator, &quit])?;
+    #[cfg(target_os = "macos")]
     let icon = app
         .default_window_icon()
         .context("OpenKeylet tray icon not found")?
         .clone();
+    #[cfg(not(target_os = "macos"))]
+    let icon = tauri::include_image!("icons/tray.png");
 
-    TrayIconBuilder::with_id("openkeylet-tray")
+    let builder = TrayIconBuilder::with_id("openkeylet-tray")
         .icon(icon)
+        .icon_as_template(cfg!(target_os = "macos"))
         .tooltip("OpenKeylet — LOCAL VAULT")
         .menu(&menu)
-        .show_menu_on_left_click(false)
+        .show_menu_on_left_click(false);
+    #[cfg(target_os = "linux")]
+    let builder = builder.temp_dir_path(
+        app.path()
+            .app_cache_dir()?
+            .join("tray")
+            .join(std::process::id().to_string()),
+    );
+
+    let tray = builder
         .on_menu_event(|app, event| {
             if event.id() == "tray-open" {
                 show_main_window(app);
@@ -1345,6 +1358,21 @@ fn install_tray(app: &tauri::App) -> Result<()> {
             _ => {}
         })
         .build(app)?;
+    #[cfg(target_os = "linux")]
+    {
+        // GTK exports the dbusmenu tree from idle callbacks. Keep the indicator
+        // passive until those callbacks finish so hosts cannot cache an empty
+        // first layout and then refuse to open it to request an update.
+        tray.set_visible(false)?;
+        glib::idle_add_local_full(glib::Priority::LOW, move || {
+            if let Err(error) = tray.set_visible(true) {
+                eprintln!("OpenKeylet: failed to show the system tray: {error:#}");
+            }
+            glib::ControlFlow::Break
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = tray;
     Ok(())
 }
 
@@ -1375,8 +1403,31 @@ fn request_rounded_corners(_window: &WebviewWindow) -> Result<()> {
 }
 
 pub fn run_gui() -> Result<()> {
+    let context = tauri::generate_context!();
+    #[cfg(target_os = "linux")]
+    let context = {
+        let mut context = context;
+        let main = context
+            .config_mut()
+            .app
+            .windows
+            .iter_mut()
+            .find(|window| window.label == "main")
+            .context("Main window configuration not found")?;
+        // Both the GTK surface and WebKit backing must be transparent; an
+        // opaque native background fills the CSS-rounded corners back in.
+        main.transparent = true;
+        main.background_color = Some(tauri::window::Color(0, 0, 0, 0));
+        context
+    };
     let data_dir = app_data_dir()?;
     let mut gui_instance = GuiInstance::acquire(&data_dir)?;
+    #[cfg(target_os = "linux")]
+    if let Err(error) =
+        crate::system_integration::ensure_application_entry(&mcp::launcher_executable()?)
+    {
+        eprintln!("OpenKeylet: failed to register the application launcher: {error:#}");
+    }
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -1517,7 +1568,7 @@ pub fn run_gui() -> Result<()> {
             open_data_folder,
             window_action,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .context("OpenKeylet GUI startup failed")?;
 
     #[cfg(target_os = "macos")]

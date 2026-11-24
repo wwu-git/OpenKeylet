@@ -174,13 +174,13 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: non
   letter-spacing: .15em;
 }
 
-html.platform-macos .title-drag-region,
-html.platform-macos .title-drag-region * {
+.title-drag-region,
+.title-drag-region * {
   -webkit-user-select: none;
   user-select: none;
 }
 
-html.platform-macos .app-mark > * {
+.app-mark > * {
   pointer-events: none;
   -webkit-user-drag: none;
 }

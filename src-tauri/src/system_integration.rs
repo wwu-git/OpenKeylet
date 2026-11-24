@@ -278,6 +278,14 @@ fn xml_escape(value: &str) -> String {
 }
 
 #[cfg(target_os = "linux")]
+pub fn ensure_application_entry(executable: &Path) -> Result<()> {
+    let path = dirs::data_dir()
+        .context("Could not find Linux application data directory")?
+        .join("applications/openkeylet.desktop");
+    set_entry(&path, executable, true, EntryKind::Desktop)
+}
+
+#[cfg(target_os = "linux")]
 fn desktop_entry_path(_executable: &Path) -> Result<PathBuf> {
     Ok(dirs::desktop_dir()
         .context("Desktop directory not found")?
@@ -307,26 +315,98 @@ fn set_entry(path: &Path, executable: &Path, enabled: bool, _kind: EntryKind) ->
             parent.display()
         )
     })?;
-    let executable = desktop_exec_quote(executable.to_string_lossy().as_ref());
+    let icon_path = dirs::data_dir()
+        .context("Could not find Linux application data directory")?
+        .join("icons/hicolor/256x256/apps/openkeylet.png");
+    fs::create_dir_all(
+        icon_path
+            .parent()
+            .context("Icon path is missing a parent directory")?,
+    )?;
+    write_if_changed(&icon_path, include_bytes!("../icons/128x128@2x.png"))?;
+    let executable_path = executable.to_string_lossy();
+    let command = desktop_exec_quote(&executable_path);
+    let try_exec = desktop_entry_value(&executable_path);
+    let icon = desktop_entry_value(icon_path.to_string_lossy().as_ref());
     let content = format!(
-        "[Desktop Entry]\nType=Application\nVersion=1.0\nName=OpenKeylet\nComment=Local credential relay for AI agents\nExec={executable} gui\nTryExec={executable}\nIcon=openkeylet\nTerminal=false\nCategories=Utility;Security;\n"
+        "[Desktop Entry]\nType=Application\nVersion=1.0\nName=OpenKeylet\nComment=Local credential relay for AI agents\nExec=env GDK_BACKEND=wayland,x11 {command} gui\nTryExec={try_exec}\nIcon={icon}\nStartupWMClass=openkeylet\nTerminal=false\nCategories=Utility;Security;\n"
     );
-    fs::write(path, content)
+    write_if_changed(path, content.as_bytes())
         .with_context(|| format!("Could not write system entry:{}", path.display()))?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o755))
         .with_context(|| format!("Could not set system entry permissions:{}", path.display()))
 }
 
 #[cfg(target_os = "linux")]
+fn write_if_changed(path: &Path, content: &[u8]) -> Result<()> {
+    if fs::read(path).is_ok_and(|current| current == content) {
+        return Ok(());
+    }
+    fs::write(path, content)
+        .with_context(|| format!("Could not write application resource:{}", path.display()))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn desktop_entry_value(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+}
+
+#[cfg(any(target_os = "linux", test))]
 fn desktop_exec_quote(value: &str) -> String {
-    format!(
+    desktop_entry_value(&format!(
         "\"{}\"",
         value
             .replace('\\', "\\\\")
             .replace('"', "\\\"")
             .replace('`', "\\`")
             .replace('$', "\\$")
-    )
+            .replace('%', "%%")
+    ))
+}
+
+#[cfg(test)]
+mod desktop_entry_tests {
+    use super::desktop_exec_quote;
+
+    #[test]
+    fn desktop_exec_preserves_normal_paths_and_spaces() {
+        for (path, expected) in [
+            ("/opt/openkeylet", r#""/opt/openkeylet""#),
+            ("/opt/Open Keylet/openkeylet", r#""/opt/Open Keylet/openkeylet""#),
+            ("/opt/保险库/openkeylet", r#""/opt/保险库/openkeylet""#),
+        ] {
+            assert_eq!(desktop_exec_quote(path), expected);
+        }
+    }
+
+    #[test]
+    fn desktop_exec_control_characters_cannot_create_new_entries() {
+        let path = "/tmp/test\nHidden=true\r\nIgnored=\t/openkeylet";
+        let encoded = desktop_exec_quote(path);
+        assert_eq!(encoded, r#""/tmp/test\nHidden=true\r\nIgnored=\t/openkeylet""#);
+        assert!(!encoded.contains(['\r', '\n', '\t']));
+        let entry = format!("[Desktop Entry]\nExec={encoded} gui\nName=OpenKeylet\n");
+        assert_eq!(entry.lines().count(), 3);
+        assert!(!entry.lines().any(|line| line.starts_with("Hidden=")));
+        assert!(!entry.lines().any(|line| line.starts_with("Ignored=")));
+    }
+
+    #[test]
+    fn desktop_exec_escapes_arguments_and_neutralizes_field_codes() {
+        for (path, expected) in [
+            (r#"/tmp/a"b"#, r#""/tmp/a\\"b""#),
+            (r"/tmp/a\b", r#""/tmp/a\\\\b""#),
+            ("/tmp/a$b", r#""/tmp/a\\$b""#),
+            ("/tmp/a`b", r#""/tmp/a\\`b""#),
+            ("/tmp/a%f%U", r#""/tmp/a%%f%%U""#),
+        ] {
+            assert_eq!(desktop_exec_quote(path), expected);
+        }
+    }
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]

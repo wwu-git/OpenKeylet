@@ -6,7 +6,7 @@ const HAN_TEXT = /[\u3400-\u9fff]/;
 const isMacOS = navigator.platform.startsWith('Mac') || navigator.userAgent.includes('Macintosh');
 document.documentElement.classList.toggle('platform-macos', isMacOS);
 
-if (isMacOS) {
+{
   const titleDragRegion = document.querySelector('.title-drag-region');
   const isTitleControl = (target) => Boolean(target.closest?.('button, input, select, textarea, a, [role="button"]'));
   titleDragRegion.addEventListener('mousedown', (event) => {

@@ -1,5 +1,6 @@
 /* Local presentation preferences are independent of the encrypted vault. */
 (() => {
+  document.documentElement.classList.toggle('platform-linux', navigator.platform.startsWith('Linux'));
   const storageKey = 'openkeylet.appearance.v1';
   let preferences = { theme: 'dark', sound: false, textSize: 'standard', itemLayout: 'list' };
   try {
