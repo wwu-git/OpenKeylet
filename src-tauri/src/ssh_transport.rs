@@ -137,21 +137,25 @@ fn route_secrets(
     zeroize::Zeroizing::new(values)
 }
 
+#[derive(Clone)]
+enum ServerKeyPolicy {
+    Probe,
+    Pinned(String),
+}
+
 pub(crate) struct SshClient {
-    expected: Option<String>,
+    policy: ServerKeyPolicy,
     observed: Arc<Mutex<Option<String>>>,
-    probe: bool,
 }
 impl client::Handler for SshClient {
     type Error = russh::Error;
     async fn check_server_key(&mut self, key: &ssh_key::PublicKey) -> Result<bool, Self::Error> {
         let actual = key.fingerprint(ssh_key::HashAlg::Sha256).to_string();
         *self.observed.lock().unwrap() = Some(actual.clone());
-        Ok(!self.probe
-            && self
-                .expected
-                .as_ref()
-                .is_none_or(|expected| expected == &actual))
+        Ok(match &self.policy {
+            ServerKeyPolicy::Probe => false,
+            ServerKeyPolicy::Pinned(expected) => expected == &actual,
+        })
     }
 }
 
@@ -163,23 +167,23 @@ fn expected_key(trust: &[SshHostTrust], connection: &DecryptedConnection) -> Res
 
 async fn handshake<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     stream: S,
-    expected: Option<String>,
-    probe: bool,
+    policy: ServerKeyPolicy,
     observed: Arc<Mutex<Option<String>>>,
 ) -> Result<SshSession> {
     let token = CancellationToken::new();
     let guard = CancelOnDrop(token.clone());
     let stream = CancellableStream::new(stream, &token);
     let handler = SshClient {
-        expected: expected.clone(),
+        policy: policy.clone(),
         observed: observed.clone(),
-        probe,
     };
     let config = Arc::new(client::Config::default());
     let handle = client::connect_stream(config, stream, handler)
         .await
         .map_err(|error| {
-            if let (Some(expected), Some(actual)) = (expected, observed.lock().unwrap().as_ref()) {
+            if let (ServerKeyPolicy::Pinned(expected), Some(actual)) =
+                (policy, observed.lock().unwrap().as_ref())
+            {
                 if expected != *actual {
                     return anyhow::anyhow!(
                         "SSH host key mismatch; expected {expected}, received {actual}"
@@ -194,12 +198,17 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     })
 }
 
-async fn direct(connection: &DecryptedConnection, expected: Option<String>) -> Result<SshSession> {
+async fn direct(connection: &DecryptedConnection, expected: String) -> Result<SshSession> {
     let stream =
         tokio::net::TcpStream::connect((connection.stored.host.as_str(), connection.stored.port))
             .await
             .context("SSH TCP connection failed")?;
-    let mut session = handshake(stream, expected, false, Default::default()).await?;
+    let mut session = handshake(
+        stream,
+        ServerKeyPolicy::Pinned(expected),
+        Default::default(),
+    )
+    .await?;
     authenticate(&mut session, connection).await?;
     Ok(session)
 }
@@ -249,7 +258,7 @@ pub(crate) async fn connect(
             let trust = vault.ssh_host_trust()?;
             let a_key = expected_key(&trust, jump).context("Jump host A")?;
             let b_key = expected_key(&trust, connection).context("Target host B")?;
-            let a = direct(jump, Some(a_key)).await.context("Jump host A")?;
+            let a = direct(jump, a_key).await.context("Jump host A")?;
             let channel = a
                 .channel_open_direct_tcpip(
                     connection.stored.host.clone(),
@@ -261,8 +270,7 @@ pub(crate) async fn connect(
                 .context("Jump host A forwarding to target B failed")?;
             let mut b = handshake(
                 channel.into_stream(),
-                Some(b_key),
-                false,
+                ServerKeyPolicy::Pinned(b_key),
                 Default::default(),
             )
             .await
@@ -276,8 +284,9 @@ pub(crate) async fn connect(
                 secrets: route_secrets(connection, Some(jump)),
             })
         } else {
+            let expected = expected_key(&vault.ssh_host_trust()?, connection)?;
             Ok(SshConnection {
-                target: direct(connection, None).await?,
+                target: direct(connection, expected).await?,
                 _jump: None,
                 secrets: route_secrets(connection, None),
             })
@@ -310,7 +319,7 @@ pub async fn probe(vault: &Vault, id: Uuid) -> Result<SshHostProbe> {
         let a;
         let observed = Arc::new(Mutex::new(None));
         if let Some(jump) = &jump {
-            a = direct(jump, Some(expected_key(&vault.ssh_host_trust()?, jump)?))
+            a = direct(jump, expected_key(&vault.ssh_host_trust()?, jump)?)
                 .await
                 .context("Jump host A")?;
             let channel = a
@@ -322,13 +331,18 @@ pub async fn probe(vault: &Vault, id: Uuid) -> Result<SshHostProbe> {
                 )
                 .await
                 .context("Jump forwarding failed")?;
-            let _ = handshake(channel.into_stream(), None, true, observed.clone()).await;
+            let _ = handshake(
+                channel.into_stream(),
+                ServerKeyPolicy::Probe,
+                observed.clone(),
+            )
+            .await;
         } else {
             let stream =
                 tokio::net::TcpStream::connect((target.stored.host.as_str(), target.stored.port))
                     .await
                     .context("SSH TCP connection failed")?;
-            let _ = handshake(stream, None, true, observed.clone()).await;
+            let _ = handshake(stream, ServerKeyPolicy::Probe, observed.clone()).await;
         }
         let fingerprint = observed
             .lock()

@@ -567,6 +567,9 @@ async fn saved_ssh_credentials_authenticate_using_selected_mode_on_loopback() {
         public: parsed.public_key().clone(),
     };
     let other_public = parsed.public_key().clone();
+    let fingerprint = other_public
+        .fingerprint(russh::keys::ssh_key::HashAlg::Sha256)
+        .to_string();
     let config = Arc::new(server::Config {
         keys: vec![parsed],
         ..Default::default()
@@ -578,6 +581,9 @@ async fn saved_ssh_credentials_authenticate_using_selected_mode_on_loopback() {
     let (_dir, vault) = fixture();
     allow(&vault, &["Agent"]);
     let first=vault.agent_create(serde_json::from_value(json!({"name":"loopback","folder":"Agent","itemType":"ssh","sshAuthType":"privateKey","modules":[{"kind":"host","value":"127.0.0.1"},{"kind":"port","value":port},{"kind":"username","value":"deploy"},{"kind":"password","value":"synthetic-secret"},{"kind":"privateKey","value":key}]})).unwrap()).unwrap();
+    vault
+        .set_ssh_host_trust(first.id.parse().unwrap(), "127.0.0.1", port, Some(&fingerprint))
+        .unwrap();
     for mode in ["privateKey", "password"] {
         let current = vault.get_connection(first.id.parse().unwrap()).unwrap();
         let token: WriteOutput = current.stored.public(Some(&current.secrets)).into();
@@ -609,6 +615,9 @@ async fn saved_ssh_credentials_authenticate_using_selected_mode_on_loopback() {
     let token: WriteOutput = current.stored.public(Some(&current.secrets)).into();
     update(&vault, &token, json!({"modules":[{"id":host,"value":"::1","alternateValues":["127.0.0.1"]}]})).unwrap();
     let mut current = vault.get_connection(first.id.parse().unwrap()).unwrap();
+    vault
+        .set_ssh_host_trust(first.id.parse().unwrap(), "::1", port, Some(&fingerprint))
+        .unwrap();
     let result = crate::executor::execute_ssh(&vault, &current, "synthetic-command", None, Some(10), &Default::default(), None).await.unwrap();
     assert_eq!(result.stdout, "synthetic-ok");
     current.stored.host = "127.0.0.1".into();

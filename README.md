@@ -142,7 +142,7 @@ The Agent's `credential_fill` path still writes one selected value into the focu
 
 OpenKeylet supports password and private-key authentication, unrestricted-length commands and output, direct stdin, and recursive SFTP upload/download. Host, port, and username may be saved as defaults or supplied for the current task. Destination parent directories are created automatically and existing file or directory targets are replaced only after a complete temporary copy is ready.
 
-An item can select an existing SSH item as a single jump host. Both endpoints use their own credentials, and commands and SFTP share the connection chain. Jump routes require confirmed host fingerprints for both endpoints. Legacy direct connections retain their existing behavior. Authentication plaintext is not returned to the agent. See [SSH jump configuration and compatibility](docs/ssh-jump.md).
+An item can select an existing SSH item as a single jump host. Both endpoints use their own credentials, and commands and SFTP share the connection chain. Direct connections and jump routes require confirmed host fingerprints before authentication. Existing direct projects must confirm their endpoint fingerprint through the local client or `ssh-trust` CLI before connecting. Authentication plaintext is not returned to the agent. See [SSH jump configuration and compatibility](docs/ssh-jump.md).
 
 ### HTTP APIs
 
