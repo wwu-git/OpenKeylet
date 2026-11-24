@@ -45,7 +45,7 @@ async function until(fn,description,timeout=20000){const end=Date.now()+timeout;
 try {
   await until(()=>output.includes("READY"),"fixture startup");
   console.log("Browser fixture ready");
-  context=await chromium.launchPersistentContext(path.join(root,"profile"),{channel:"chromium",headless:true,args:[`--disable-extensions-except=${extension}`,`--load-extension=${extension}`]});
+  context=await chromium.launchPersistentContext(path.join(root,"profile"),{channel:"chromium",executablePath:process.env.OPENKEYLET_TEST_CHROMIUM || undefined,headless:true,args:[`--disable-extensions-except=${extension}`,`--load-extension=${extension}`]});
   const worker=context.serviceWorkers()[0] || await context.waitForEvent("serviceworker");
   const extensionId=new URL(worker.url()).host;
   assert.equal(extensionId,"knkjojeijgalhpdkfapohofobfomenmi");
@@ -261,21 +261,37 @@ try {
   console.log("Multiple websites, never rules, exact paths and iframe URL isolation verified");
   await popup.screenshot({path:path.join(root,"password-popup.png")});
   await popup.close();await site.bringToFront();
-  async function webauthn(operation,credentialId) {
+  async function webauthn(operation,credentialId,expectedError) {
     const nextPage=context.waitForEvent("page");
     const result=site.evaluate(async({operation,credentialId})=>{
       const challenge=new Uint8Array(32).fill(operation==="create"?9:10);
       const publicKey=operation==="create"?{challenge,rp:{id:"localhost",name:"Fixture"},user:{id:new Uint8Array([1,2,3]),name:"alice",displayName:"Alice"},pubKeyCredParams:[{type:"public-key",alg:-7}],authenticatorSelection:{residentKey:"required",userVerification:"required"},extensions:{credProps:true}}:{challenge,rpId:"localhost",userVerification:"required",allowCredentials:credentialId?[{type:"public-key",id:Uint8Array.from(atob(credentialId.replaceAll("-","+").replaceAll("_","/")),c=>c.charCodeAt(0))}]:[]};
+      if (operation === "create" && credentialId) {
+        publicKey.excludeCredentials = [{
+          type: "public-key",
+          id: Uint8Array.from(atob(credentialId.replaceAll("-", "+").replaceAll("_", "/")), c => c.charCodeAt(0)),
+        }];
+      }
       try {const credential=await navigator.credentials[operation]({publicKey});return {ok:true,instance:credential instanceof PublicKeyCredential,json:credential.toJSON()};}catch(e){return{ok:false,error:e.message,name:e.name};}
     },{operation,credentialId});
     const confirm=await nextPage;await confirm.waitForURL(/request.html/);await confirm.setViewportSize({width:400,height:600});await confirm.locator("#pin").fill("123456");
     assert.equal(await confirm.locator("#origin").textContent(),origin);
     await confirm.screenshot({path:path.join(root,`${operation}-passkey.png`)});
     await confirm.locator("#confirm").click();
-    const credential=await result;assert.equal(credential.ok,true,JSON.stringify(credential));assert.equal(credential.instance,true);return credential.json;
+    const credential = await result;
+    if (expectedError) {
+      assert.equal(credential.ok, false);
+      assert.equal(credential.name, expectedError);
+      return;
+    }
+    assert.equal(credential.ok, true, JSON.stringify(credential));
+    assert.equal(credential.instance, true);
+    return credential.json;
   }
   const registration=await webauthn("create");
   console.log("Passkey registered");
+  await webauthn("create", registration.id, "InvalidStateError");
+  console.log("Duplicate Passkey registration rejected after confirmation");
   assert.equal(registration.clientExtensionResults.credProps.rk,true);
   const publicKey=createPublicKey({key:Buffer.from(registration.response.publicKey,"base64url"),format:"der",type:"spki"});
   const attestation=readCbor(Buffer.from(registration.response.attestationObject,"base64url"));
@@ -317,7 +333,7 @@ try {
   await site.locator("#password").fill("page-isolation-sentinel");
   const isolation=await site.evaluate(()=>new Promise(resolve=>{window.postMessage({type:"vault-ui",action:"fill",id:"anything"},location.origin);setTimeout(()=>resolve(document.querySelector("#password").value),100);}));
   assert.equal(isolation,"page-isolation-sentinel");
-  console.log(JSON.stringify({ok:true,checks:["pairing","browser page guidance","live bridge status","reconnect recovery","PIN unlock","password fill","browser save","desktop update","card create/edit/fill","identity create/fill","secure note round trip","lock clears open editors","hidden fields excluded","HTTPS enforcement","cross-origin iframe denied","password generator","origin isolation","passkey create","COSE public key","verified assertion","discoverable login","cancel","abort during preparation"],artifacts:root},null,2));
+  console.log(JSON.stringify({ok:true,checks:["pairing","browser page guidance","live bridge status","reconnect recovery","PIN unlock","password fill","browser save","desktop update","card create/edit/fill","identity create/fill","secure note round trip","lock clears open editors","hidden fields excluded","HTTPS enforcement","cross-origin iframe denied","password generator","origin isolation","passkey create","duplicate registration rejected","COSE public key","verified assertion","discoverable login","cancel","abort during preparation"],artifacts:root},null,2));
 } catch(error) {
   console.error(`Browser test artifacts: ${root}`);
   for(const [index,page] of (context?.pages() || []).entries()) await page.screenshot({path:path.join(root,`failure-${index}.png`),timeout:2000}).catch(()=>{});
