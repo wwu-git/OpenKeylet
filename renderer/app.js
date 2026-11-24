@@ -243,7 +243,7 @@ const api = {
   drafts: () => invoke('owner_editor_drafts'),
   saveDraft: (draftId, input) => invoke('save_editor_draft', { draftId, input }),
   deleteDraft: (id) => invoke('delete_editor_draft', { id }),
-  copyOwnerValue: (value) => invoke('copy_owner_value', { value }),
+  copyOwnerValue: (value, sensitive = true) => invoke('copy_owner_value', { value, sensitive }),
   save: (input) => {
     const pending = currentModules.find(module => module.pendingKind === 'oci');
     return invoke('save_connection', { input, expectedUpdatedAt: editorExistingItem?.updatedAt || null, pendingOciKeyId: pending?.pending || null, pendingOciKeyModuleId: pending?.id || null });
@@ -2645,7 +2645,7 @@ document.addEventListener('click', async (event) => {
     if (action.dataset.action === 'history') await openVaultManagement('history', item.id);
     if (action.dataset.action === 'copy-name') {
       try {
-        await api.copyOwnerValue(`use ${item.name} in OpenKeylet MCP`);
+        await api.copyOwnerValue(`use ${item.name} in OpenKeylet MCP`, false);
         toast(localized('OpenKeylet MCP 使用提示已复制', 'OpenKeylet MCP use prompt copied'));
       } catch (error) { toast(cleanError(error), 'error'); }
     }
@@ -3307,7 +3307,7 @@ $('#quick-pairing-button').addEventListener('click', async event => {
     $('#browser-open-help').hidden = true;
     const errors = [];
     try {
-      await api.copyOwnerValue('chrome://extensions/');
+      await api.copyOwnerValue('chrome://extensions/', false);
       $('#browser-open-help').hidden = false;
     } catch (error) { errors.push(error); }
     try {

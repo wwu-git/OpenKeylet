@@ -28,6 +28,8 @@ pub mod ssh_transport;
 #[cfg(feature = "gui")]
 pub mod agent_registry;
 #[cfg(feature = "gui")]
+mod clipboard;
+#[cfg(feature = "gui")]
 pub mod commands;
 #[cfg(feature = "desktop-fill")]
 pub mod desktop;

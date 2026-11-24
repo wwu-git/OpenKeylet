@@ -2,6 +2,7 @@ use crate::{
     agent_registry::{AgentActionResult, AgentClientStatus, AgentRegistry},
     backup,
     browser::BrowserBridge,
+    clipboard::ClipboardGuard,
     executor,
     github_backup::{self, BackupStatus, ConnectInput, GithubBackup, RestoreResult},
     gui_instance::GuiInstance,
@@ -40,6 +41,7 @@ pub struct AppRuntime {
     pending_oci_key: Mutex<Option<(Uuid, zeroize::Zeroizing<String>)>>,
     pending_import: Mutex<Option<PendingImport>>,
     owner_session: Mutex<OwnerSession>,
+    clipboard: ClipboardGuard,
     github_backup: Mutex<GithubBackup>,
     agent_registry: AgentRegistry,
     tray_available: AtomicBool,
@@ -226,8 +228,15 @@ async fn owner_unlock(
 }
 
 #[tauri::command]
-async fn owner_lock(runtime: State<'_, AppRuntime>) -> Result<OwnerLockState, String> {
-    runtime.owner_session.lock().await.unlocked = false;
+async fn owner_lock(
+    app: AppHandle,
+    runtime: State<'_, AppRuntime>,
+) -> Result<OwnerLockState, String> {
+    {
+        let mut session = runtime.owner_session.lock().await;
+        session.unlocked = false;
+        runtime.clipboard.clear_on_lock(&app);
+    }
     *runtime.pending_import.lock().await = None;
     runtime.pending_private_key.lock().await.take();
     runtime.pending_oci_key.lock().await.take();
@@ -279,10 +288,13 @@ async fn copy_owner_value(
     app: AppHandle,
     runtime: State<'_, AppRuntime>,
     value: String,
+    sensitive: Option<bool>,
 ) -> Result<(), String> {
-    require_owner_unlocked(&runtime).await?;
-    keep_owner_unlocked(&runtime).await;
-    app.clipboard().write_text(&value).map_err(command_error)
+    let session = runtime.owner_session.lock().await;
+    if !session.unlocked && runtime.vault.owner_pin_configured().map_err(command_error)? {
+        return Err("GUI is locked; enter the six-digit PIN".to_owned());
+    }
+    runtime.clipboard.write(&app, &value, sensitive.unwrap_or(true))
 }
 
 #[tauri::command]
@@ -782,11 +794,11 @@ async fn clear_activities(app: AppHandle, runtime: State<'_, AppRuntime>) -> Res
 #[tauri::command]
 async fn copy_mcp_config(
     app: AppHandle,
-    _runtime: State<'_, AppRuntime>,
+    runtime: State<'_, AppRuntime>,
     format: String,
 ) -> Result<String, String> {
     let config = mcp::render_config(&format).map_err(command_error)?;
-    app.clipboard().write_text(&config).map_err(command_error)?;
+    runtime.clipboard.write(&app, &config, false)?;
     Ok(config)
 }
 
@@ -952,9 +964,7 @@ async fn copy_ssh_public_key(
             .to_openssh()
             .map_err(command_error)?
     };
-    app.clipboard()
-        .write_text(public_key)
-        .map_err(command_error)
+    runtime.clipboard.write(&app, &public_key, false)
 }
 
 #[tauri::command]
@@ -1567,6 +1577,7 @@ pub fn run_gui() -> Result<()> {
                 pending_oci_key: Mutex::new(None),
                 pending_import: Mutex::new(None),
                 owner_session: Mutex::new(OwnerSession::default()),
+                clipboard: ClipboardGuard::default(),
                 agent_registry,
                 tray_available: AtomicBool::new(false),
             });
