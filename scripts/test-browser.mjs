@@ -6,7 +6,7 @@ import http from "node:http";
 import net from "node:net";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { createPublicKey, verify, createHash } from "node:crypto";
+import { createPublicKey, verify, createHash, createHmac } from "node:crypto";
 import { chromium } from "playwright";
 
 const repo=path.resolve(import.meta.dirname,"..");
@@ -31,7 +31,7 @@ function readCbor(bytes, start=0) {
   }
   return read();
 }
-const html='<!doctype html><meta charset="utf-8"><title>OpenKeylet fixture</title><form><label>Username <input id="username" autocomplete="username"></label><label>Password <input id="password" type="password" autocomplete="current-password"></label><button>Sign in</button></form><form><input id="cardholder" autocomplete="cc-name"><input id="cardnumber" autocomplete="cc-number"><select id="cardmonth" autocomplete="cc-exp-month"><option value=""></option><option value="7">July</option></select><input id="cardyear" autocomplete="cc-exp-year"><input id="cardcode" autocomplete="cc-csc"><input id="hidden-card" autocomplete="cc-number" type="hidden"></form><form><input id="full-name" autocomplete="name"><input id="identity-email" autocomplete="email"><input id="address" autocomplete="address-line1"></form>';
+const html='<!doctype html><meta charset="utf-8"><title>OpenKeylet fixture</title><form><label>Username <input id="username" autocomplete="username"></label><label>Password <input id="password" type="password" autocomplete="current-password"></label><button>Sign in</button></form><form><input id="otp" type="tel" autocomplete="one-time-code" maxlength="6"><input id="hidden-otp" type="hidden" autocomplete="one-time-code"></form><form><input id="cardholder" autocomplete="cc-name"><input id="cardnumber" autocomplete="cc-number"><select id="cardmonth" autocomplete="cc-exp-month"><option value=""></option><option value="7">July</option></select><input id="cardyear" autocomplete="cc-exp-year"><input id="cardcode" autocomplete="cc-csc"><input id="hidden-card" autocomplete="cc-number" type="hidden"></form><form><input id="full-name" autocomplete="name"><input id="identity-email" autocomplete="email"><input id="address" autocomplete="address-line1"></form>';
 const server=http.createServer((req,res)=>{res.setHeader("Content-Type","text/html");res.end(html);});
 server.listen(0,"127.0.0.1"); await once(server,"listening");
 const origin=`http://localhost:${server.address().port}`;
@@ -90,12 +90,56 @@ try {
   const items=await worker.evaluate(o=>bridgeCall("password.list",{origin:o}),origin);
   const login=items[0];
   assert.equal((await worker.evaluate(p=>bridgeCall("password.get",p),{id:login.id,origin})).password,"browser-update-secret");
-  await fs.writeFile(path.join(root,"desktop-edit.json"),JSON.stringify({id:login.id,name:"Desktop renamed login",loginUris:[{uri:origin+"/",matchType:"exact"},{uri:origin+"/alternate",matchType:"exact"},{uri:origin+"/blocked",matchType:"never"}],modules:[{kind:"url",value:origin},{kind:"username"},{kind:"password"}],secrets:{password:"desktop-update-secret",namedSecrets:{username:"alice"}}}));
+  await fs.writeFile(path.join(root,"desktop-edit.json"),JSON.stringify({id:login.id,name:"Desktop renamed login",loginUris:[{uri:origin+"/",matchType:"exact"},{uri:origin+"/alternate",matchType:"exact"},{uri:origin+"/blocked",matchType:"never"}],modules:[{kind:"url",value:origin},{kind:"username"},{kind:"password"},{kind:"totp"}],secrets:{password:"desktop-update-secret",namedSecrets:{username:"alice",totp:"GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"}}}));
   await until(async()=>fs.access(path.join(root,"desktop-edited")).then(()=>true,()=>false),"desktop edit");
   await popup.getByRole("button",{name:/Desktop renamed login/}).waitFor();
   await site.bringToFront();await popup.getByRole("button",{name:/Desktop renamed login/}).click();
   await until(async()=>await site.locator("#password").inputValue()==="desktop-update-secret","desktop-to-browser update");
   console.log("Browser and desktop edits synchronized");
+  const fillCode = popup.getByRole("button", { name: "填写验证码 / Fill one-time code" });
+  await fillCode.waitFor();
+  assert.equal(await site.locator("#otp").inputValue(), "", "Filling the login must leave the code field alone");
+  const counterBefore = Math.floor(Date.now() / 30000);
+  await site.bringToFront();
+  await fillCode.click();
+  await until(async () => /^\d{6}$/.test(await site.locator("#otp").inputValue()), "one-time code fill");
+  const counterAfter = Math.floor(Date.now() / 30000);
+  const expectedCodes = [counterBefore, counterAfter].map(counter => {
+    const input = Buffer.alloc(8);
+    input.writeBigUInt64BE(BigInt(counter));
+    const digest = createHmac("sha1", "12345678901234567890").update(input).digest();
+    const offset = digest.at(-1) & 15;
+    return String((digest.readUInt32BE(offset) & 0x7fffffff) % 1000000).padStart(6, "0");
+  });
+  assert.ok(expectedCodes.includes(await site.locator("#otp").inputValue()));
+  assert.equal(await site.locator("#hidden-otp").inputValue(), "");
+  assert.equal(await site.locator("#password").inputValue(), "desktop-update-secret");
+  assert.equal(site.url(), origin + "/", "Code filling must not submit the page");
+  await site.locator("#otp").fill("");
+  await site.bringToFront();
+  await worker.evaluate(() => {
+    const original = pageStillMatches;
+    pageStillMatches = async (...args) => {
+      pageStillMatches = original;
+      await new Promise(resolve => { globalThis.resumeTotpCheck = resolve; });
+      return original(...args);
+    };
+  });
+  await fillCode.click();
+  await until(() => worker.evaluate(() => typeof globalThis.resumeTotpCheck === "function"), "pending TOTP page verification");
+  await worker.evaluate(async () => {
+    await bridgeCall("lock");
+    globalThis.resumeTotpCheck();
+  });
+  await until(async () => (await popup.locator("#error").textContent()).includes("session changed"), "pending TOTP fill cancelled");
+  assert.equal(await site.locator("#otp").inputValue(), "");
+  await popup.evaluate(() => refresh());
+  assert.equal(await fillCode.count(), 0);
+  await popup.locator("#pin").fill("123456");
+  await site.bringToFront();
+  await popup.locator("#unlock-form button").click();
+  await fillCode.waitFor();
+  console.log("One-time code filled and hidden while locked");
   // Owner management is available even when the active tab has no website.
   await site.goto("chrome://extensions");await site.bringToFront();await popup.evaluate(()=>refresh());
   await popup.locator("#full-vault summary").click();
@@ -246,7 +290,7 @@ try {
   await popup.getByRole("button",{name:/Desktop renamed login/}).click();
   await until(async()=>await site.locator("#password").inputValue()==="desktop-update-secret","additional exact URL filled");
   await site.goto(origin+"/blocked");await site.bringToFront();await popup.evaluate(()=>refresh());
-  assert.equal(await popup.getByRole("button",{name:/Desktop renamed login/}).count(),0,"Never rule must not list the login");
+  await until(async () => await popup.getByRole("button",{name:/Desktop renamed login/}).count() === 0, "Never rule excludes the login");
   assert.equal(await popup.evaluate(id=>call("fill",{id}).then(()=>false,()=>true),login.id),true,"Same origin with wrong path must reject fill");
   assert.equal(await site.locator("#password").inputValue(),"");
   await site.goto(origin);await site.bringToFront();
@@ -256,6 +300,8 @@ try {
   await until(()=>worker.evaluate(()=>[...focusedFrameByTab.values()].some(id=>id!==0)),"same-origin frame focus");
   assert.equal(await popup.evaluate(id=>call("fill",{id}).then(()=>false,()=>true),login.id),true,"Exact rule must validate target frame URL");
   assert.equal(await pathFrame.locator("#password").inputValue(),"");
+  assert.equal(await popup.evaluate(id => call("fill-totp", { id }).then(() => false, () => true), login.id), true);
+  assert.equal(await pathFrame.locator("#otp").inputValue(), "");
   await site.locator("#username").focus();await site.evaluate(()=>document.querySelector("iframe").remove());
   await popup.evaluate(()=>refresh());
   console.log("Multiple websites, never rules, exact paths and iframe URL isolation verified");
@@ -333,7 +379,7 @@ try {
   await site.locator("#password").fill("page-isolation-sentinel");
   const isolation=await site.evaluate(()=>new Promise(resolve=>{window.postMessage({type:"vault-ui",action:"fill",id:"anything"},location.origin);setTimeout(()=>resolve(document.querySelector("#password").value),100);}));
   assert.equal(isolation,"page-isolation-sentinel");
-  console.log(JSON.stringify({ok:true,checks:["pairing","browser page guidance","live bridge status","reconnect recovery","PIN unlock","password fill","browser save","desktop update","card create/edit/fill","identity create/fill","secure note round trip","lock clears open editors","hidden fields excluded","HTTPS enforcement","cross-origin iframe denied","password generator","origin isolation","passkey create","duplicate registration rejected","COSE public key","verified assertion","discoverable login","cancel","abort during preparation"],artifacts:root},null,2));
+  console.log(JSON.stringify({ok:true,checks:["pairing","browser page guidance","live bridge status","reconnect recovery","PIN unlock","password fill","TOTP fill and lock","browser save","desktop update","card create/edit/fill","identity create/fill","secure note round trip","lock clears open editors","hidden fields excluded","HTTPS enforcement","cross-origin iframe denied","password generator","origin isolation","passkey create","duplicate registration rejected","COSE public key","verified assertion","discoverable login","cancel","abort during preparation"],artifacts:root},null,2));
 } catch(error) {
   console.error(`Browser test artifacts: ${root}`);
   for(const [index,page] of (context?.pages() || []).entries()) await page.screenshot({path:path.join(root,`failure-${index}.png`),timeout:2000}).catch(()=>{});

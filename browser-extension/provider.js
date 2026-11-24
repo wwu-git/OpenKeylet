@@ -2,7 +2,9 @@
 const bridgeRequests = new Map();
 const credentialRequests = new Map();
 const preparingCredentials = new Map();
+let totpSession = 0;
 function bridgeCall(method, params = {}) {
+  if (method === "lock") totpSession++;
   if (socket?.readyState !== WebSocket.OPEN) return Promise.reject(new Error("Open OpenKeylet and connect Browser Bridge first"));
   if (bridgeRequests.size >= 32) return Promise.reject(new Error("Too many pending requests"));
   const requestId = crypto.randomUUID();
@@ -19,6 +21,7 @@ function finishBridgeRequest(message) {
   message.ok ? pending.resolve(message.result) : pending.reject(new Error(message.error || "Operation failed"));
 }
 function failBridgeRequests() {
+  totpSession++;
   clearLoginCaptures();
   for (const p of bridgeRequests.values()) { clearTimeout(p.timer); p.reject(new Error("OpenKeylet disconnected")); }
   bridgeRequests.clear();
@@ -43,7 +46,7 @@ async function loginPage(tab, origin) {
   const frameId = focusedFrameByTab.get(tab.id) ?? 0;
   const [result] = await chrome.scripting.executeScript({target:{tabId:tab.id,frameIds:[frameId]},func:()=>location.href});
   if (!result?.result || new URL(result.result).origin !== origin) throw new Error("Cannot use credentials in a different-origin frame");
-  return {frameId,url:result.result};
+  return {frameId,url:result.result,documentId:result.documentId};
 }
 async function formAction(tab, origin, mode, login, target) {
   target ||= await loginPage(tab, origin);
@@ -82,6 +85,7 @@ async function popupAction(message) {
   if (message.action === "personal-save") return bridgeCall("personal.save", {
     id: message.id || null, itemType: message.itemType, name: message.name,
     fields: message.fields, expectedUpdatedAt: message.expectedUpdatedAt });
+  const session = totpSession;
   const { tab, origin } = await activePage();
   if (message.origin !== origin) throw new Error("The website changed; reopen the extension");
   if (message.action === "personal-fill") {
@@ -105,6 +109,20 @@ async function popupAction(message) {
     await pageStillMatches(tab.id, origin);
     return formAction(tab, origin, "fill", login, target);
   }
+  if (message.action === "fill-totp") {
+    const target = await loginPage(tab, origin);
+    if (!target.documentId) throw new Error("Could not identify the current document");
+    if (session !== totpSession) throw new Error("OpenKeylet session changed; try again");
+    const { code } = await bridgeCall("password.totp", { origin: target.url, id: message.id });
+    await pageStillMatches(tab.id, origin);
+    if (session !== totpSession) throw new Error("OpenKeylet session changed; try again");
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id, documentIds: [target.documentId] },
+      func: fillOneTimeCode, args: [origin, target.url, code]
+    });
+    if (!result?.result) throw new Error("Select a visible one-time code field and try again");
+    return {};
+  }
   if (message.action === "read-form") return formAction(tab, origin, "read");
   if (message.action === "save") {
     const target = await loginPage(tab, origin);
@@ -114,6 +132,29 @@ async function popupAction(message) {
       name: message.name, username: message.username, password: message.password });
   }
   throw new Error("Unsupported operation");
+}
+
+function fillOneTimeCode(expectedOrigin, expectedUrl, code) {
+  if (location.origin !== expectedOrigin || location.href !== expectedUrl) throw new Error("The website changed");
+  const eligible = element => element instanceof HTMLInputElement
+    && ["text", "tel", "number"].includes(element.type)
+    && element.autocomplete.trim().toLowerCase().split(/\s+/).at(-1) === "one-time-code"
+    && !element.matches(":disabled") && !element.readOnly && !element.closest("[inert]")
+    && element.getClientRects().length && getComputedStyle(element).visibility === "visible"
+    && element.checkVisibility?.({ checkOpacity: true, checkVisibilityCSS: true }) !== false
+    && (element.maxLength < 0 || element.maxLength >= code.length);
+
+  let field = document.activeElement;
+  while (field?.shadowRoot?.activeElement) field = field.shadowRoot.activeElement;
+  if (!eligible(field)) {
+    const candidates = [...document.querySelectorAll("input[autocomplete]")].filter(eligible);
+    if (candidates.length !== 1) return false;
+    field = candidates[0];
+  }
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(field, code);
+  field.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true, inputType: "insertText" }));
+  field.dispatchEvent(new Event("change", { bubbles: true }));
+  return true;
 }
 
 // The browser supplies the target tab. Values never go through page messaging.

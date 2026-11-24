@@ -49,6 +49,8 @@ main form { padding: 12px 0 0; }
 .login-entry { padding: 12px; margin-bottom: 8px; text-align: left; }
 .login-entry strong { display: block; overflow-wrap: anywhere; }
 .login-entry small { font-size: 11px; }
+.login-entry-row { display: grid; gap: 4px; margin-bottom: 8px; }
+.login-entry-row .login-entry { margin-bottom: 0; }
 .secondary { margin-top: 8px; background: #303336; }
 select { width: 100%; margin-bottom: 14px; padding: 9px; color: var(--ink); background: #292c2f; border: 1px solid #4d5358; border-radius: 4px; }
 details { padding: 8px 16px; }

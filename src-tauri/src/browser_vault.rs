@@ -30,10 +30,17 @@ fn same_origin(stored: &StoredConnection, website: &str) -> bool {
         _ => false,
     }
 }
+
+fn totp_website(website: &url::Url) -> bool {
+    website.scheme() == "https"
+        || matches!(website.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
+}
+
 fn list(vault: &Vault, website: &str) -> Result<Value> {
-    passkey::origin(website)?;
+    let can_fill_totp = totp_website(&passkey::origin(website)?);
     Ok(Value::Array(vault.list_decrypted_connections()?.into_iter().filter(|c| c.stored.enabled && same_origin(&c.stored, website) && c.secrets.get("password").is_some())
-        .map(|c| json!({"id":c.stored.id,"name":c.stored.name,"username":c.secrets.get("username").unwrap_or_default(),"updatedAt":c.stored.updated_at})).collect()))
+        .map(|c| json!({"id":c.stored.id,"name":c.stored.name,"username":c.secrets.get("username").unwrap_or_default(),"updatedAt":c.stored.updated_at,
+            "hasTotp":can_fill_totp && c.secrets.get("totp").is_some_and(|seed| !seed.trim().is_empty())})).collect()))
 }
 
 async fn verify(vault: &Vault, pin: &str, throttle: &Mutex<Instant>) -> Result<bool> {
@@ -203,6 +210,22 @@ pub async fn handle(
             Ok(
                 json!({"username":c.secrets.get("username").unwrap_or_default(),"password":c.secrets.get("password").context("No password saved")?}),
             )
+        }
+        "password.totp" => {
+            let website = text(p, "origin")?;
+            ensure!(
+                totp_website(&passkey::origin(website)?),
+                "One-time codes require HTTPS or localhost"
+            );
+            let c = vault.get_connection(Uuid::parse_str(text(p, "id")?)?)?;
+            ensure!(
+                c.stored.enabled && same_origin(&c.stored, website),
+                "This login does not belong to the current website"
+            );
+            let seed = c.secrets.get("totp").context("No one-time code saved")?;
+            let code = crate::browser::current_totp(seed)
+                .map_err(|_| anyhow::anyhow!("The saved one-time code configuration is invalid"))?;
+            Ok(json!({"code": code}))
         }
         "password.save" => vault.save_browser_login(p),
         _ => bail!("Unsupported browser operation"),
@@ -591,6 +614,66 @@ mod tests {
         let disk = std::fs::read_to_string(d.path().join("vault.json")).unwrap();
         assert!(!disk.contains("changed-secret"));
         assert!(!disk.contains("super-secret"));
+    }
+
+    #[tokio::test]
+    async fn browser_totp_returns_only_a_code_for_an_enabled_matching_login() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open(dir.path().into()).unwrap();
+        vault.set_owner_pin("123456").unwrap();
+        let seed = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+        let login = |name, enabled| {
+            let input: ConnectionInput = serde_json::from_value(json!({
+                "name":name, "enabled":enabled, "itemType":"login",
+                "loginUris":[
+                    {"uri":"https://example.test/verify","matchType":"exact"},
+                    {"uri":"http://example.test/verify","matchType":"exact"}
+                ],
+                "modules":[{"kind":"password"},{"kind":"totp"}],
+                "secrets":{"password":"synthetic-password","namedSecrets":{"totp":seed}}
+            })).unwrap();
+            vault.save_connection(input).unwrap().id
+        };
+        let id = login("Example", true);
+        let disabled = login("Disabled example", false);
+        let mut session = Session::default();
+        let throttle = Mutex::new(Instant::now());
+        let origin = "https://example.test/verify";
+        let params = json!({"id":id,"origin":origin});
+        assert!(
+            handle(&vault, &mut session, &throttle, "password.totp", &params)
+                .await
+                .is_err()
+        );
+        handle(&vault, &mut session, &throttle, "unlock", &json!({"pin":"123456"}))
+            .await
+            .unwrap();
+        let entries = handle(&vault, &mut session, &throttle, "password.list", &params)
+            .await
+            .unwrap();
+        assert_eq!(entries.as_array().unwrap().len(), 1);
+        assert_eq!(entries[0]["hasTotp"], true);
+        assert!(!entries.to_string().contains(seed));
+        let result = handle(&vault, &mut session, &throttle, "password.totp", &params)
+            .await
+            .unwrap();
+        assert_eq!(result.as_object().unwrap().len(), 1);
+        let code = result["code"].as_str().unwrap();
+        assert_eq!(code.len(), 6);
+        assert!(code.bytes().all(|byte| byte.is_ascii_digit()));
+        for (candidate, website) in [
+            (id, "https://other.test/verify"),
+            (id, "https://example.test/other"),
+            (id, "http://example.test/verify"),
+            (disabled, origin),
+        ] {
+            assert!(handle(
+                &vault, &mut session, &throttle, "password.totp",
+                &json!({"id":candidate,"origin":website}),
+            )
+            .await
+            .is_err());
+        }
     }
 
     #[tokio::test]

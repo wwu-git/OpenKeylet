@@ -64,7 +64,21 @@ async function refresh() {
       const title = document.createElement("strong"); title.textContent = item.name;
       const sub = document.createElement("small"); sub.textContent = item.username || "填写 / Fill";
       button.append(title, sub); button.addEventListener("click", async () => { button.disabled=true; try { await call("fill",{id:item.id}); showError("已填写 / Filled"); } catch(e) { showError(e); } finally { button.disabled=false; } });
-      $("#entries").append(button);
+      if (item.hasTotp) {
+        const row = document.createElement("div"); row.className = "login-entry-row";
+        const totp = document.createElement("button"); totp.type = "button";
+        totp.textContent = "填写验证码 / Fill one-time code";
+        totp.addEventListener("click", async () => {
+          totp.disabled = true;
+          try { await call("fill-totp", { id: item.id }); showError("已填写验证码 / One-time code filled"); }
+          catch (e) { showError(e); }
+          finally { totp.disabled = false; }
+        });
+        row.append(button, totp);
+        $("#entries").append(row);
+      } else {
+        $("#entries").append(button);
+      }
     }
   } catch(e) {
     closeSave(); closePersonal(); OpenKeyletVaultUI.close();
