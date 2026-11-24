@@ -1,7 +1,8 @@
-function createCertificatePanel({ invoke, getState, localized: l, escapeHtml: e, toast, cleanError, refresh }) {
+function createCertificatePanel({ invoke, getState, isUnlocked, localized: l, escapeHtml: e, toast, cleanError, refresh }) {
   const panel = document.querySelector('#certificate-panel');
   let capabilities = { enabled: false, grants: [], authorities: [] };
   let busy = false;
+  let epoch = 0;
   const q = selector => panel.querySelector(selector);
   const label = (id, text, control) => `<label class="field"><span>${text}</span>${control.replace('id="x"', `id="${id}"`)}</label>`;
   const select = (id, text) => label(id, text, '<select class="input" id="x"></select>');
@@ -56,7 +57,11 @@ function createCertificatePanel({ invoke, getState, localized: l, escapeHtml: e,
     modules();
   }
   async function load() {
-    capabilities = await invoke('certificate_capabilities');
+    if (!isUnlocked()) return;
+    const requestEpoch = epoch;
+    const next = await invoke('certificate_capabilities');
+    if (requestEpoch !== epoch) return;
+    capabilities = next;
     q('#certificate-enabled').checked = Boolean(capabilities.enabled);
     q('#certificate-status').textContent = l('Agent 签发', 'Agent signing') + (capabilities.enabled ? l('已开启', ' enabled') : l('已关闭', ' disabled'));
     q('#certificate-grants').innerHTML = (capabilities.grants || []).map(grant => {
@@ -66,12 +71,23 @@ function createCertificatePanel({ invoke, getState, localized: l, escapeHtml: e,
     }).join('');
   }
   async function run(operation) {
-    if (busy) return;
+    if (busy || !isUnlocked()) return;
+    const requestEpoch = epoch;
     busy = true;
     const controls = [...panel.querySelectorAll('button, input, select, textarea')];
     controls.forEach(control => { control.disabled = true; });
-    try { await operation(); } catch (error) { toast(cleanError(error), 'error'); }
+    try { await operation(() => requestEpoch === epoch); }
+    catch (error) { if (requestEpoch === epoch) toast(cleanError(error), 'error'); }
     finally { controls.forEach(control => { control.disabled = false; }); busy = false; }
+  }
+  function clear() {
+    epoch++;
+    capabilities = { enabled: false, grants: [], authorities: [] };
+    q('#certificate-enabled').checked = false;
+    q('#certificate-status').replaceChildren();
+    q('#certificate-grants').replaceChildren();
+    for (const id of ['payload', 'names', 'key-id', 'authority-input', 'intermediates', 'result']) q(`#certificate-${id}`).value = '';
+    q('#certificate-request-id').value = crypto.randomUUID();
   }
   function pemCertificates(text) {
     if (!text.trim()) return [];
@@ -84,8 +100,9 @@ function createCertificatePanel({ invoke, getState, localized: l, escapeHtml: e,
   panel.addEventListener('click', event => {
     const target = event.target.closest('button');
     if (!target) return;
-    void run(async () => {
+    void run(async current => {
       const id = target.id;
+      const showResult = result => { if (current()) q('#certificate-result').value = JSON.stringify(result, null, 2); };
       if (['certificate-match', 'certificate-verify', 'certificate-issue'].includes(id)) q('#certificate-result').value = '';
       if (target.dataset.removeSigning) await invoke('certificate_permissions', { id: target.dataset.removeSigning });
       else if (id === 'certificate-register') {
@@ -96,20 +113,20 @@ function createCertificatePanel({ invoke, getState, localized: l, escapeHtml: e,
         await refresh();
       } else if (id === 'certificate-allow') await invoke('certificate_permissions', { id: selected('#certificate-item'), kinds: [q('#certificate-grant-kind').value], maxTtlSeconds: Number(q('#certificate-max-ttl').value) });
       else if (id === 'certificate-new-request') q('#certificate-request-id').value = crypto.randomUUID();
-      else if (id === 'certificate-match') q('#certificate-result').value = JSON.stringify(await invoke('certificate_key_check', { id: selected('#certificate-operation-item'), publicOrCertificate: q('#certificate-payload').value }), null, 2);
-      else if (id === 'certificate-verify') q('#certificate-result').value = JSON.stringify(await invoke('certificate_verify', { request: { certificate: q('#certificate-payload').value, authorities: [q('#certificate-authority-input').value], intermediates: pemCertificates(q('#certificate-intermediates').value), identity: q('#certificate-names').value.trim(), kind: q('#certificate-kind').value } }), null, 2);
+      else if (id === 'certificate-match') showResult(await invoke('certificate_key_check', { id: selected('#certificate-operation-item'), publicOrCertificate: q('#certificate-payload').value }));
+      else if (id === 'certificate-verify') showResult(await invoke('certificate_verify', { request: { certificate: q('#certificate-payload').value, authorities: [q('#certificate-authority-input').value], intermediates: pemCertificates(q('#certificate-intermediates').value), identity: q('#certificate-names').value.trim(), kind: q('#certificate-kind').value } }));
       else if (id === 'certificate-issue') {
         const kind = q('#certificate-kind').value;
         const names = q('#certificate-names').value.split(',').map(value => value.trim()).filter(Boolean);
         const request = kind.startsWith('ssh') ? { kind, publicKey: q('#certificate-payload').value, principals: names, keyId: q('#certificate-key-id').value, ...(kind === 'sshUser' ? { extensions: [] } : {}) } : { kind, csr: q('#certificate-payload').value, names };
-        q('#certificate-result').value = JSON.stringify(await invoke('certificate_issue', { id: selected('#certificate-operation-item'), requestId: q('#certificate-request-id').value, request, ttlSeconds: Number(q('#certificate-ttl').value) }), null, 2);
+        showResult(await invoke('certificate_issue', { id: selected('#certificate-operation-item'), requestId: q('#certificate-request-id').value, request, ttlSeconds: Number(q('#certificate-ttl').value) }));
       }
-      await load();
+      if (current()) await load();
     });
   });
   q('#certificate-item').addEventListener('change', modules);
-  q('#certificate-enabled').addEventListener('change', () => { const enabled = q('#certificate-enabled').checked; void run(async () => { try { await invoke('certificate_permissions', { enabled }); } finally { await load(); } }); });
+  q('#certificate-enabled').addEventListener('change', () => { const enabled = q('#certificate-enabled').checked; void run(async current => { try { await invoke('certificate_permissions', { enabled }); } finally { if (current()) await load(); } }); });
   panel.addEventListener('toggle', () => { if (!busy) void run(load); }, true);
   render();
-  return { render, load };
+  return { render, load, clear };
 }

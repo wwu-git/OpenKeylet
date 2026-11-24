@@ -943,20 +943,25 @@ impl Vault {
         &self,
         executable: &str,
         browser_bridge: crate::model::BrowserBridgeState,
+        unlocked: bool,
     ) -> Result<AppState> {
         let document = self.read_document()?;
-        let connections = document
-            .connections
-            .iter()
-            .map(|connection| {
-                let secrets: SecretBundle =
-                    self.inner.key.decrypt(&connection.encrypted_secrets)?;
-                Ok(connection.public(Some(&secrets)))
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let connections = if unlocked {
+            document
+                .connections
+                .iter()
+                .map(|connection| {
+                    let secrets: SecretBundle =
+                        self.inner.key.decrypt(&connection.encrypted_secrets)?;
+                    Ok(connection.public(Some(&secrets)))
+                })
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            Vec::new()
+        };
         Ok(AppState {
             connections,
-            activities: document.activities.clone(),
+            activities: if unlocked { document.activities } else { Vec::new() },
             mcp: McpState {
                 status: "ready".to_owned(),
                 error: String::new(),

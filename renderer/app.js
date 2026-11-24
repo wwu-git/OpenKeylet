@@ -235,6 +235,7 @@ let editorSshRouteMode = "direct";
 const api = {
   state: () => invoke('get_state'),
   ownerStatus: () => invoke('owner_status'),
+  ownerTouch: () => invoke('owner_touch'),
   ownerSetPin: (pin) => invoke('owner_set_pin', { pin }),
   ownerDisablePin: () => invoke('owner_disable_pin'),
   ownerUnlock: (pin) => invoke('owner_unlock', { pin }),
@@ -341,6 +342,10 @@ let activityMatchCount = 0;
 let activityLoadPending = false;
 const expandedActivityErrors = new Set();
 let ownerLockState = { pinConfigured: false, unlocked: false, expiresInSeconds: 0 };
+let ownerEpoch = 0;
+let ownerTouchAt = -Infinity;
+let ownerTouchPending = false;
+let ownerLockPending = false;
 let ownerPinSetupRequested = false;
 let confirmationResolver = null;
 let confirmationPreviousFocus = null;
@@ -415,6 +420,16 @@ function clearOwnerPlaintext() {
   closeEditor();
   currentModules.forEach((module) => { module.secretValue = ''; });
   $$('[data-secret-value]').forEach((input) => { input.value = ''; });
+  currentModules = [];
+  editorExistingItem = null;
+  $('#connection-form').reset();
+  $('#module-list').replaceChildren();
+  $('#passkey-list').replaceChildren();
+  $('#login-uri-list').replaceChildren();
+  $('#vault-folder-options').replaceChildren();
+  $('#ssh-jump-item').replaceChildren();
+  $('#ssh-route-path').replaceChildren();
+  $('#ssh-trust-status').replaceChildren();
 }
 
 function pinInputs(id) {
@@ -460,35 +475,83 @@ function renderOwnerLock() {
     editorDrafts = [];
     renderDrafts();
   }
+  $('.app-shell').inert = layerVisible;
   clearPin('owner-pin');
   clearPin('owner-pin-confirm');
   if (layerVisible) setTimeout(() => focusPin('owner-pin'), 0);
 }
 
+function applyOwnerLockState(next) {
+  const changed = next.pinConfigured !== ownerLockState.pinConfigured || next.unlocked !== ownerLockState.unlocked;
+  ownerLockState = next;
+  if (!changed) return;
+  ownerEpoch++;
+  ownerTouchAt = -Infinity;
+  const locked = next.pinConfigured && !next.unlocked;
+  if (locked) {
+    if (state) state = { ...state, connections: [], activities: [] };
+    certificatePanel?.clear();
+    $('#toast-region').replaceChildren();
+  }
+  renderOwnerLock();
+  if (locked && state) render();
+}
+
 async function refreshOwnerLock(showError = true) {
+  const epoch = ownerEpoch;
   try {
-    ownerLockState = await api.ownerStatus();
-    renderOwnerLock();
+    const next = await api.ownerStatus();
+    if (epoch === ownerEpoch && !ownerLockPending) applyOwnerLockState(next);
   } catch (error) {
     if (showError) toast(cleanError(error), 'error');
   }
 }
 
 async function lockOwner() {
-  try { ownerLockState = await api.ownerLock(); } catch (_) { ownerLockState.unlocked = false; }
-  renderOwnerLock();
+  if (!ownerLockState.pinConfigured) return;
+  ownerLockPending = true;
+  applyOwnerLockState({ ...ownerLockState, unlocked: false, expiresInSeconds: 0 });
+  const button = $('#owner-unlock-action');
+  button.disabled = true;
+  try { await api.ownerLock(); }
+  catch (error) { toast(cleanError(error), 'error'); }
+  finally { ownerLockPending = false; button.disabled = false; }
+}
+
+async function reportOwnerActivity(event) {
+  if (!event.isTrusted || document.hidden || !ownerLockState.pinConfigured || !ownerLockState.unlocked || ownerTouchPending) return;
+  const now = performance.now();
+  if (now - ownerTouchAt < 1000) return;
+  ownerTouchAt = now;
+  ownerTouchPending = true;
+  const epoch = ownerEpoch;
+  try {
+    const next = await api.ownerTouch();
+    if (epoch === ownerEpoch) applyOwnerLockState(next);
+  } catch (_) {
+    if (epoch === ownerEpoch) await refreshOwnerLock(false);
+  } finally {
+    ownerTouchPending = false;
+  }
 }
 
 async function refresh(showError = true) {
+  const epoch = ownerEpoch;
   try {
-    state = await api.state();
+    const next = await api.state();
+    if (epoch !== ownerEpoch) return;
+    state = ownerLockState.pinConfigured && !ownerLockState.unlocked
+      ? { ...next, connections: [], activities: [] }
+      : next;
     try {
       systemIntegrationState = await api.systemIntegration();
     } catch (_) {
       systemIntegrationState = { desktopShortcut: false, launchAtLogin: false };
     }
+    if (epoch !== ownerEpoch) return;
     language = state.settings.language === 'en' ? 'en' : 'zh';
     await githubBackup.refresh();
+    if (epoch !== ownerEpoch) return;
     applyLanguage();
     render();
   } catch (error) {
@@ -1066,8 +1129,11 @@ async function refreshDrafts(showError = false) {
     renderDrafts();
     return;
   }
+  const epoch = ownerEpoch;
   try {
-    editorDrafts = await api.drafts();
+    const drafts = await api.drafts();
+    if (epoch !== ownerEpoch) return;
+    editorDrafts = drafts;
     renderDrafts();
   } catch (error) {
     if (showError) toast(cleanError(error), 'error');
@@ -1141,7 +1207,7 @@ function applySettingsSearch() {
 
 let certificatePanel;
 function renderSettings() {
-  certificatePanel ??= createCertificatePanel({ invoke, getState: () => state, localized, escapeHtml, toast, cleanError, refresh: () => refresh() });
+  certificatePanel ??= createCertificatePanel({ invoke, getState: () => state, isUnlocked: () => ownerLockState.unlocked, localized, escapeHtml, toast, cleanError, refresh: () => refresh() });
   certificatePanel.render();
   if (ownerLockState.unlocked) void certificatePanel.load().catch(() => {});
   renderAgentWriteSettings();
@@ -1891,6 +1957,8 @@ async function animateInlineEditor(open) {
 
 async function openEditor(item = null, draft = null) {
   if (editorOpening) return false;
+  if (!ownerLockState.unlocked) return false;
+  const epoch = ownerEpoch;
   editorOpening = true;
   try {
     const launcher = document.activeElement;
@@ -1912,6 +1980,7 @@ async function openEditor(item = null, draft = null) {
         return false;
       }
     }
+    if (epoch !== ownerEpoch) return false;
     const source = draft?.input || item || null;
     removedSecretFields = new Set();
     itemEditorGeneration++;
@@ -2237,9 +2306,8 @@ async function savePinSettings() {
   }
   toggle.disabled = true;
   try {
-    ownerLockState = await api.ownerDisablePin();
     ownerPinSetupRequested = false;
-    renderOwnerLock();
+    applyOwnerLockState(await api.ownerDisablePin());
     renderMetrics();
     renderSettings();
     toast(localized('PIN 锁已关闭', 'PIN lock disabled'));
@@ -3241,6 +3309,7 @@ $('#connection-form').addEventListener('submit', async (event) => {
 });
 $('#owner-lock-form').addEventListener('submit', async (event) => {
   event.preventDefault();
+  if (ownerLockPending) return;
   const pin = readPin('owner-pin');
   if (!/^\d{6}$/.test(pin)) return toast(localized('PIN 必须是六位数字', 'PIN must contain six digits'), 'error');
   if (!ownerLockState.pinConfigured && pin !== readPin('owner-pin-confirm')) return toast(localized('两次 PIN 不一致', 'PIN entries do not match'), 'error');
@@ -3250,18 +3319,20 @@ $('#owner-lock-form').addEventListener('submit', async (event) => {
   cancelButton.disabled = true;
   try {
     const settingPin = !ownerLockState.pinConfigured;
-    ownerLockState = ownerLockState.pinConfigured ? await api.ownerUnlock(pin) : await api.ownerSetPin(pin);
+    const epoch = ownerEpoch;
+    const next = settingPin ? await api.ownerSetPin(pin) : await api.ownerUnlock(pin);
+    if (epoch !== ownerEpoch) return;
     ownerPinSetupRequested = false;
-    renderOwnerLock();
-    if (state) {
-      renderMetrics();
-      renderSettings();
-    }
+    applyOwnerLockState(next);
     if (settingPin) toast(localized('PIN 锁已开启', 'PIN lock enabled'));
+    await refresh();
     await refreshDrafts(true);
-    await githubBackup.refresh();
   } catch (error) {
-    toast(cleanError(error), 'error');
+    const message = String(error?.message || error);
+    const cooldown = message.match(/(?:wait|retry in)\s+(\d+)\s*(?:s\b|seconds?\b)/i);
+    toast(cooldown
+      ? localized(`PIN 尝试次数过多，请在 ${cooldown[1]} 秒后重试`, `Too many PIN attempts. Try again in ${cooldown[1]} seconds.`)
+      : message === 'Incorrect PIN' ? localized('PIN 不正确', message) : cleanError(error), 'error');
     clearPin('owner-pin');
     focusPin('owner-pin');
   } finally {
@@ -3408,7 +3479,13 @@ window.__TAURI__.event.listen('pin-setup-requested', async () => {
   renderOwnerLock();
   if (state) renderSettings();
 });
-window.addEventListener('focus', async () => { await refresh(false); await refreshOwnerLock(false); await refreshDrafts(); });
+window.__TAURI__.event.listen('owner-locked', () => {
+  if (ownerLockState.pinConfigured) applyOwnerLockState({ ...ownerLockState, unlocked: false, expiresInSeconds: 0 });
+});
+window.addEventListener('focus', async () => { await refreshOwnerLock(false); await refresh(false); await refreshDrafts(); });
+for (const event of ['pointerdown', 'keydown', 'wheel']) {
+  window.addEventListener(event, reportOwnerActivity, { capture: true, passive: true });
+}
 window.addEventListener('resize', positionModuleMenu);
 $('.form-scroll', $('#connection-modal')).addEventListener('scroll', positionModuleMenu, { passive: true });
 $('#connections-list').addEventListener('scroll', positionModuleMenu, { passive: true });

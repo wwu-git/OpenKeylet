@@ -1,3 +1,7 @@
+#[path = "owner_session.rs"]
+mod owner_session;
+
+use owner_session::OwnerSession;
 use crate::{
     agent_registry::{AgentActionResult, AgentClientStatus, AgentRegistry},
     backup,
@@ -37,10 +41,8 @@ pub struct AppRuntime {
     vault: Vault,
     executable: String,
     browser: BrowserBridge,
-    pending_private_key: Mutex<Option<PendingPrivateKey>>,
-    pending_oci_key: Mutex<Option<(Uuid, zeroize::Zeroizing<String>)>>,
-    pending_import: Mutex<Option<PendingImport>>,
-    owner_session: Mutex<OwnerSession>,
+    owner: Mutex<OwnerState>,
+    app: AppHandle,
     clipboard: ClipboardGuard,
     github_backup: Mutex<GithubBackup>,
     agent_registry: AgentRegistry,
@@ -54,8 +56,55 @@ struct PendingImport {
 }
 
 #[derive(Default)]
-struct OwnerSession {
-    unlocked: bool,
+struct OwnerState {
+    session: OwnerSession,
+    pending_private_key: Option<PendingPrivateKey>,
+    pending_oci_key: Option<(Uuid, zeroize::Zeroizing<String>)>,
+    pending_import: Option<PendingImport>,
+}
+
+impl OwnerState {
+    fn lock(&mut self, runtime: &AppRuntime) {
+        self.session.lock();
+        self.pending_private_key = None;
+        self.pending_oci_key = None;
+        self.pending_import = None;
+        runtime.clipboard.clear_on_lock(&runtime.app);
+    }
+}
+
+impl AppRuntime {
+    async fn owner_state(&self) -> Result<(tokio::sync::MutexGuard<'_, OwnerState>, bool), String> {
+        let mut owner = self.owner.lock().await;
+        let configured = self.vault.owner_pin_configured().map_err(command_error)?;
+        if configured && owner.session.expired(Instant::now()) {
+            owner.lock(self);
+            let _ = self.app.emit("owner-locked", ());
+        }
+        Ok((owner, configured))
+    }
+
+    async fn authorized_owner(&self) -> Result<tokio::sync::MutexGuard<'_, OwnerState>, String> {
+        let (owner, configured) = self.owner_state().await?;
+        if owner.session.status(configured, Instant::now()).unlocked {
+            Ok(owner)
+        } else {
+            Err("GUI is locked; enter the six-digit PIN".to_owned())
+        }
+    }
+
+    async fn owner_epoch(&self) -> Result<u64, String> {
+        Ok(self.authorized_owner().await?.session.epoch())
+    }
+
+    async fn same_owner(&self, epoch: u64) -> Result<tokio::sync::MutexGuard<'_, OwnerState>, String> {
+        let owner = self.authorized_owner().await?;
+        if owner.session.epoch() == epoch {
+            Ok(owner)
+        } else {
+            Err("The vault was locked; start the operation again".to_owned())
+        }
+    }
 }
 
 const DEFAULT_WINDOW_SIZE: (f64, f64) = (720.0, 820.0);
@@ -138,36 +187,12 @@ fn remember_window_size(app: &AppHandle) {
 }
 
 async fn owner_lock_state(runtime: &AppRuntime) -> Result<OwnerLockState, String> {
-    let pin_configured = runtime
-        .vault
-        .owner_pin_configured()
-        .map_err(command_error)?;
-    let mut session = runtime.owner_session.lock().await;
-    if !pin_configured {
-        session.unlocked = false;
-        return Ok(OwnerLockState {
-            pin_configured,
-            unlocked: true,
-            expires_in_seconds: 0,
-        });
-    }
-    Ok(OwnerLockState {
-        pin_configured,
-        unlocked: session.unlocked,
-        expires_in_seconds: 0,
-    })
+    let (owner, configured) = runtime.owner_state().await?;
+    Ok(owner.session.status(configured, Instant::now()))
 }
 
 async fn require_owner_unlocked(runtime: &AppRuntime) -> Result<(), String> {
-    if owner_lock_state(runtime).await?.unlocked {
-        Ok(())
-    } else {
-        Err("GUI is locked; enter the six-digit PIN".to_owned())
-    }
-}
-
-async fn keep_owner_unlocked(runtime: &AppRuntime) {
-    runtime.owner_session.lock().await.unlocked = true;
+    runtime.authorized_owner().await.map(drop)
 }
 
 fn command_error(error: impl std::fmt::Display) -> String {
@@ -182,10 +207,9 @@ fn emit_changed(app: &AppHandle) {
 async fn get_state(runtime: State<'_, AppRuntime>) -> Result<AppState, String> {
     runtime.browser.sync().await;
     let browser = runtime.browser.status().await;
-    runtime
-        .vault
-        .app_state(&runtime.executable, browser)
-        .map_err(command_error)
+    let (owner, configured) = runtime.owner_state().await?;
+    let unlocked = owner.session.status(configured, Instant::now()).unlocked;
+    runtime.vault.app_state(&runtime.executable, browser, unlocked).map_err(command_error)
 }
 
 #[tauri::command]
@@ -194,21 +218,32 @@ async fn owner_status(runtime: State<'_, AppRuntime>) -> Result<OwnerLockState, 
 }
 
 #[tauri::command]
+async fn owner_touch(runtime: State<'_, AppRuntime>) -> Result<OwnerLockState, String> {
+    let (mut owner, configured) = runtime.owner_state().await?;
+    let now = Instant::now();
+    owner.session.touch(now);
+    Ok(owner.session.status(configured, now))
+}
+
+#[tauri::command]
 async fn owner_set_pin(
     runtime: State<'_, AppRuntime>,
     pin: String,
 ) -> Result<OwnerLockState, String> {
+    let pin = zeroize::Zeroizing::new(pin);
+    let mut owner = runtime.owner.lock().await;
     runtime.vault.set_owner_pin(&pin).map_err(command_error)?;
-    keep_owner_unlocked(&runtime).await;
-    owner_lock_state(&runtime).await
+    let now = Instant::now();
+    owner.session.unlock(now);
+    Ok(owner.session.status(true, now))
 }
 
 #[tauri::command]
 async fn owner_disable_pin(runtime: State<'_, AppRuntime>) -> Result<OwnerLockState, String> {
-    require_owner_unlocked(&runtime).await?;
+    let mut owner = runtime.authorized_owner().await?;
     runtime.vault.disable_owner_pin().map_err(command_error)?;
-    runtime.owner_session.lock().await.unlocked = false;
-    owner_lock_state(&runtime).await
+    owner.lock(&runtime);
+    Ok(owner.session.status(false, Instant::now()))
 }
 
 #[tauri::command]
@@ -216,31 +251,27 @@ async fn owner_unlock(
     runtime: State<'_, AppRuntime>,
     pin: String,
 ) -> Result<OwnerLockState, String> {
-    if !runtime
-        .vault
-        .verify_owner_pin(&pin)
-        .map_err(command_error)?
-    {
-        return Err("Incorrect PIN".to_owned());
+    let pin = zeroize::Zeroizing::new(pin);
+    let (mut owner, configured) = runtime.owner_state().await?;
+    if let Some(seconds) = owner.session.retry_seconds(Instant::now()) {
+        return Err(format!("Too many incorrect PIN attempts; wait {seconds}s"));
     }
-    keep_owner_unlocked(&runtime).await;
-    owner_lock_state(&runtime).await
+    if !runtime.vault.verify_owner_pin(&pin).map_err(command_error)? {
+        return Err(match owner.session.reject_pin(Instant::now()) {
+            Some(seconds) => format!("Incorrect PIN; wait {seconds}s before trying again"),
+            None => "Incorrect PIN".to_owned(),
+        });
+    }
+    let now = Instant::now();
+    owner.session.unlock(now);
+    Ok(owner.session.status(configured, now))
 }
 
 #[tauri::command]
-async fn owner_lock(
-    app: AppHandle,
-    runtime: State<'_, AppRuntime>,
-) -> Result<OwnerLockState, String> {
-    {
-        let mut session = runtime.owner_session.lock().await;
-        session.unlocked = false;
-        runtime.clipboard.clear_on_lock(&app);
-    }
-    *runtime.pending_import.lock().await = None;
-    runtime.pending_private_key.lock().await.take();
-    runtime.pending_oci_key.lock().await.take();
-    owner_lock_state(&runtime).await
+async fn owner_lock(runtime: State<'_, AppRuntime>) -> Result<OwnerLockState, String> {
+    let (mut owner, configured) = runtime.owner_state().await?;
+    owner.lock(&runtime);
+    Ok(owner.session.status(configured, Instant::now()))
 }
 
 #[tauri::command]
@@ -248,8 +279,7 @@ async fn owner_secret_view(
     runtime: State<'_, AppRuntime>,
     id: Uuid,
 ) -> Result<OwnerSecretView, String> {
-    require_owner_unlocked(&runtime).await?;
-    keep_owner_unlocked(&runtime).await;
+    let _owner = runtime.authorized_owner().await?;
     runtime.vault.owner_secret_view(id).map_err(command_error)
 }
 
@@ -257,8 +287,7 @@ async fn owner_secret_view(
 async fn owner_editor_drafts(
     runtime: State<'_, AppRuntime>,
 ) -> Result<Vec<OwnerEditorDraft>, String> {
-    require_owner_unlocked(&runtime).await?;
-    keep_owner_unlocked(&runtime).await;
+    let _owner = runtime.authorized_owner().await?;
     runtime.vault.list_editor_drafts().map_err(command_error)
 }
 
@@ -268,8 +297,7 @@ async fn save_editor_draft(
     draft_id: Option<Uuid>,
     mut input: ConnectionInput,
 ) -> Result<OwnerEditorDraft, String> {
-    require_owner_unlocked(&runtime).await?;
-    keep_owner_unlocked(&runtime).await;
+    let _owner = runtime.authorized_owner().await?;
     input.private_key_import_path.clear();
     runtime
         .vault
@@ -290,10 +318,9 @@ async fn copy_owner_value(
     value: String,
     sensitive: Option<bool>,
 ) -> Result<(), String> {
-    let session = runtime.owner_session.lock().await;
-    if !session.unlocked && runtime.vault.owner_pin_configured().map_err(command_error)? {
-        return Err("GUI is locked; enter the six-digit PIN".to_owned());
-    }
+    let mut owner = runtime.authorized_owner().await?;
+    owner.session.touch(Instant::now());
+    let value = zeroize::Zeroizing::new(value);
     runtime.clipboard.write(&app, &value, sensitive.unwrap_or(true))
 }
 
@@ -316,7 +343,7 @@ async fn stage_oci_key(
 ) -> Result<Option<Uuid>, String> {
     use std::io::Read;
     let mut text = zeroize::Zeroizing::new(text);
-    require_owner_unlocked(&runtime).await?;
+    let epoch = runtime.owner_epoch().await?;
     let source = source.unwrap_or_default();
     if !matches!(source, OciKeySource::Input) && text.is_some() {
         return Err("Key text is only accepted for manual input".to_owned());
@@ -345,9 +372,8 @@ async fn stage_oci_key(
                 .ok_or_else(|| "Enter the OCI signing key".to_owned())?,
         ),
     };
-    let mut pending = runtime.pending_oci_key.lock().await;
-    require_owner_unlocked(&runtime).await?;
-    replace_pending_oci_key(&mut pending, pem).map(Some)
+    let mut owner = runtime.same_owner(epoch).await?;
+    replace_pending_oci_key(&mut owner.pending_oci_key, pem).map(Some)
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -371,7 +397,8 @@ fn replace_pending_oci_key(
 
 #[tauri::command]
 async fn discard_oci_key(runtime: State<'_, AppRuntime>, id: Uuid) -> Result<(), String> {
-    let mut pending = runtime.pending_oci_key.lock().await;
+    let mut owner = runtime.owner.lock().await;
+    let pending = &mut owner.pending_oci_key;
     if pending.as_ref().is_some_and(|(key_id, _)| *key_id == id) {
         pending.take();
     }
@@ -517,10 +544,9 @@ async fn save_connection(
     pending_oci_key_id: Option<Uuid>,
     pending_oci_key_module_id: Option<Uuid>,
 ) -> Result<PublicConnection, String> {
-    require_owner_unlocked(&runtime).await?;
-    let mut pending_oci = runtime.pending_oci_key.lock().await;
+    let mut owner = runtime.authorized_owner().await?;
     if let Some(id) = pending_oci_key_id {
-        let pem = pending_oci
+        let pem = owner.pending_oci_key
             .as_ref()
             .filter(|(candidate, _)| *candidate == id)
             .map(|(_, pem)| pem.as_str())
@@ -544,20 +570,18 @@ async fn save_connection(
                 .insert(name.to_owned(), pem.to_owned());
         }
     }
-    let mut pending = runtime.pending_private_key.lock().await;
-    let private_key = staged_ssh_key(&mut input, pending.as_ref())?;
+    let private_key = staged_ssh_key(&mut input, owner.pending_private_key.as_ref())?;
     let connection = runtime
         .vault
         .save_connection_with_private_key(input, expected_updated_at.as_deref(), private_key)
         .map_err(command_error)?;
     if private_key.is_some() {
-        pending.take();
+        owner.pending_private_key.take();
     }
-    drop(pending);
     if pending_oci_key_id.is_some() {
-        pending_oci.take();
+        owner.pending_oci_key.take();
     }
-    drop(pending_oci);
+    drop(owner);
     emit_changed(&app);
     Ok(connection)
 }
@@ -700,7 +724,10 @@ async fn test_connection(
     id: Uuid,
 ) -> Result<String, String> {
     let started = Instant::now();
-    let connection = runtime.vault.get_connection(id).map_err(command_error)?;
+    let connection = {
+        let _owner = runtime.authorized_owner().await?;
+        runtime.vault.get_connection(id).map_err(command_error)?
+    };
     let connection_name = connection.stored.name.clone();
     let result: anyhow::Result<String> =
         if connection.stored.test_target(&connection.secrets).is_some() {
@@ -889,7 +916,7 @@ async fn stage_private_key(
     source: String,
     passphrase: Option<String>,
 ) -> Result<Option<PrivateKeyPreview>, String> {
-    require_owner_unlocked(&runtime).await?;
+    let epoch = runtime.owner_epoch().await?;
     let passphrase = zeroize::Zeroizing::new(passphrase);
     let pending = match source.as_str() {
         "generate" => PendingPrivateKey::generate(),
@@ -913,19 +940,20 @@ async fn stage_private_key(
         _ => return Err("Unknown SSH key source".into()),
     }
     .map_err(command_error)?;
-    require_owner_unlocked(&runtime).await?;
+    let mut owner = runtime.same_owner(epoch).await?;
     let preview = PrivateKeyPreview {
         id: pending.id,
         name: pending.name.clone(),
         fingerprint: pending.fingerprint.clone(),
     };
-    *runtime.pending_private_key.lock().await = Some(pending);
+    owner.pending_private_key = Some(pending);
     Ok(Some(preview))
 }
 
 #[tauri::command]
 async fn discard_private_key(runtime: State<'_, AppRuntime>, id: Uuid) -> Result<(), String> {
-    let mut pending = runtime.pending_private_key.lock().await;
+    let mut owner = runtime.owner.lock().await;
+    let pending = &mut owner.pending_private_key;
     if pending.as_ref().is_some_and(|key| key.id == id) {
         pending.take();
     }
@@ -939,12 +967,10 @@ async fn copy_ssh_public_key(
     pending_id: Option<Uuid>,
     item_id: Option<Uuid>,
 ) -> Result<(), String> {
-    require_owner_unlocked(&runtime).await?;
+    let owner = runtime.authorized_owner().await?;
     let public_key = if let Some(id) = pending_id {
-        runtime
+        owner
             .pending_private_key
-            .lock()
-            .await
             .as_ref()
             .filter(|key| key.id == id)
             .map(|key| key.public_key.clone())
@@ -1138,7 +1164,7 @@ async fn export_backup(
     runtime: State<'_, AppRuntime>,
     password: String,
 ) -> Result<Option<String>, String> {
-    require_owner_unlocked(&runtime).await?;
+    let epoch = runtime.owner_epoch().await?;
     let password = zeroize::Zeroizing::new(password);
     let selected = app
         .dialog()
@@ -1149,6 +1175,7 @@ async fn export_backup(
     let Some(path) = selected else {
         return Ok(None);
     };
+    let _owner = runtime.same_owner(epoch).await?;
     let path = path.into_path().map_err(command_error)?;
     backup::export_protected(&runtime.vault, &path, &password).map_err(command_error)?;
     Ok(Some(path.to_string_lossy().into_owned()))
@@ -1156,13 +1183,10 @@ async fn export_backup(
 
 #[tauri::command]
 async fn github_backup_status(runtime: State<'_, AppRuntime>) -> Result<BackupStatus, String> {
-    require_owner_unlocked(&runtime).await?;
-    runtime
-        .github_backup
-        .lock()
-        .await
-        .status()
-        .map_err(command_error)
+    let epoch = runtime.owner_epoch().await?;
+    let backup = runtime.github_backup.lock().await;
+    let _owner = runtime.same_owner(epoch).await?;
+    backup.status().map_err(command_error)
 }
 
 #[tauri::command]
@@ -1188,13 +1212,10 @@ async fn github_backup_generate_key(runtime: State<'_, AppRuntime>) -> Result<St
 
 #[tauri::command]
 async fn github_backup_recovery_key(runtime: State<'_, AppRuntime>) -> Result<String, String> {
-    require_owner_unlocked(&runtime).await?;
-    runtime
-        .github_backup
-        .lock()
-        .await
-        .recovery_key()
-        .map_err(command_error)
+    let epoch = runtime.owner_epoch().await?;
+    let backup = runtime.github_backup.lock().await;
+    let _owner = runtime.same_owner(epoch).await?;
+    backup.recovery_key().map_err(command_error)
 }
 
 #[tauri::command]
@@ -1271,7 +1292,7 @@ async fn import_backup(
     runtime: State<'_, AppRuntime>,
     password: String,
 ) -> Result<Option<ImportSummary>, String> {
-    require_owner_unlocked(&runtime).await?;
+    let epoch = runtime.owner_epoch().await?;
     let password = zeroize::Zeroizing::new(password);
     let selected = app
         .dialog()
@@ -1281,6 +1302,7 @@ async fn import_backup(
     let Some(path) = selected else {
         return Ok(None);
     };
+    let _owner = runtime.same_owner(epoch).await?;
     let path = path.into_path().map_err(command_error)?;
     let summary =
         backup::import_with_password(&runtime.vault, &path, &password).map_err(command_error)?;
@@ -1294,8 +1316,11 @@ async fn prepare_import(
     runtime: State<'_, AppRuntime>,
     format: String,
 ) -> Result<Option<serde_json::Value>, String> {
-    require_owner_unlocked(&runtime).await?;
-    *runtime.pending_import.lock().await = None;
+    let epoch = {
+        let mut owner = runtime.authorized_owner().await?;
+        owner.pending_import = None;
+        owner.session.epoch()
+    };
     let extension = match format.as_str() {
         "bitwarden" => "json",
         "chrome" => "csv",
@@ -1309,7 +1334,7 @@ async fn prepare_import(
     let Some(path) = selected else {
         return Ok(None);
     };
-    require_owner_unlocked(&runtime).await?;
+    let mut owner = runtime.same_owner(epoch).await?;
     let parsed = crate::migration::read(&path.into_path().map_err(command_error)?, &format)
         .map_err(command_error)?;
     let id = Uuid::new_v4().to_string();
@@ -1318,7 +1343,7 @@ async fn prepare_import(
         .protect_local_state(&parsed.entries)
         .map_err(command_error)?;
     let result = serde_json::json!({"id":id,"preview":parsed.preview});
-    *runtime.pending_import.lock().await = Some(PendingImport {
+    owner.pending_import = Some(PendingImport {
         id,
         created: Instant::now(),
         encrypted,
@@ -1332,8 +1357,8 @@ async fn commit_import(
     runtime: State<'_, AppRuntime>,
     id: String,
 ) -> Result<ImportSummary, String> {
-    require_owner_unlocked(&runtime).await?;
-    let mut slot = runtime.pending_import.lock().await;
+    let mut owner = runtime.authorized_owner().await?;
+    let slot = &mut owner.pending_import;
     let pending = slot.as_ref().ok_or("Choose an import file first")?;
     if pending.id != id {
         return Err("Import preview changed; choose the file again".into());
@@ -1357,7 +1382,7 @@ async fn commit_import(
 
 #[tauri::command]
 async fn cancel_import(runtime: State<'_, AppRuntime>) -> Result<(), String> {
-    *runtime.pending_import.lock().await = None;
+    runtime.owner.lock().await.pending_import = None;
     Ok(())
 }
 
@@ -1448,17 +1473,15 @@ fn install_tray(app: &tauri::App) -> Result<()> {
             } else if event.id() == "tray-lock" {
                 let handle = app.clone();
                 tauri::async_runtime::spawn(async move {
-                    let pin_configured = handle.state::<AppRuntime>().vault.owner_pin_configured();
-                    handle
-                        .state::<AppRuntime>()
-                        .owner_session
-                        .lock()
-                        .await
-                        .unlocked = false;
-                    show_main_window(&handle);
-                    if matches!(pin_configured, Ok(false)) {
-                        let _ = handle.emit("pin-setup-requested", ());
+                    let runtime = handle.state::<AppRuntime>();
+                    if let Ok((mut owner, configured)) = runtime.owner_state().await {
+                        owner.lock(&runtime);
+                        let _ = handle.emit(
+                            if configured { "owner-locked" } else { "pin-setup-requested" },
+                            (),
+                        );
                     }
+                    show_main_window(&handle);
                 });
             } else if event.id() == "tray-quit" {
                 if let Err(error) =
@@ -1573,13 +1596,24 @@ pub fn run_gui() -> Result<()> {
                 vault,
                 executable,
                 browser,
-                pending_private_key: Mutex::new(None),
-                pending_oci_key: Mutex::new(None),
-                pending_import: Mutex::new(None),
-                owner_session: Mutex::new(OwnerSession::default()),
+                owner: Mutex::new(OwnerState::default()),
+                app: app.handle().clone(),
                 clipboard: ClipboardGuard::default(),
                 agent_registry,
                 tray_available: AtomicBool::new(false),
+            });
+
+            let owner_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tick.tick().await;
+                    let runtime = owner_app.state::<AppRuntime>();
+                    if runtime.owner.lock().await.session.expired(Instant::now()) {
+                        let _ = owner_lock_state(&runtime).await;
+                    }
+                }
             });
 
             let window = app.get_webview_window("main").context("Main window not found")?;
@@ -1632,6 +1666,7 @@ pub fn run_gui() -> Result<()> {
         .invoke_handler(tauri::generate_handler![
             get_state,
             owner_status,
+            owner_touch,
             owner_set_pin,
             owner_disable_pin,
             owner_unlock,
