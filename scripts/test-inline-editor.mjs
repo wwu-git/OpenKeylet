@@ -153,28 +153,45 @@ try {
   const toggle = id => row(id).locator('.item-disclosure');
   const editor = page.locator('#connection-modal');
   if (process.argv.includes('--grid-editor')) {
-    await page.setViewportSize({width:690,height:900});
     await page.locator('[data-page="settings"]').click();
     await page.locator('#item-layout').selectOption('grid');
     await page.locator('[data-page="connections"]').click();
-    await page.evaluate(async () => {
-      const sample=structuredClone(fixture.state.connections[0]);
-      sample.modules.push({kind:'privateKey',configured:true,agentVisible:false});
-      fixture.state.connections=Array.from({length:81},(_,index)=>({...structuredClone(sample),id:`grid-${index}`,name:`Synthetic grid item ${index}`}));
-      await refresh();
-    });
-    await toggle('grid-0').click();
-    await page.waitForFunction(() => !document.querySelector('#connection-modal').classList.contains('is-folding'));
-    const geometry=await page.evaluate(() => {
-      const bounds=el=>{const r=el.getBoundingClientRect();return {top:r.top,bottom:r.bottom,height:r.height,width:r.width};};
-      const card=document.querySelector('.connection-card.is-editing');
-      return {card:bounds(card),editor:bounds(document.querySelector('#connection-modal')),form:bounds(document.querySelector('#connection-form')),next:bounds(card.nextElementSibling),rows:getComputedStyle(document.querySelector('#connections-list')).gridTemplateRows};
-    });
-    console.log(JSON.stringify(geometry));
-    await page.screenshot({path:path.join(artifacts,'grid-editor-expanded.png')});
-    assert.ok(geometry.card.bottom>=geometry.editor.bottom-1,`Expanded card must contain the editor: ${JSON.stringify(geometry)}`);
-    assert.ok(geometry.next.top>=geometry.editor.bottom-1,`Following grid cards must start below the editor: ${JSON.stringify(geometry)}`);
+    const results=[];
+    for (const count of [3,81]) for (const width of [690,460]) for (const size of ['standard','large']) {
+      await page.setViewportSize({width,height:900});
+      await page.locator('#text-size').evaluate((select,value)=>{select.value=value;select.dispatchEvent(new Event('change',{bubbles:true}));},size);
+      await page.evaluate(async count => {
+        const sample=structuredClone(fixture.state.connections[0]);
+        sample.modules=sample.modules.filter(module=>module.kind!=='privateKey');
+        sample.modules.push({kind:'privateKey',configured:true,agentVisible:false});
+        fixture.state.connections=Array.from({length:count},(_,index)=>({...structuredClone(sample),id:`grid-${index}`,name:`Synthetic grid item ${index}`}));
+        await refresh();
+      },count);
+      await toggle('grid-0').click();
+      await page.waitForFunction(() => !document.querySelector('#connection-modal').classList.contains('is-folding'));
+      const geometry=await page.evaluate(() => {
+        const bounds=el=>{const r=el.getBoundingClientRect();return {top:r.top,bottom:r.bottom,height:r.height,width:r.width};};
+        const card=document.querySelector('.connection-card.is-editing');
+        return {card:bounds(card),editor:bounds(document.querySelector('#connection-modal')),form:bounds(document.querySelector('#connection-form')),next:bounds(card.nextElementSibling)};
+      });
+      results.push({count,width,size,...geometry});
+      assert.ok(geometry.card.bottom>=geometry.editor.bottom-1,`Expanded card must contain the editor: ${JSON.stringify(results.at(-1))}`);
+      assert.ok(geometry.next.top>=geometry.editor.bottom-1,`Following grid cards must start below the editor: ${JSON.stringify(results.at(-1))}`);
+      await page.screenshot({path:path.join(artifacts,`grid-editor-${count}-${width}-${size}.png`)});
+      const save=page.locator('#save-connection-button');
+      await save.scrollIntoViewIfNeeded();
+      assert.equal(await save.evaluate(button=>{const r=button.getBoundingClientRect();return button.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2));}),true,'Save must be reachable above subsequent grid cards');
+      await save.click({trial:true});
+      await editor.locator('.modal-footer [data-close-modal]').click();
+      await editor.waitFor({state:'hidden'});
+      await toggle('grid-0').click();
+      await page.waitForFunction(() => !document.querySelector('#connection-modal').classList.contains('is-folding'));
+      assert.equal(await editor.isVisible(),true,'Collapsed grid editor reopens');
+      await editor.locator('.modal-footer [data-close-modal]').click();
+      await editor.waitFor({state:'hidden'});
+    }
     assert.deepEqual(errors,[]);
+    console.log(JSON.stringify(results));
     console.log(`Grid editor passed: ${artifacts}`);
   } else if (process.argv.includes('--grid')) {
     const order = () => page.locator('.connection-card').evaluateAll(rows => rows.map(row => row.dataset.itemId));

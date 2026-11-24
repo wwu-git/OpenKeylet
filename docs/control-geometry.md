@@ -79,3 +79,5 @@ logical item order. Reordering filtered items retains the hidden items' slots.
 
 Run `OPENKEYLET_TEST_CHROME=chrome node scripts/test-inline-editor.mjs --grid`
 for the isolated grid regression. It uses simulated items, not the user's vault.
+Run the same script with `--grid-editor` to check expanded editor height,
+following-card placement and footer access with 81 simulated items.
