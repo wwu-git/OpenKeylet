@@ -1,0 +1,11 @@
+ts	phase	decision	why	evidence	result
+2026-11-24T19:42:55+08:00	frame	首批 AWS OCI 和四家 Token 服务; 其余厂商调研	用户确认范围且不同服务的认证不能按品牌通配	docs/api-provider-integration.md	设计中
+2026-11-24T19:42:55+08:00	design	采用类型化 URL 注册表和稳定 AWS 模块绑定; 复用原生传输	协议规则集中且不硬编码云操作	docs/api-provider-integration.md	两个设计候选已合成; 无可验证的异厂商评审模型
+2026-11-24T19:42:55+08:00	baseline	记录实现前完整回归	对照原有 HTTP OCI SSH 证书及备份行为	ad35fbb; cargo test --locked --offline	281项通过; 独立OpenSSH默认忽略
+2026-11-24T20:10:00+08:00	implementation	限定十类 AWS 端点的普通 SigV4; 不新增 SDK 依赖	最新 SDK MSRV 高于声明; 特殊 S3 等规则不猜测支持	src-tauri/src/aws.rs; scripts/aws-signature-oracle.py	官方参考及五组 SDK 数据通过; 实际线缆表单和 JSON 独立复算一致
+2026-11-24T20:10:00+08:00	compatibility	保留 Azure/GCP 已有显式 Bearer; 不获取或刷新 OAuth	避免将原有手工 access token 当新原生流程删除	src-tauri/src/api_provider.rs	仅指定端点和同服务商匹配; JSON/PEM 不是 Token
+2026-11-24T20:10:00+08:00	security	认证注入后再拒绝原生 Host 和传输头	只在用户请求头校验会遗漏存储 custom/apiKey 配置	src-tauri/src/provider_transport_tests.rs	两种模式的晚注入回归通过
+2026-11-24T20:10:00+08:00	security	区域元数据仅取可见且有效的绑定字段	隐藏 URL 不能间接暴露区域	src-tauri/src/api_provider_tests.rs	隐藏区域与不匹配配置回归通过
+2026-11-24T20:10:00+08:00	ui	复用标准模块和 UUID 角色绑定; 只检测实际容器溢出	模板用于填写; 装饰性倾斜造成段落2px偏差并非控件遮挡	scripts/test-inline-editor.mjs; docs/api-provider-integration.md	AWS 690/460px及 OCI 服务目录 证书 UI通过; 已人工查看截图
+2026-11-24T20:10:00+08:00	acceptance	保留本机模拟和真实账户验收边界	通过签名和模拟服务不能证明云账户权限或当前聊天工具	docs/api-provider-integration.md	306项通过; 1默认忽略; 默认及无界面构建成功; 旧MCP写入动态回归通过
+2026-11-24T20:10:00+08:00	review	独立只读复审及脱敏隐私扫描	发现并关闭晚注入问题; 不夸大模型多样性或真实云验证	docs/api-provider-integration.md	无剩余审核问题; 唯一扫描命中为模拟 AWS 测试签名
