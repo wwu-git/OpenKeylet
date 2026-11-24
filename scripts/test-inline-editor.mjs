@@ -152,7 +152,47 @@ try {
   const row = id => page.locator(`.connection-card[data-item-id="${id}"]`);
   const toggle = id => row(id).locator('.item-disclosure');
   const editor = page.locator('#connection-modal');
-  if (process.argv.includes('--name-toggle')) {
+  if (process.argv.includes('--editor-footer')) {
+    const results=[];
+    for (const mode of ['list','grid','modal']) for (const width of [690,460]) for (const size of ['standard','large']) for (const language of ['en','zh']) {
+      await page.setViewportSize({width,height:760});
+      await page.locator('[data-page="settings"]').click();
+      await page.locator('#item-layout').selectOption(mode==='grid'?'grid':'list');
+      await page.locator('#text-size').selectOption(size);
+      await page.locator(`[data-language="${language}"]`).click();
+      await page.locator('[data-page="connections"]').click();
+      if (mode==='modal') await page.locator('#add-connection-button').click();
+      else await toggle('alpha').click();
+      await editor.waitFor({state:'visible'});
+      await page.waitForFunction(()=>!document.querySelector('#connection-modal').classList.contains('is-folding'));
+      const footer=editor.locator('.modal-footer');
+      await footer.scrollIntoViewIfNeeded();
+      const geometry=await footer.evaluate(footer=>{
+        const bounds=el=>{const r=el.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom};};
+        return {footer:bounds(footer),buttons:[...footer.querySelectorAll('.button')].map(button=>({button:bounds(button),well:bounds(button.closest('.command-well'))}))};
+      });
+      results.push({mode,width,size,language,...geometry});
+      for (const {button,well} of geometry.buttons) {
+        assert.ok(button.top>=well.top-1&&button.bottom<=well.bottom+1&&button.left>=well.left-1&&button.right<=well.right+1,`Footer button must fit inside its well: ${JSON.stringify(results.at(-1))}`);
+        assert.ok(well.top>=geometry.footer.top-1&&well.bottom<=geometry.footer.bottom+1,`Footer must contain its button wells: ${JSON.stringify(results.at(-1))}`);
+      }
+      for (const button of await footer.locator('.button').all()) {
+        await button.scrollIntoViewIfNeeded();
+        const visible=await button.evaluate(button=>{
+          const r=button.getBoundingClientRect();
+          return [[r.left+2,r.top+2],[r.right-2,r.top+2],[r.left+2,r.bottom-2],[r.right-2,r.bottom-2]].every(([x,y])=>x>=0&&x<innerWidth&&y>=0&&y<innerHeight&&button.contains(document.elementFromPoint(x,y)));
+        });
+        assert.equal(visible,true,`Every footer button corner must be visible and clickable: ${JSON.stringify({mode,width,size,language})}`);
+        await button.click({trial:true});
+      }
+      await footer.screenshot({path:path.join(artifacts,`editor-footer-${mode}-${width}-${size}-${language}.png`)});
+      await footer.locator('[data-close-modal]').click();
+      await editor.waitFor({state:'hidden'});
+    }
+    assert.deepEqual(errors,[]);
+    console.log(JSON.stringify(results));
+    console.log(`Editor footer passed: ${artifacts}`);
+  } else if (process.argv.includes('--name-toggle')) {
     const name=id=>row(id).locator('.connection-name');
     const settled=async open=>{
       await editor.waitFor({state:open?'visible':'hidden'});
