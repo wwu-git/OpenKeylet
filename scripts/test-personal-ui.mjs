@@ -23,7 +23,7 @@ try {
   const errors = []; page.on("pageerror",e=>errors.push(e.message));
   await page.addInitScript(() => {
     const state = {settings:{language:"zh",closeBehavior:"tray",browserEnabled:true,browserPort:39272},connections:[],activities:[],mcp:{status:"ready",endpoint:"fixture",stdioCommand:"fixture"},browserBridge:{status:"listening",enabled:true,connected:true,paired:true,endpoint:"fixture"},security:{encrypted:true,storage:"fixture"}};
-    window.fixture = {saved:[],drafts:[],exports:[],copies:[],imports:[],trash:[],history:[{password:"synthetic-previous-password",changedAt:"2026-01-01T00:00:00Z"}],state};
+    window.fixture = {saved:[],drafts:[],exports:[],copies:[],pairings:[],browserOpens:0,imports:[],trash:[],history:[{password:"synthetic-previous-password",changedAt:"2026-01-01T00:00:00Z"}],state};
     window.__TAURI__ = {event:{listen:async()=>()=>{}},core:{invoke:async(command,args={}) => {
       if(command==="get_state") return structuredClone(state);
       if(command==="owner_status") return {pinConfigured:false,unlocked:true};
@@ -46,7 +46,9 @@ try {
         return item;
       }
       if(command==="generate_password") return "Aa1!".repeat(32).slice(0,args.options.length);
-      if(command==="copy_owner_value") {fixture.copies.push(args.value);return;}
+      if(command==="copy_owner_value") {if(fixture.failCopy)throw Error("Copy failed");fixture.copies.push(args.value);return;}
+      if(command==="quick_pair_browser") {fixture.pairings.push(args.port);if(fixture.failPairing)throw Error("Pairing failed");state.settings.browserEnabled=true;state.settings.browserPort=args.port;return;}
+      if(command==="open_chromium_browser") {fixture.browserOpens++;if(fixture.failBrowser)throw Error("Browser failed");return;}
       if(command==="export_backup") {fixture.exports.push(args.password);return "fixture.mvault";}
       if(command==="import_backup") return {added:0,merged:0};
       if(command==="prepare_import") return {id:"fixture-import",preview:{total:4,types:{login:1,card:1,identity:1,secureNote:1},passkeys:1,skippedDeleted:1,warnings:["defaultDomainMatch","passwordHistory"]}};
@@ -402,6 +404,34 @@ try {
   assert.deepEqual(await page.evaluate(()=>serializeItem(false).loginUris),[{uri:"https://example.com/login",matchType:"exact"}]);
   await page.evaluate(()=>closeEditor());
   await page.locator('[data-page="settings"]').click();
+  await page.locator('#browser-port').fill('39273');
+  const pairingCases = [
+    {copy:false,pairing:false,browser:false,errors:[]},
+    {copy:false,pairing:true,browser:false,errors:['Pairing failed']},
+    {copy:false,pairing:false,browser:true,errors:['Browser failed']},
+    {copy:true,pairing:false,browser:false,errors:['Copy failed']},
+    {copy:true,pairing:true,browser:true,errors:['Copy failed','Pairing failed','Browser failed']},
+    {copy:false,pairing:false,browser:false,errors:[]},
+  ];
+  for (const [index, sample] of pairingCases.entries()) {
+    await page.evaluate(sample=>{
+      fixture.failCopy=sample.copy;fixture.failPairing=sample.pairing;fixture.failBrowser=sample.browser;
+      document.querySelectorAll('.toast').forEach(toast=>toast.remove());
+    },sample);
+    const previousCopies=await page.evaluate(()=>fixture.copies.length);
+    await page.locator('#quick-pairing-button').click();
+    await page.waitForFunction(()=>!document.querySelector('#quick-pairing-button').disabled);
+    assert.equal(await page.evaluate(()=>fixture.browserOpens),index+1);
+    assert.deepEqual(await page.evaluate(()=>fixture.pairings),Array(index+1).fill(39273));
+    assert.equal(await page.evaluate(()=>fixture.copies.length),previousCopies+Number(!sample.copy));
+    if(!sample.copy)assert.equal(await page.evaluate(()=>fixture.copies.at(-1)),'chrome://extensions/');
+    assert.equal(await page.locator('#browser-open-help').isVisible(),!sample.copy);
+    assert.deepEqual(await page.locator('#toast-region .toast.error').allTextContents(),sample.errors);
+    const messages=await page.locator('#toast-region .toast').allTextContents();
+    if(sample.errors.length)assert.ok(!messages.some(message=>/配对已准备|Pairing is ready/.test(message)));
+    else assert.ok(messages.some(message=>/配对已准备|Pairing is ready/.test(message)));
+  }
+  await page.evaluate(()=>document.querySelectorAll('.toast').forEach(toast=>toast.remove()));
   await page.locator("#header-export-backup-button").click();
   await page.locator("#backup-password").fill("synthetic-test-password");
   await page.locator("#backup-password-confirm").fill("synthetic-test-password");
@@ -483,5 +513,5 @@ try {
   await page.screenshot({path:path.join(artifacts,"narrow-card-editor.png")});
   assert.ok(await page.evaluate(()=>document.querySelector("#connection-modal .modal-card").getBoundingClientRect().bottom<=innerHeight));
   assert.deepEqual(errors,[]);
-  console.log(JSON.stringify({ok:true,checks:["combined add/draft selector","draft preservation and recovery","card editor","encrypted field payload","one header search and filter panel with Ctrl/Cmd+F and independent page queries","multiple host and URL addresses, default switching, removal, drafts, failed save and address search","combined keyword, type, exact folder and enabled status filters","unsaved edits survive filtering and are saved as drafts","460px filter controls","multiline secure note","generator inserts password","backup password flow","multiple website rules","migration preview/cancel/commit","password history","trash restore and purge from settings","narrow layout"],artifacts},null,2));
+  console.log(JSON.stringify({ok:true,checks:["combined add/draft selector","draft preservation and recovery","card editor","encrypted field payload","one header search and filter panel with Ctrl/Cmd+F and independent page queries","multiple host and URL addresses, default switching, removal, drafts, failed save and address search","combined keyword, type, exact folder and enabled status filters","unsaved edits survive filtering and are saved as drafts","460px filter controls","multiline secure note","generator inserts password","browser address copy, pairing, launch failures and recovery","backup password flow","multiple website rules","migration preview/cancel/commit","password history","trash restore and purge from settings","narrow layout"],artifacts},null,2));
 } finally {await browser.close();server.close();}

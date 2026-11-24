@@ -850,7 +850,7 @@ async fn quick_pair_browser(
     app: AppHandle,
     runtime: State<'_, AppRuntime>,
     port: u16,
-) -> Result<bool, String> {
+) -> Result<(), String> {
     runtime
         .vault
         .update_settings_patch(SettingsPatch {
@@ -866,10 +866,9 @@ async fn quick_pair_browser(
         .await
         .map_err(command_error)?;
 
-    let browser_opened = open_chromium_extensions_page();
     emit_changed(&app);
 
-    Ok(browser_opened)
+    Ok(())
 }
 
 #[tauri::command]
@@ -945,58 +944,61 @@ fn browser_extension_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-#[cfg(windows)]
-fn open_chromium_extensions_page() -> bool {
-    let mut candidates = Vec::new();
-    for root in ["LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)"] {
-        let Some(root) = std::env::var_os(root) else {
-            continue;
-        };
-        let root = PathBuf::from(root);
-        candidates.push(root.join("Google/Chrome/Application/chrome.exe"));
-        candidates.push(root.join("Microsoft/Edge/Application/msedge.exe"));
-        candidates.push(root.join("BraveSoftware/Brave-Browser/Application/brave.exe"));
-    }
-    candidates.extend(["chrome.exe", "msedge.exe", "brave.exe"].map(PathBuf::from));
-    candidates.into_iter().any(|candidate| {
-        if candidate.components().count() > 1 && !candidate.is_file() {
-            return false;
+#[tauri::command]
+fn open_chromium_browser() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let mut candidates = Vec::new();
+        for root in ["LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)"] {
+            if let Some(root) = std::env::var_os(root) {
+                let root = PathBuf::from(root);
+                candidates.push(root.join("Google/Chrome/Application/chrome.exe"));
+                candidates.push(root.join("Microsoft/Edge/Application/msedge.exe"));
+                candidates.push(root.join("BraveSoftware/Brave-Browser/Application/brave.exe"));
+            }
         }
-        Command::new(candidate)
-            .arg("--new-tab")
-            .arg("chrome://extensions")
-            .spawn()
-            .is_ok()
-    })
-}
-
-#[cfg(target_os = "macos")]
-fn open_chromium_extensions_page() -> bool {
-    ["Google Chrome", "Microsoft Edge", "Brave Browser"]
+        candidates.extend(["chrome.exe", "msedge.exe", "brave.exe"].map(PathBuf::from));
+        if candidates.into_iter().any(|candidate| {
+            (candidate.components().count() == 1 || candidate.is_file())
+                && Command::new(candidate).arg("--new-tab").spawn().is_ok()
+        }) {
+            return Ok(());
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if ["Google Chrome", "Microsoft Edge", "Brave Browser"]
+            .into_iter()
+            .any(|browser| {
+                Command::new("open")
+                    .args(["-a", browser])
+                    .status()
+                    .is_ok_and(|status| status.success())
+            })
+        {
+            return Ok(());
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if [
+            "google-chrome",
+            "google-chrome-stable",
+            "microsoft-edge",
+            "brave-browser",
+            "chromium",
+            "chromium-browser",
+        ]
         .into_iter()
-        .any(|browser| {
-            Command::new("open")
-                .args(["-a", browser, "chrome://extensions"])
-                .spawn()
-                .is_ok()
-        })
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn open_chromium_extensions_page() -> bool {
-    [
-        "google-chrome",
-        "microsoft-edge",
-        "brave-browser",
-        "chromium",
-    ]
-    .into_iter()
-    .any(|browser| {
-        Command::new(browser)
-            .args(["--new-tab", "chrome://extensions"])
-            .spawn()
-            .is_ok()
-    })
+        .any(|browser| Command::new(browser).arg("--new-tab").spawn().is_ok())
+        {
+            return Ok(());
+        }
+    }
+    Err(
+        "Unable to open a Chromium-based browser; open one manually and paste the copied address"
+            .to_owned(),
+    )
 }
 
 #[tauri::command]
@@ -1547,6 +1549,7 @@ pub fn run_gui() -> Result<()> {
             discard_private_key,
             copy_ssh_public_key,
             quick_pair_browser,
+            open_chromium_browser,
             reset_browser_pairing,
             open_browser_extension_folder,
             drag_browser_extension,

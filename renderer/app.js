@@ -89,8 +89,8 @@ const staticCopy = [
   ['#save-browser-settings-button', 'text', '保存', 'SAVE'],
   ['#browser-install-heading', 'text', '安装插件 · 只需两步', 'INSTALL IN TWO STEPS'],
   ['#browser-step-open-title', 'text', '打开扩展页', 'Open the extensions page'],
-  ['#browser-step-open-description', 'text', '点击下方按钮，然后开启扩展页右上角的“开发者模式”。', 'Click below, then turn on Developer mode in the top-right corner of the extensions page.'],
-  ['#browser-open-help', 'text', '未能自动打开。请在 Chrome 地址栏输入 chrome://extensions，再开启“开发者模式”。', "Could not open it automatically. Enter chrome://extensions in Chrome's address bar, then turn on Developer mode."],
+  ['#browser-step-open-description', 'text', '打开浏览器并复制扩展页地址，粘贴到地址栏后开启“开发者模式”。', 'Open a Chromium-based browser and copy the extensions page address. Paste it into the address bar, then turn on Developer mode.'],
+  ['#browser-open-help', 'text', '地址已复制。请粘贴到浏览器地址栏并按回车，然后开启“开发者模式”。', 'Address copied. Paste it into the browser address bar and press Enter, then turn on Developer mode.'],
   ['#browser-step-drag-title', 'text', '拖入插件', 'Drag in the extension'],
   ['#browser-step-drag-description', 'text', '按住下方标识，拖到扩展页的空白区域，松开即可安装。', 'Hold the icon below, drag it onto an empty area of the extensions page, and release to install.'],
   ['#browser-install-complete', 'text', '安装后会自动连接，请保持 OpenKeylet 运行。', 'Once installed, the extension connects automatically. Keep OpenKeylet running.'],
@@ -98,7 +98,7 @@ const staticCopy = [
   ['#browser-fallback-description', 'text', '打开下方扩展目录，然后在扩展页点击“加载已解压的扩展程序”，选择该目录。', 'Open the extension folder below. On the extensions page, click Load unpacked and select that folder.'],
   ['#drag-extension-label', 'text', '按住此处，拖入扩展页', 'Hold and drag to the extensions page'],
   ['#drag-extension-button', 'aria-label', '拖动插件到 Chrome 扩展页；也可按回车打开扩展目录', 'Drag the extension to Chrome Extensions, or press Enter to open its folder'],
-  ['#quick-pairing-button', 'text', '打开扩展页', 'OPEN EXTENSIONS PAGE'],
+  ['#quick-pairing-button', 'text', '打开浏览器并复制地址', 'OPEN BROWSER & COPY ADDRESS'],
   ['#open-extension-button', 'text', '扩展目录', 'EXTENSION FOLDER'],
   ['#reset-pairing-button', 'text', '重置', 'RESET'],
   ['[data-module="SAFE / 05"] .settings-heading h2', 'text', '本地数据', 'LOCAL DATA'],
@@ -273,6 +273,7 @@ const api = {
   discardKey: (id) => invoke('discard_private_key', { id }),
   copyPublicKey: (pendingId, itemId) => invoke('copy_ssh_public_key', { pendingId, itemId }),
   quickPair: (port) => invoke('quick_pair_browser', { port }),
+  openBrowser: () => invoke('open_chromium_browser'),
   resetPair: () => invoke('reset_browser_pairing'),
   extensionFolder: () => invoke('open_browser_extension_folder'),
   exportBackup: (password) => invoke('export_backup', { password }),
@@ -3235,13 +3236,20 @@ $('#quick-pairing-button').addEventListener('click', async event => {
   const button = event.currentTarget;
   button.disabled = true;
   try {
-    const opened = await api.quickPair(Number($('#browser-port').value));
-    $('#browser-enabled').checked = true;
-    $('#browser-open-help').hidden = opened;
-    toast(opened
-      ? localized('已打开扩展页：开启开发者模式后，完成第 2 步。', 'Extensions page opened. Enable Developer mode, then complete step 2.')
-      : localized('请手动打开 chrome://extensions，配对已准备。', 'Open chrome://extensions manually. Pairing is ready.'));
-    await refresh();
+    $('#browser-open-help').hidden = true;
+    const errors = [];
+    try {
+      await api.copyOwnerValue('chrome://extensions/');
+      $('#browser-open-help').hidden = false;
+    } catch (error) { errors.push(error); }
+    try {
+      await api.quickPair(Number($('#browser-port').value));
+      $('#browser-enabled').checked = true;
+    } catch (error) { errors.push(error); }
+    try { await api.openBrowser(); } catch (error) { errors.push(error); }
+    if (errors.length) errors.forEach(error => toast(cleanError(error), 'error'));
+    else toast(localized('地址已复制，配对已准备。', 'Address copied. Pairing is ready.'));
+    await refresh(false);
   } catch (error) {
     toast(cleanError(error), 'error');
   } finally {
