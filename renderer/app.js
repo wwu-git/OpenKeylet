@@ -844,6 +844,7 @@ async function finishSwitchDrag(commit) {
 
 document.addEventListener('pointerdown', event => {
   suppressSwitchClick = null;
+  suppressItemClick = false;
   if (event.button !== 0 || !event.isPrimary || switchPointerDrag || switchSelectionPending || event.ctrlKey || event.metaKey) return;
   const control = switchControlFor(event.target);
   if (!control) return;
@@ -1008,14 +1009,14 @@ function renderConnections() {
       ? localized('只读检查租户根区间的实例列表，最多请求 1 项，不显示实例内容。', 'Read-only ListInstances check of the tenancy root compartment, limit 1; instance data is not displayed.')
       : localized('检查连接', 'Check connection');
     const agentActions = itemCapabilities(item).length > 0;
-    const reorderLabel = localized(`${item.name}：拖动排序，或按上/下方向键`, `${item.name}: drag to reorder, or use the Up/Down arrow keys`);
+    const reorderLabel = localized(`${item.name}：单击展开或收起；拖动排序，或按上/下方向键`, `${item.name}: click to expand or collapse; drag to reorder, or use the Up/Down arrow keys`);
     const toggleLabel = item.enabled
       ? localized('停用此项目；Agent 将无法使用其中的秘密', 'Disable this item; agents will no longer be able to use its secrets')
       : localized('启用此项目；Agent 将可以使用其中的秘密', 'Enable this item so agents can use its secrets');
     return `<article class="connection-card ${itemCapabilities(item).includes('ssh') ? 'ssh' : itemCapabilities(item).includes('http') ? 'http' : 'fill'} ${item.enabled ? '' : 'disabled'}" data-item-id="${escapeHtml(item.id)}">
       <div class="item-disclosure-well"><button class="item-disclosure" type="button" data-action="edit" data-id="${item.id}" aria-expanded="false" aria-controls="connection-modal" aria-label="${escapeHtml(localized(`展开编辑 ${item.name}`, `Expand editor for ${item.name}`))}" title="${localized('展开编辑', 'Expand editor')}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button></div>
       <span class="connection-type" role="img" data-item-type="${itemDisplayKind(item)}" aria-label="${escapeHtml(type)}" title="${escapeHtml(type)}">${itemTypeIcon(itemDisplayKind(item))}</span>
-      <button class="connection-name" type="button" draggable="false" data-item-reorder="${escapeHtml(item.id)}" aria-label="${escapeHtml(reorderLabel)}" aria-keyshortcuts="ArrowUp ArrowDown Home End" title="${escapeHtml(reorderLabel)}"><span class="lettering-ink">${escapeHtml(item.name)}</span></button>
+      <button class="connection-name" type="button" draggable="false" data-action="edit" data-id="${escapeHtml(item.id)}" data-item-reorder="${escapeHtml(item.id)}" aria-expanded="false" aria-controls="connection-modal" aria-label="${escapeHtml(reorderLabel)}" aria-keyshortcuts="Enter Space ArrowUp ArrowDown Home End" title="${escapeHtml(reorderLabel)}"><span class="lettering-ink">${escapeHtml(item.name)}</span></button>
       <div class="card-actions" role="group" aria-label="${escapeHtml(item.name)}">
         <button class="module-state item-toggle" type="button" data-action="toggle-enabled" data-id="${item.id}" aria-pressed="${item.enabled}" title="${toggleLabel}" aria-label="${toggleLabel}"><i class="status-dot ${item.enabled ? '' : 'off'}" aria-hidden="true"></i></button>
         ${agentActions ? `<button class="small-button" type="button" data-action="test" data-id="${item.id}" title="${escapeHtml(checkTitle)}" ${canTest ? '' : 'disabled'}>CHECK</button><button class="small-button" type="button" data-action="copy-name" data-id="${item.id}" title="${localized('复制 OpenKeylet MCP 使用提示', 'Copy OpenKeylet MCP use prompt')}" aria-label="${localized('复制 OpenKeylet MCP 使用提示', 'Copy OpenKeylet MCP use prompt')}">USE</button>` : ''}${item.passwordHistoryCount ? `<button class="small-button" type="button" data-action="history" data-id="${item.id}">HISTORY</button>` : ''}<button class="small-button delete" type="button" data-action="delete" data-id="${item.id}">DEL</button>
@@ -1799,7 +1800,8 @@ function placeItemEditor() {
     trigger.setAttribute('aria-expanded', 'true');
     trigger.setAttribute('aria-label', localized(`收起编辑 ${editorExistingItem.name}`, `Collapse editor for ${editorExistingItem.name}`));
     trigger.title = localized('收起编辑', 'Collapse editor');
-    editorReturnFocus = trigger;
+    $('.connection-name', card).setAttribute('aria-expanded', 'true');
+    editorReturnFocus = editorReturnFocus?.matches('.connection-name') ? $('.connection-name', card) : trigger;
   } else editorHome.after(editor);
   editor.classList.toggle('inline-editor', Boolean(card));
   editor.setAttribute('role', card ? 'region' : 'dialog');
@@ -1933,7 +1935,8 @@ function closeEditor() {
     trigger.setAttribute('aria-expanded', 'false');
     trigger.setAttribute('aria-label', localized(`展开编辑 ${editorExistingItem.name}`, `Expand editor for ${editorExistingItem.name}`));
     trigger.title = localized('展开编辑', 'Expand editor');
-    editorReturnFocus = trigger;
+    $('.connection-name', card).setAttribute('aria-expanded', 'false');
+    if (!editorReturnFocus?.isConnected || !card.contains(editorReturnFocus)) editorReturnFocus = trigger;
   }
   inlineEditorItemId = null;
   placeItemEditor();
@@ -2790,14 +2793,13 @@ function finishItemPointerDrag(commit) {
   clearItemDropSeam();
   if (drag.started) {
     suppressItemClick = true;
-    setTimeout(() => { suppressItemClick = false; }, 0);
   }
   if (commit && drag.started && drag.valid && drag.target) {
     const ids = drag.visibleOrder.filter(id => id !== drag.id);
     const position = ids.indexOf(drag.target.row.dataset.itemId) + (drag.target.after ? 1 : 0);
     ids.splice(position, 0, drag.id);
     void saveItemOrder(ids, drag.expectedOrder, drag.id);
-  } else renderConnections();
+  } else if (drag.started) renderConnections();
 }
 
 itemList.addEventListener('dragstart', event => {
@@ -2841,7 +2843,7 @@ document.addEventListener('pointercancel', event => { if (itemPointerDrag?.point
 itemList.addEventListener('lostpointercapture', event => { if (itemPointerDrag?.pointerId === event.pointerId) finishItemPointerDrag(false); });
 window.addEventListener('blur', () => finishItemPointerDrag(false));
 document.addEventListener('click', event => {
-  if (!suppressItemClick) return;
+  if (!suppressItemClick || event.detail === 0) return;
   suppressItemClick = false;
   event.preventDefault(); event.stopImmediatePropagation();
 }, true);

@@ -70,6 +70,9 @@ preferences, alongside theme and text size. It does not change the vault or MCP.
 
 Both layouts use the same item cards, actions, filters and saved order. Grid
 columns adapt to the available width. An expanded editor spans the full row.
+Click the item name or its arrow to expand or collapse the editor. Enter and
+Space also toggle the focused name. Drag the name to reorder items, or use the
+Up, Down, Home and End keys. Reordering does not toggle the editor.
 Changing the layout preserves the live form and its unsaved values. Grid cards
 show the existing name, type, enabled state and actions without extra secrets or
 address summaries.
