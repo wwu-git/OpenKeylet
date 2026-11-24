@@ -168,6 +168,8 @@ try {
     await page.locator('#add-connection-button').click();
     await page.locator('[data-item-template="api"]').click();
     assert.equal(await urls().count(),1);
+    assert.equal(await urls().locator('[data-select-api-service]').evaluate(el=>getComputedStyle(el).flexBasis),'auto');
+    assert.equal(await urls().locator('[data-select-api-service]').evaluate(el=>getComputedStyle(el).whiteSpace),'nowrap');
     await openPicker('GitHub');
     assert.equal(await picker.locator('#api-service-preview').inputValue(),'https://api.github.com/');
     await picker.locator('#api-service-cancel').click();

@@ -127,6 +127,7 @@ html[lang] .modal-card .field > span {
 }
 
 .module-address-buttons { display: flex; flex-wrap: wrap; gap: 7px; }
+#connection-modal .module-address-buttons > .small-button { flex: 0 0 auto; white-space: nowrap; }
 .api-service-modal { z-index: 110; }
 .api-service-modal .modal-card { width: min(680px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); }
 .api-service-modal .form-scroll { display: grid; gap: 12px; }
