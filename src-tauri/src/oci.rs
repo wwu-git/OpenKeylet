@@ -9,7 +9,8 @@ use ring::{
     signature::{RSA_PKCS1_SHA256, RsaKeyPair},
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashSet, fmt::Write, time::Duration};
+use std::time::Duration;
+use sha2::{Digest, Sha256};
 use url::Url;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -157,7 +158,47 @@ impl Credential {
         let url = request.url();
         let host = url.host_str().ok_or_else(|| anyhow!("Missing OCI host"))?;
         let target = &url[url::Position::BeforePath..url::Position::AfterQuery];
-        let message = format!("(request-target): get {target}\nhost: {host}\nx-date: {date}");
+        let mut signed_headers = "(request-target) host x-date".to_owned();
+        let mut message = format!(
+            "(request-target): {} {target}\nhost: {host}\nx-date: {date}",
+            request.method().as_str().to_ascii_lowercase()
+        );
+        let content = matches!(
+            *request.method(),
+            Method::POST | Method::PUT | Method::PATCH
+        ) || request.body().is_some();
+        if content {
+            let bytes = request
+                .body()
+                .map(|body| {
+                    body.as_bytes()
+                        .ok_or_else(|| anyhow!("OCI signing requires a buffered request body"))
+                })
+                .transpose()?
+                .unwrap_or_default();
+            let length = bytes.len();
+            let digest = STANDARD.encode(Sha256::digest(bytes));
+            if !request.headers().contains_key("content-type") {
+                request.headers_mut().insert(
+                    "content-type",
+                    HeaderValue::from_static("application/octet-stream"),
+                );
+            }
+            let content_type = request.headers()["content-type"]
+                .to_str()
+                .map_err(|_| anyhow!("Invalid OCI Content-Type"))?;
+            message.push_str(&format!(
+                "\nx-content-sha256: {digest}\ncontent-type: {content_type}\ncontent-length: {length}"
+            ));
+            signed_headers.push_str(" x-content-sha256 content-type content-length");
+            request
+                .headers_mut()
+                .insert("x-content-sha256", HeaderValue::from_str(&digest)?);
+            request.headers_mut().insert(
+                "content-length",
+                HeaderValue::from_str(&length.to_string())?,
+            );
+        }
         let mut signature = vec![0; key.public().modulus_len()];
         key.sign(
             &RSA_PKCS1_SHA256,
@@ -167,7 +208,7 @@ impl Credential {
         )
         .map_err(|_| anyhow!("OCI request signing failed"))?;
         let mut header = HeaderValue::from_str(&format!(
-            "Signature version=\"1\",keyId=\"{}/{}/{}\",algorithm=\"rsa-sha256\",headers=\"(request-target) host x-date\",signature=\"{}\"",
+            "Signature version=\"1\",keyId=\"{}/{}/{}\",algorithm=\"rsa-sha256\",headers=\"{signed_headers}\",signature=\"{}\"",
             self.config.tenancy_ocid,
             self.config.user_ocid,
             self.config.fingerprint.to_ascii_lowercase(),
@@ -233,90 +274,60 @@ fn parse_key(pem: &str) -> Result<RsaKeyPair> {
     bail!("OCI_KEY_FORMAT: Import a complete RSA PEM private key; OpenSSH format is not supported")
 }
 
-pub(crate) fn validate_request(
-    config: &Config,
-    mut url: Url,
-    input: &crate::executor::ApiRequestInput,
-) -> Result<Url> {
-    let base = config.base_url()?;
+pub(crate) fn validate_request(config: &Config, request: &Request) -> Result<()> {
+    config.validate()?;
+    let url = request.url();
+    let host = url.host_str().unwrap_or_default();
+    let prefix = [
+        format!(".{}.oraclecloud.com", config.region),
+        format!(".{}.oci.oraclecloud.com", config.region),
+    ]
+    .into_iter()
+    .find_map(|suffix| host.strip_suffix(&suffix));
+    let valid_prefix = prefix.is_some_and(|prefix| {
+        !prefix.is_empty()
+            && prefix.split('.').all(|label| {
+                !label.is_empty()
+                    && label.len() <= 63
+                    && label.as_bytes()[0].is_ascii_alphanumeric()
+                    && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+                    && label
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            })
+    });
     ensure!(
-        url.origin() == base.origin()
+        url.scheme() == "https"
+            && url.port_or_known_default() == Some(443)
             && url.username().is_empty()
             && url.password().is_none()
-            && url.fragment().is_none(),
+            && url.fragment().is_none()
+            && valid_prefix,
         "OCI request target is outside the configured region"
     );
     ensure!(
-        input.method.eq_ignore_ascii_case("GET") && url.path() == INSTANCES_PATH,
-        "OCI supports only GET /20160918/instances"
+        !matches!(*request.method(), Method::CONNECT | Method::TRACE),
+        "OCI transport does not support CONNECT or TRACE"
     );
     ensure!(
-        input.body.is_none()
-            && input.body_base64.is_none()
-            && input.form.is_empty()
-            && input.files.is_empty(),
-        "OCI ListInstances does not accept a request body"
+        request.headers().get_all("content-type").iter().count() <= 1,
+        "OCI request cannot have duplicate Content-Type headers"
     );
     ensure!(
-        input.save_response_to.is_none(),
-        "OCI ListInstances returns results directly"
-    );
-    ensure!(
-        !input.headers.keys().any(|key| [
-            "host",
-            "authorization",
-            "date",
-            "x-date",
-            "content-length",
-            "transfer-encoding",
-            "proxy-authorization"
-        ]
-        .iter()
-        .any(|blocked| key.eq_ignore_ascii_case(blocked))),
+        !request.headers().keys().any(|name| matches!(
+            name.as_str(),
+            "host"
+                | "authorization"
+                | "date"
+                | "x-date"
+                | "x-content-sha256"
+                | "content-length"
+                | "transfer-encoding"
+                | "proxy-authorization"
+        )),
         "OCI request cannot override signing or transport headers"
     );
-
-    let mut seen = HashSet::new();
-    let mut query = String::new();
-    for (name, value) in url.query_pairs() {
-        ensure!(
-            seen.insert(name.to_string()),
-            "Duplicate OCI query parameter"
-        );
-        match name.as_ref() {
-            "compartmentId" | "page" => {
-                ensure!(!value.trim().is_empty(), "Empty OCI query parameter")
-            }
-            "limit" => ensure!(
-                value.parse::<i32>().is_ok_and(|limit| limit > 0)
-                    && value.bytes().all(|byte| byte.is_ascii_digit()),
-                "Invalid OCI limit"
-            ),
-            _ => bail!("Unsupported OCI query parameter"),
-        }
-        if !query.is_empty() {
-            query.push('&');
-        }
-        encode(&name, &mut query);
-        query.push('=');
-        encode(&value, &mut query);
-    }
-    ensure!(
-        seen.contains("compartmentId"),
-        "OCI ListInstances requires compartmentId"
-    );
-    url.set_query(Some(&query));
-    Ok(url)
-}
-
-fn encode(value: &str, output: &mut String) {
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
-            output.push(char::from(byte));
-        } else {
-            let _ = write!(output, "%{byte:02X}");
-        }
-    }
+    Ok(())
 }
 
 pub(crate) fn client_builder(timeout: Option<u64>) -> reqwest::ClientBuilder {
@@ -324,6 +335,7 @@ pub(crate) fn client_builder(timeout: Option<u64>) -> reqwest::ClientBuilder {
         .https_only(true)
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
         .timeout(Duration::from_secs(
             timeout.filter(|t| *t > 0).unwrap_or(30),
         ))
@@ -331,20 +343,10 @@ pub(crate) fn client_builder(timeout: Option<u64>) -> reqwest::ClientBuilder {
 
 pub(crate) fn prepare(
     credential: &Credential,
-    target: Url,
-    input: &crate::executor::ApiRequestInput,
+    mut request: Request,
     date: &str,
 ) -> Result<(Request, HeaderValue)> {
-    let target = validate_request(&credential.config, target, input)?;
-    credential.config.validate()?;
-    let mut request = Request::new(Method::GET, target);
-    for (name, value) in &input.headers {
-        request.headers_mut().insert(
-            reqwest::header::HeaderName::from_bytes(name.as_bytes())
-                .map_err(|_| anyhow!("Invalid OCI request header"))?,
-            HeaderValue::from_str(value).map_err(|_| anyhow!("Invalid OCI request header"))?,
-        );
-    }
+    validate_request(&credential.config, &request)?;
     let signature = credential.sign(&mut request, date)?;
     Ok((request, signature))
 }
@@ -352,7 +354,6 @@ pub(crate) fn prepare(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::executor::ApiRequestInput;
 
     pub(crate) const KEY: &str = include_str!("../tests/fixtures/oci/test-key.pem");
     pub(crate) const HOST: &str = "iaas.ap-tokyo-1.oraclecloud.com";
@@ -371,15 +372,11 @@ pub(crate) mod tests {
     fn oci_signature_matches_independent_rsa_vector() {
         let credential = Credential::new(config(), KEY).unwrap();
         assert!(validate_pem(&format!("{}\nOCI_API_KEY", KEY.trim_end())).is_ok());
-        let request_input = ApiRequestInput {
-            method: "GET".into(),
-            ..Default::default()
-        };
         let url = Url::parse(&format!(
-            "https://{HOST}{INSTANCES_PATH}?compartmentId=ocid1.compartment.oc1..test&page=a%2Bb+c"
+            "https://{HOST}{INSTANCES_PATH}?compartmentId=ocid1.compartment.oc1..test&page=a%2Bb%20c"
         ))
         .unwrap();
-        let (request, header) = prepare(&credential, url, &request_input, DATE).unwrap();
+        let (request, header) = prepare(&credential, Request::new(Method::GET, url), DATE).unwrap();
         let signature = header
             .to_str()
             .unwrap()
@@ -406,15 +403,11 @@ pub(crate) mod tests {
             KEY.replace('\n', "\r\n")
         );
         let credential = Credential::new(config(), &pem).unwrap();
-        let input = ApiRequestInput {
-            method: "GET".into(),
-            ..Default::default()
-        };
         let url = Url::parse(&format!(
-            "https://{HOST}{INSTANCES_PATH}?compartmentId=ocid1.compartment.oc1..test&page=a%2Bb+c"
+            "https://{HOST}{INSTANCES_PATH}?compartmentId=ocid1.compartment.oc1..test&page=a%2Bb%20c"
         ))
         .unwrap();
-        let (_, header) = prepare(&credential, url, &input, DATE).unwrap();
+        let (_, header) = prepare(&credential, Request::new(Method::GET, url), DATE).unwrap();
         let signature = header
             .to_str()
             .unwrap()
@@ -459,103 +452,96 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn oci_rejects_targets_options_and_keys_outside_the_first_release() {
-        let config = config();
-        let mut credential = Credential::new(config.clone(), KEY).unwrap();
-        credential.forget_key();
-        let get = ApiRequestInput {
-            method: "GET".into(),
-            ..Default::default()
-        };
-        let valid = format!("https://{HOST}{INSTANCES_PATH}?compartmentId=test");
-        for (url, error) in [
-            (valid.replace("https:", "http:"), "outside"),
-            (
-                valid.replace(HOST, "iaas.ap-osaka-1.oraclecloud.com"),
-                "outside",
-            ),
-            (
-                valid.replace(HOST, "iaas.ap-tokyo-1.oraclecloud.com.example.org"),
-                "outside",
-            ),
-            (valid.replace(HOST, &format!("{HOST}:444")), "outside"),
-            (valid.replace(HOST, &format!("user@{HOST}")), "outside"),
-            (format!("{valid}#fragment"), "outside"),
-            (valid.replace("instances", "vcns"), "only GET"),
-            (valid.replace("instances", "instances/test"), "only GET"),
-            (
-                valid.replace("?compartmentId=test", ""),
-                "requires compartmentId",
-            ),
-            (format!("{valid}&%63ompartmentId=other"), "Duplicate"),
-            (format!("{valid}&page="), "Empty"),
-            (format!("{valid}&limit=0"), "Invalid OCI limit"),
-            (format!("{valid}&unknown=x"), "Unsupported"),
+    fn oci_request_target_and_transport_headers_are_validated() {
+        let credential = Credential::new(config(), KEY).unwrap();
+        for host in [
+            HOST,
+            "identity.ap-tokyo-1.oci.oraclecloud.com",
+            "new-service.ap-tokyo-1.oraclecloud.com",
+            "namespace.compat.objectstorage.ap-tokyo-1.oraclecloud.com",
         ] {
-            let actual = prepare(&credential, Url::parse(&url).unwrap(), &get, DATE)
-                .unwrap_err()
-                .to_string();
-            assert!(actual.contains(error), "{actual}");
+            let request = Request::new(
+                Method::GET,
+                Url::parse(&format!(
+                    "https://{host}/future/api?newParam=1&newParam=2&literal=+&encoded=%2F"
+                ))
+                .unwrap(),
+            );
+            let (signed, _) = prepare(&credential, request, DATE).unwrap();
+            assert_eq!(
+                signed.url().query().unwrap(),
+                "newParam=1&newParam=2&literal=+&encoded=%2F"
+            );
         }
-        for header in ["HOST", "authorization", "DaTe", "X-DaTe"] {
-            let mut input = get.clone();
-            input.headers.insert(header.into(), "override".into());
+        for target in [
+            "http://iaas.ap-tokyo-1.oraclecloud.com/future",
+            "https://iaas.ap-osaka-1.oraclecloud.com/future",
+            "https://iaas.ap-tokyo-1.oraclecloud.com.example.org/future",
+            "https://iaas.ap-tokyo-1.oraclecloud.com:444/future",
+            "https://user@iaas.ap-tokyo-1.oraclecloud.com/future",
+            "https://iaas.ap-tokyo-1.oraclecloud.com/future#fragment",
+            "https://127.0.0.1/future",
+            "https://ap-tokyo-1.oraclecloud.com/future",
+            "https://bad_label.ap-tokyo-1.oraclecloud.com/future",
+            "https://iaas.ap-tokyo-1.oraclecloud.com./future",
+        ] {
             assert!(
-                prepare(&credential, Url::parse(&valid).unwrap(), &input, DATE)
+                prepare(
+                    &credential,
+                    Request::new(Method::GET, Url::parse(target).unwrap()),
+                    DATE
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("outside")
+            );
+        }
+        let url = Url::parse(&format!("https://{HOST}/arbitrary/path")).unwrap();
+        for header in [
+            "HOST",
+            "authorization",
+            "DaTe",
+            "X-DaTe",
+            "x-content-sha256",
+            "content-length",
+            "transfer-encoding",
+            "proxy-authorization",
+        ] {
+            let mut request = Request::new(Method::GET, url.clone());
+            request.headers_mut().insert(
+                reqwest::header::HeaderName::from_bytes(header.as_bytes()).unwrap(),
+                HeaderValue::from_static("override"),
+            );
+            assert!(
+                prepare(&credential, request, DATE)
                     .unwrap_err()
                     .to_string()
                     .contains("override")
             );
         }
-        for method in ["POST", "PUT", "DELETE", "HEAD"] {
-            let input = ApiRequestInput {
-                method: method.into(),
-                ..Default::default()
-            };
-            assert!(
-                prepare(&credential, Url::parse(&valid).unwrap(), &input, DATE)
-                    .unwrap_err()
-                    .to_string()
-                    .contains("only GET")
-            );
+        for method in [Method::CONNECT, Method::TRACE] {
+            assert!(prepare(&credential, Request::new(method, url.clone()), DATE).is_err());
         }
-        for input in [
-            ApiRequestInput {
-                body: Some(serde_json::json!("data")),
-                ..get.clone()
-            },
-            ApiRequestInput {
-                body_base64: Some("".into()),
-                ..get.clone()
-            },
-            ApiRequestInput {
-                form: [("x".into(), serde_json::json!(1))].into(),
-                ..get.clone()
-            },
-            ApiRequestInput {
-                files: vec![crate::executor::ApiUploadFile {
-                    field: "file".into(),
-                    path: "unused".into(),
-                    file_name: None,
-                    content_type: None,
-                }],
-                ..get.clone()
-            },
+        for method in [
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::HEAD,
+            Method::OPTIONS,
+            Method::from_bytes(b"NEW-METHOD").unwrap(),
         ] {
-            assert!(
-                prepare(&credential, Url::parse(&valid).unwrap(), &input, DATE)
-                    .unwrap_err()
-                    .to_string()
-                    .contains("body")
-            );
+            assert!(prepare(&credential, Request::new(method, url.clone()), DATE).is_ok());
         }
+        let mut credential = credential;
+        credential.forget_key();
         assert!(
-            prepare(&credential, Url::parse(&valid).unwrap(), &get, DATE)
+            prepare(&credential, Request::new(Method::GET, url), DATE)
                 .unwrap_err()
                 .to_string()
                 .contains("Reimport")
         );
-        let mut unknown = config;
+        let mut unknown = config();
         unknown.region = "example.org/".into();
         assert!(unknown.base_url().is_err());
         for invalid in [

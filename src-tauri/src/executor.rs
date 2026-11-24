@@ -8,9 +8,10 @@ use crate::{
     vault::{DecryptedConnection, Vault},
 };
 use anyhow::{Context, Result, bail};
+use http_body_util::{BodyExt, Limited};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use reqwest::{
-    Client, Method,
+    Client, Method, Request, RequestBuilder,
     header::{HeaderMap, HeaderName, HeaderValue},
 };
 use russh::{
@@ -170,10 +171,10 @@ pub async fn execute_api(
         bail!("This connection is disabled");
     }
     if connection.stored.http_auth_type == crate::oci::AUTH_MODE {
-        return execute_oci_list_instances(connection, input).await;
+        return execute_oci_request(connection, input).await;
     }
     let mut target = build_api_url(&connection.stored, &input.url, &input.query)?;
-    let save_response_to = match input.save_response_to {
+    let save_response_to = match input.save_response_to.clone() {
         Some(path) => {
             Some(prepare_api_response_destination(&path, input.overwrite_response_file).await?)
         }
@@ -184,13 +185,13 @@ pub async fn execute_api(
     let method = Method::from_bytes(method.as_bytes()).context("Invalid HTTP method")?;
     let blocked = blocked_header_names(&connection.stored);
     let mut headers = HeaderMap::new();
-    for (name, value) in input.headers {
+    for (name, value) in &input.headers {
         if blocked.contains(&name.to_lowercase()) {
             continue;
         }
         headers.insert(
             HeaderName::from_bytes(name.as_bytes()).context("Invalid request header name")?,
-            HeaderValue::from_str(&value).context("Invalid request header content")?,
+            HeaderValue::from_str(value).context("Invalid request header content")?,
         );
     }
     apply_api_auth(
@@ -214,69 +215,10 @@ pub async fn execute_api(
         client_builder = client_builder.timeout(Duration::from_secs(seconds));
     }
     let client = client_builder.build()?;
-    let mut request = client
+    let request = client
         .request(method.clone(), target.clone())
         .headers(headers);
-    let body_kinds = usize::from(input.body.is_some())
-        + usize::from(!input.form.is_empty() || !input.files.is_empty())
-        + usize::from(input.body_base64.is_some());
-    if body_kinds > 1 {
-        bail!("Only one request body format may be selected: body, form/files, or bodyBase64");
-    }
-    if !input.files.is_empty() {
-        let mut multipart = reqwest::multipart::Form::new();
-        for (name, value) in input.form {
-            for value in form_values(value) {
-                multipart = multipart.text(name.clone(), value);
-            }
-        }
-        for file in input.files {
-            let field = file.field.trim();
-            if field.is_empty() {
-                bail!("Uploaded file field name cannot be empty");
-            }
-            let path = resolve_user_path(&file.path)?;
-            if !tokio::fs::metadata(&path)
-                .await
-                .context("Unable to read uploaded file")?
-                .is_file()
-            {
-                bail!("Upload path is not a regular file");
-            }
-            let mut part = reqwest::multipart::Part::file(&path)
-                .await
-                .context("Unable to open uploaded file")?;
-            if let Some(file_name) = file.file_name.filter(|value| !value.trim().is_empty()) {
-                part = part.file_name(file_name);
-            }
-            if let Some(content_type) = file.content_type.filter(|value| !value.trim().is_empty()) {
-                part = part
-                    .mime_str(content_type.trim())
-                    .context("Invalid uploaded file Content-Type")?;
-            }
-            multipart = multipart.part(field.to_owned(), part);
-        }
-        request = request.multipart(multipart);
-    } else if !input.form.is_empty() {
-        let mut form = Vec::new();
-        for (name, value) in input.form {
-            for value in form_values(value) {
-                form.push((name.clone(), value));
-            }
-        }
-        request = request.form(&form);
-    } else if let Some(body_base64) = input.body_base64 {
-        let bytes = STANDARD
-            .decode(body_base64.trim())
-            .context("bodyBase64 is not valid Base64")?;
-        request = request.body(bytes);
-    } else if let Some(body) = input.body {
-        if let Some(text) = body.as_str() {
-            request = request.body(text.to_owned());
-        } else {
-            request = request.json(&body);
-        }
-    }
+    let request = build_api_body(request, &input).await?;
 
     let mut response = request
         .send()
@@ -350,41 +292,148 @@ pub async fn execute_api(
     })
 }
 
-async fn execute_oci_list_instances(
+async fn build_api_body(
+    mut request: RequestBuilder,
+    input: &ApiRequestInput,
+) -> Result<RequestBuilder> {
+    let body_kinds = usize::from(input.body.is_some())
+        + usize::from(!input.form.is_empty() || !input.files.is_empty())
+        + usize::from(input.body_base64.is_some());
+    if body_kinds > 1 {
+        bail!("Only one request body format may be selected: body, form/files, or bodyBase64");
+    }
+    if !input.files.is_empty() {
+        let mut multipart = reqwest::multipart::Form::new();
+        for (name, value) in &input.form {
+            for value in form_values(value.clone()) {
+                multipart = multipart.text(name.clone(), value);
+            }
+        }
+        for file in &input.files {
+            let field = file.field.trim();
+            if field.is_empty() {
+                bail!("Uploaded file field name cannot be empty");
+            }
+            let path = resolve_user_path(&file.path)?;
+            if !tokio::fs::metadata(&path)
+                .await
+                .context("Unable to read uploaded file")?
+                .is_file()
+            {
+                bail!("Upload path is not a regular file");
+            }
+            let mut part = reqwest::multipart::Part::file(&path)
+                .await
+                .context("Unable to open uploaded file")?;
+            if let Some(file_name) = file
+                .file_name
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+            {
+                part = part.file_name(file_name);
+            }
+            if let Some(content_type) = file
+                .content_type
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+            {
+                part = part
+                    .mime_str(content_type.trim())
+                    .context("Invalid uploaded file Content-Type")?;
+            }
+            multipart = multipart.part(field.to_owned(), part);
+        }
+        request = request.multipart(multipart);
+    } else if !input.form.is_empty() {
+        let mut form = Vec::new();
+        for (name, value) in &input.form {
+            for value in form_values(value.clone()) {
+                form.push((name.clone(), value));
+            }
+        }
+        request = request.form(&form);
+    } else if let Some(body_base64) = &input.body_base64 {
+        let bytes = STANDARD
+            .decode(body_base64.trim())
+            .context("bodyBase64 is not valid Base64")?;
+        request = request.body(bytes);
+    } else if let Some(body) = &input.body {
+        if let Some(text) = body.as_str() {
+            request = request.body(text.to_owned());
+        } else {
+            request = request.json(&body);
+        }
+    }
+
+    Ok(request)
+}
+
+const MAX_OCI_REQUEST_BYTES: usize = 64 * 1024 * 1024;
+
+async fn execute_oci_request(
     connection: &DecryptedConnection,
     input: ApiRequestInput,
 ) -> Result<ApiResponse> {
-    execute_oci_list_instances_with(connection, input, |timeout| {
+    execute_oci_request_with(connection, input, |timeout| {
         Ok(crate::oci::client_builder(timeout).build()?)
     })
     .await
 }
 
-async fn execute_oci_list_instances_with(
+async fn execute_oci_request_with(
     connection: &DecryptedConnection,
     input: ApiRequestInput,
     client: impl FnOnce(Option<u64>) -> Result<Client>,
 ) -> Result<ApiResponse> {
+    if !connection.stored.enabled {
+        bail!("This connection is disabled");
+    }
     let credential = connection
         .secrets
         .oci
         .as_ref()
         .context("Import an OCI signing private key")?;
-    // Preserve scalar query parameters so nulls and empty arrays cannot bypass validation.
-    if input
-        .query
-        .values()
-        .any(|value| !value.is_string() && !value.is_number())
-    {
-        bail!("OCI ListInstances requires scalar query parameters");
-    }
     let target = build_api_url(&connection.stored, &input.url, &input.query)
         .map_err(|_| anyhow::anyhow!("Invalid OCI request URL"))?;
+    let method = Method::from_bytes(input.method.trim().to_ascii_uppercase().as_bytes())
+        .context("Invalid HTTP method")?;
+    let mut request = Request::new(method, target);
+    for (name, value) in &input.headers {
+        request.headers_mut().insert(
+            HeaderName::from_bytes(name.as_bytes()).context("Invalid OCI request header")?,
+            HeaderValue::from_str(value).context("Invalid OCI request header")?,
+        );
+    }
+    crate::oci::validate_request(&credential.config, &request)?;
+    let destination = match input.save_response_to.as_deref() {
+        Some(path) => {
+            Some(prepare_api_response_destination(path, input.overwrite_response_file).await?)
+        }
+        None => None,
+    };
+    let client = client(input.timeout_seconds)?;
+    if !input.files.is_empty() {
+        request.headers_mut().remove(reqwest::header::CONTENT_TYPE);
+    }
+    let builder = RequestBuilder::from_parts(client.clone(), request);
+    let mut request = build_api_body(builder, &input).await?.build()?;
+    if let Some(body) = request.body_mut().take() {
+        let bytes = Limited::new(body, MAX_OCI_REQUEST_BYTES)
+            .collect()
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("Unable to buffer OCI request body within the 64 MiB limit")
+            })?
+            .to_bytes();
+        *request.body_mut() = Some(bytes.into());
+    }
+    request
+        .headers_mut()
+        .remove(reqwest::header::CONTENT_LENGTH);
     let date = chrono::Utc::now()
         .format("%a, %d %b %Y %H:%M:%S GMT")
         .to_string();
-    let (request, signature) = crate::oci::prepare(credential, target, &input, &date)?;
-    let client = client(input.timeout_seconds)?;
+    let (request, signature) = crate::oci::prepare(credential, request, &date)?;
     let mut response = client
         .execute(request)
         .await
@@ -393,26 +442,40 @@ async fn execute_oci_list_instances_with(
     if status.is_redirection() {
         bail!("OCI redirect blocked");
     }
-
-    // OCI's page token is opaque. Preserve it exactly, and never return an
-    // echoed Authorization header or arbitrary service response headers.
     let authorization = signature.to_str().unwrap_or_default();
     let signature_value = authorization
         .rsplit_once("signature=\"")
         .and_then(|(_, value)| value.strip_suffix('"'))
         .unwrap_or_default();
-    let mut headers = HashMap::new();
-    for name in ["opc-next-page", "opc-request-id"] {
-        if let Some(value) = response
-            .headers()
-            .get(name)
-            .and_then(|value| value.to_str().ok())
-        {
-            if !value.contains(authorization) && !value.contains(signature_value) {
-                headers.insert(name.to_owned(), value.to_owned());
+    let mut secrets = connection.secrets.non_empty_values();
+    secrets.extend([authorization.to_owned(), signature_value.to_owned()]);
+    let candidates = oci_redaction_candidates(&secrets);
+    let redact = |bytes: &[u8]| redact_oci_bytes(bytes, &candidates);
+    let headers = response
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| {
+            if matches!(
+                name.as_str(),
+                "authorization"
+                    | "proxy-authorization"
+                    | "cookie"
+                    | "set-cookie"
+                    | "www-authenticate"
+                    | "proxy-authenticate"
+            ) {
+                return None;
             }
-        }
-    }
+            value.to_str().ok().map(|value| {
+                (
+                    name.to_string(),
+                    String::from_utf8_lossy(&redact(value.as_bytes())).into_owned(),
+                )
+            })
+        })
+        .collect();
+    let response_url =
+        String::from_utf8_lossy(&redact(response.url().as_str().as_bytes())).into_owned();
     let max_bytes = input
         .max_response_bytes
         .filter(|limit| *limit > 0)
@@ -431,26 +494,135 @@ async fn execute_oci_list_instances_with(
             break;
         }
     }
-    let body = if truncated {
-        "[OCI response exceeded the size limit]".to_owned()
-    } else if status.is_success() {
-        String::from_utf8_lossy(&bytes)
-            .replace(authorization, "[REDACTED]")
-            .replace(signature_value, "[REDACTED]")
-    } else {
-        // Retain status and request ID; an error body can echo request data.
+    let bytes = redact(&bytes);
+    let mut saved_to = None;
+    let mut bytes_transferred = None;
+    let body = if let Some(destination) = destination {
+        if truncated {
+            bail!("OCI response exceeded the size limit; no response file was saved");
+        }
+        saved_to = Some(
+            save_oci_response_bytes(&bytes, &destination, input.overwrite_response_file).await?,
+        );
+        bytes_transferred = Some(bytes.len() as u64);
         String::new()
+    } else if truncated {
+        "[OCI response exceeded the size limit]".to_owned()
+    } else {
+        String::from_utf8_lossy(&bytes).into_owned()
     };
     Ok(ApiResponse {
         status: status.as_u16(),
         status_text: status.canonical_reason().unwrap_or_default().to_owned(),
-        url: response.url().to_string(),
+        url: response_url,
         headers,
         body,
         truncated,
-        saved_to: None,
-        bytes_transferred: None,
+        saved_to,
+        bytes_transferred,
     })
+}
+
+fn oci_redaction_candidates(secrets: &[String]) -> Vec<String> {
+    let mut candidates = crate::policy::redaction_candidates(secrets);
+    for secret in secrets {
+        let mut encoded = String::new();
+        for byte in secret.bytes() {
+            if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+                encoded.push(char::from(byte));
+            } else {
+                use std::fmt::Write;
+                let _ = write!(encoded, "%{byte:02X}");
+            }
+        }
+        candidates.push(encoded);
+        let mut url = Url::parse("https://redaction.invalid/").expect("static URL");
+        url.set_path(secret);
+        candidates.push(
+            if secret.starts_with('/') {
+                url.path()
+            } else {
+                url.path().strip_prefix('/').unwrap_or(url.path())
+            }
+            .to_owned(),
+        );
+        url.set_query(Some(secret));
+        candidates.push(url.query().unwrap_or_default().to_owned());
+        if let Ok(url) = Url::parse(&format!("https://redaction.invalid/{secret}")) {
+            let target = &url[url::Position::BeforePath..url::Position::AfterQuery];
+            candidates.push(target.strip_prefix('/').unwrap_or(target).to_owned());
+        }
+    }
+    for value in candidates.clone() {
+        if let Ok(encoded) = serde_json::to_string(&value) {
+            let encoded = &encoded[1..encoded.len() - 1];
+            candidates.push(encoded.to_owned());
+            candidates.push(encoded.replace('/', "\\/"));
+        }
+    }
+    candidates.retain(|value| {
+        !value.is_empty() && (value != "/" || secrets.iter().any(|secret| secret == "/"))
+    });
+    candidates.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    candidates.dedup();
+    candidates
+}
+
+fn redact_oci_bytes(bytes: &[u8], candidates: &[String]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut offset = 0;
+    while offset < bytes.len() {
+        if let Some(candidate) = candidates
+            .iter()
+            .find(|value| bytes[offset..].starts_with(value.as_bytes()))
+        {
+            output.extend_from_slice(b"[REDACTED]");
+            offset += candidate.len();
+        } else {
+            output.push(bytes[offset]);
+            offset += 1;
+        }
+    }
+    output
+}
+
+async fn save_oci_response_bytes(
+    bytes: &[u8],
+    destination: &std::path::Path,
+    overwrite: bool,
+) -> Result<String> {
+    let file_name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("response");
+    let temporary = destination.with_file_name(format!(
+        ".{file_name}.openkeylet-{}.part",
+        Uuid::new_v4().simple()
+    ));
+    let result: Result<()> = async {
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .await
+            .context("Unable to create OCI response temporary file")?;
+        file.write_all(bytes)
+            .await
+            .context("Unable to write OCI response file")?;
+        file.flush().await?;
+        file.sync_all().await?;
+        commit_local_file(&temporary, destination, overwrite).await
+    }
+    .await;
+    if let Err(error) = result {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(error);
+    }
+    Ok(tokio::fs::canonicalize(destination)
+        .await
+        .unwrap_or_else(|_| destination.to_owned())
+        .to_string_lossy()
+        .into_owned())
 }
 
 async fn prepare_api_response_destination(
@@ -1693,7 +1865,7 @@ fn oci_check_request(connection: &DecryptedConnection) -> Result<ApiRequestInput
         .as_ref()
         .context("Import an OCI signing private key")?;
     Ok(ApiRequestInput {
-        url: credential.config.base_url()?.join("instances")?.to_string(),
+        url: credential.config.base_url()?.join(crate::oci::INSTANCES_PATH)?.to_string(),
         method: "GET".to_owned(),
         query: HashMap::from([
             ("compartmentId".to_owned(), Value::String(credential.config.tenancy_ocid.clone())),
@@ -2751,18 +2923,14 @@ mod oci_transport_tests {
                 .build()?)
         };
 
-        let mut duplicate = base_request.clone();
-        duplicate
-            .query
-            .insert("compartmentId".to_owned(), serde_json::json!("duplicate"));
-        let error = execute_oci_list_instances_with(&connection, duplicate, |_| {
+        let mut outside_target = base_request.clone();
+        outside_target.url = "https://example.invalid/private".into();
+        let error = execute_oci_request_with(&connection, outside_target, |_| {
             panic!("invalid request reached transport")
-        })
-        .await
-        .unwrap_err();
-        assert!(error.to_string().contains("Duplicate OCI query parameter"));
+        }).await.unwrap_err();
+        assert!(error.to_string().contains("outside"));
 
-        let first = execute_oci_list_instances_with(&connection, base_request.clone(), client)
+        let first = execute_oci_request_with(&connection, base_request.clone(), client)
             .await
             .unwrap();
         assert_eq!(first.body, "[]");
@@ -2773,12 +2941,12 @@ mod oci_transport_tests {
             "page".to_owned(),
             serde_json::json!(&first.headers["opc-next-page"]),
         );
-        let second = execute_oci_list_instances_with(&connection, next, client)
+        let second = execute_oci_request_with(&connection, next, client)
             .await
             .unwrap();
         assert!(!second.headers.contains_key("opc-next-page"));
         for _ in 0..2 {
-            let error = execute_oci_list_instances_with(&connection, base_request.clone(), client)
+            let error = execute_oci_request_with(&connection, base_request.clone(), client)
                 .await
                 .unwrap_err();
             assert_eq!(error.to_string(), "OCI redirect blocked");
@@ -2788,13 +2956,13 @@ mod oci_transport_tests {
                 .await
                 .is_err()
         );
-        let failure = execute_oci_list_instances_with(&connection, base_request, client)
+        let failure = execute_oci_request_with(&connection, base_request, client)
             .await
             .unwrap();
         assert_eq!(failure.status, 401);
         assert_eq!(failure.headers["opc-request-id"], "auth-fixture");
         assert!(!failure.headers.contains_key("authorization"));
-        assert!(failure.body.is_empty());
+        assert_eq!(failure.body, "test-secret");
         let check_request = oci_check_request(&connection).unwrap();
         assert_eq!(check_request.timeout_seconds, Some(30));
         assert_eq!(check_request.max_response_bytes, Some(4096));
@@ -2804,12 +2972,12 @@ mod oci_transport_tests {
         assert!(check_request.form.is_empty());
         assert!(check_request.files.is_empty());
         assert!(check_request.headers.is_empty());
-        let checked = execute_oci_list_instances_with(&connection, check_request.clone(), client)
+        let checked = execute_oci_request_with(&connection, check_request.clone(), client)
             .await
             .unwrap();
         assert_eq!(oci_check_summary(&checked).unwrap(), "OCI_CHECK_OK: HTTP 200; request ID: check-fixture");
         for status in [401, 403, 404, 500] {
-            let response = execute_oci_list_instances_with(&connection, check_request.clone(), client)
+            let response = execute_oci_request_with(&connection, check_request.clone(), client)
                 .await
                 .unwrap();
             let error = oci_check_summary(&response).unwrap_err().to_string();
@@ -2828,7 +2996,7 @@ mod oci_transport_tests {
             ]));
         }
         assert!(requests[1].starts_with(
-            "GET /20160918/instances?compartmentId=fixture&page=a%2Bb%20c HTTP/1.1\r\n"
+            "GET /20160918/instances?compartmentId=fixture&page=a%2Bb+c HTTP/1.1\r\n"
         ));
 
         let pem_body: String = KEY
@@ -2861,3 +3029,7 @@ mod oci_transport_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "oci_generic_transport_tests.rs"]
+mod oci_generic_transport_tests;

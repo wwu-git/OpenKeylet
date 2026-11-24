@@ -1,87 +1,119 @@
-# OCI API 请求签名设计
+# OCI API 签名代执行
 
-状态：首版已实现。真实 OCI 只读联调需要部署方提供已配置的专用只读项目和用于验收的 compartment。
+OpenKeylet 通过现有 `http_send` 执行 OCI API 请求。Agent 根据用户意图和 OCI 官方文档选择接口、方法、参数及操作步骤。OpenKeylet 保管凭据，在本机校验目标、构造签名、发送请求并返回结果。
 
-OpenKeylet 将为 OCI 用户 API 密钥提供显式的「OCI API 签名」认证方式。Agent 继续使用现有的 `http_send`，由 OpenKeylet 在本机校验、签名并发送请求。
+## 能力和职责
 
-## 首版范围
+OCI API 项目提供通用的 API v1 RSA-SHA256 请求签名，不再限定 `ListInstances`、GET、路径或查询参数。新增 OCI API 只要沿用已支持的签名协议和请求格式，Agent 就可以直接构造请求，不需要新增专用 MCP 工具。
 
-首版只支持 OCI 商业云 Compute 的 **`ListInstances`（`GET /20160918/instances`）**。Compute 和 Networking 可能共用入口，因此同一主机上的其他路径也不允许。
-
-OCI 地址模板只提供服务地址。用户需明确选择「OCI API 签名」，再从受控的 OCI 商业云 OC1 区域列表中选择一个区域。其他 Compute 操作、Networking、Object Storage、S3 兼容接口和实例主体认证留待后续。
-
-## 添加项目模板
-
-在桌面端「添加项目」的模板区增加 **OCI Compute**，说明显示「使用 OCI API 密钥，仅支持读取实例列表」。
-
-选择模板后，项目进入显式的 OCI API 签名配置。表单提供区域、租户 OCID、用户 OCID、公钥指纹和「导入 RSA 签名私钥」。选定区域后，自动显示对应的服务 URL，地址由区域决定。项目配置不包含 `compartmentId`，调用方在每次请求中提供它。
-
-在签名配置下方通过「添加模块」选择账号、密码、API 凭据等预设模块，或添加自定义字段。服务 URL 由区域生成，菜单不再提供重复的 URL 模块。秘密字段按普通模块规则加密保存，使用各自的 Agent 可见性开关。这些字段不参与签名，也不改变请求目标或项目的可用操作。签名私钥仍由独立入口管理。
-
-现有 OCI 服务 URL 模板仍用于填写地址。「OCI Compute」项目模板与请求签名功能一起上线，且仍需点击「保存项目」才会提交配置和私钥。
-
-## 目标和请求校验
-
-1. 根据项目配置的区域构造 `https://iaas.<region>.oraclecloud.com/20160918/`。不接受自由输入的区域或主机覆盖。检查解析后的最终 URL，其协议、主机和有效端口必须与该 HTTPS 来源一致。绝对 URL 和相对路径使用同一规则。拒绝 URL 中的用户信息和片段。
-2. 方法必须是 GET，路径必须精确等于 `/20160918/instances`。拒绝请求正文、Base64 正文、表单和文件上传。合并 URL 查询串与 MCP `query` 参数后，要求恰好一个非空 `compartmentId`。首版仅另外接受可选的 `page` 和 `limit`，各最多出现一次。空 `page`、不符合 OCI 约束的 `limit`、未知参数和重复参数均拒绝。OCI IAM 决定可访问的 compartment，首版不维护本地 compartment 权限名单。
-3. 不接受调用方设置的 `Host`、`Authorization`、`Date` 或 `X-Date`，头名称按不区分大小写校验。执行器根据最终请求生成这些签名所需数据。
-4. 所有检查在签名前完成。OCI 签名请求使用专用 HTTPS 客户端，保留正常证书校验，禁用系统代理和代理环境变量的自动发现，不跟随任何重定向。直连失败即返回错误，不回退到代理，也不重发到其他地址。现有通用 HTTP 模式的代理策略独立。
-5. 使用实际发送的方法、编码后的路径和查询串、主机及请求时间生成 OCI RSA-SHA256 签名。签名与发送使用同一个最终请求，签名后不重新编码或调整查询参数顺序。
-
-## CHECK 连接检查
-
-OCI 项目保存并导入签名私钥后，项目页启用 CHECK。检查只向配置区域发送一次 `ListInstances`，使用租户 OCID 作为根区间的 `compartmentId`，并设置 `limit=1`、30 秒超时和受限响应体积。不请求下一页，也不显示实例正文。检查复用现有签名、目标校验、正常证书校验、无代理和禁止重定向规则。
-
-只有 HTTP 2xx 视为成功，空列表也可以通过。其他状态返回失败摘要及可用的 OCI 请求 ID。此检查只验证租户根区间；仅获准访问子区间的身份可能被根区间拒绝，这不一定表示私钥无效。首版不增加区间输入或自动遍历区间，也不改变 Agent 每次调用时显式提供 `compartmentId` 的规则。备份恢复后未重新导入签名私钥的项目不能 CHECK。
-
-## 手动分页
-
-每次 `http_send` 只请求一页。响应保留原始 `opc-next-page` 头。即使响应体是空列表，只要该头存在，就表示还有下一页。调用方保留原有 `compartmentId` 和 `limit`，将该头的值作为下一次请求的 `page` 参数。下一页重新走同一校验及签名流程，不对分页令牌做预编码。缺少 `opc-next-page` 时结束。
-
-## 私钥和备份
-
-项目保存区域、租户 OCID、用户 OCID 和已登记的 OCI API 公钥指纹。首版仅导入未加密 RSA PEM（PKCS#1 或 PKCS#8，至少 2048 位，允许 Oracle 的 `OCI_API_KEY` 文件尾标记），导入时验证密钥格式和类型。加密 PEM、非 RSA 或损坏文件均拒绝，校验失败或取消编辑保留原密钥。有效私钥在保存项目时加密入库。
-
-签名私钥是独立的凭据类型，只供本地 OCI 签名器使用。桌面端可以导入和替换，但不提供私钥明文查看、复制或单独导出。MCP 项目查询、通用填写、占位符和终端环境变量均不能读取或引用它。签名私钥、签名认证头不进入 MCP 响应、活动记录或错误信息。可保留 HTTP 状态、OCI 请求 ID 和错误类别用于诊断。
-
-首版便携导出、密码保护导出及 GitHub 快照均排除 OCI 签名私钥。备份可保留项目的非秘密配置，恢复后没有本地私钥的项目在重新导入密钥前不能签名。用户需独立保管原始 PEM。
-
-## 验收用例
-
-本机测试使用测试专用连接层将请求导向受控监听端点，保留生产目标校验规则，不在正式许可范围中加入回环地址。预期在签名前拒绝的用例同时断言签名器未被调用、请求未发送。
-
-| 场景 | 预期结果 |
+| Agent | OpenKeylet |
 | --- | --- |
-| 固定 RSA 测试密钥、时钟和 Oracle GET 样例 | 签名与官方样例或独立参考实现一致，覆盖编码字符和多个查询参数。 |
-| 捕获正式校验通过的最终请求 | 实际方法、路径、查询顺序、Host 和时间与签名输入一致，签名可用测试公钥验证。 |
-| 在「添加项目」中选择 OCI Compute 模板并选择区域 | 显示签名配置字段和该区域的服务 URL。保存前不创建项目或持久化私钥。 |
-| 有效区域与同源 `GET /20160918/instances` | 相对路径和绝对 URL 都可通过校验，且仅向配置的来源发送。 |
-| 未知区域、不同区域或主机、HTTP、非默认端口、跨源引用、URL 用户信息或片段 | 签名前拒绝。 |
-| 用不同大小写传入 Host、Authorization、Date 或 X-Date | 签名前拒绝。 |
-| 非 GET 方法、其他 Compute 或 Networking 路径、GET 正文、表单、文件、缺失或重复的 `compartmentId`，以及未知、重复或无效查询参数 | 签名前拒绝。重复用例覆盖同一名称分别出现在 URL 和 MCP `query` 中。 |
-| 设置可用系统代理或代理环境变量 | OCI 请求仍直连原目标，代理未收到连接。直连失败时不会尝试代理。 |
-| 端点返回同源或跨源重定向 | 返回重定向被阻断的错误，不发起第二次请求。 |
-| 列表响应为空，但包含 `opc-next-page` | 返回下一页令牌。调用方发起带 `page` 的新 GET 后，重新校验并签名。没有下一页令牌时结束。 |
-| 导入有效未加密 RSA PEM、加密 PEM、非 RSA、损坏 PEM，或取消替换 | 仅有效未加密 RSA PEM 可保存。校验失败或取消保留原密钥。 |
-| 查询、填写、复制、通用占位符、终端环境变量，或对项目执行备份与恢复 | 这些路径不能取得签名私钥。备份不含私钥，恢复到无本地密钥的保险库后须重新导入。 |
-| 签名失败或 OCI 返回认证错误 | 响应和活动记录不含私钥、签名认证头，OCI 响应带请求 ID 时保留该 ID。 |
-| 用专用 OCI IAM 只读身份调用真实 `ListInstances` | 能读取获准 compartment 的一页实例，包括合法空页。访问无权 compartment 时失败，保留可诊断的状态和 OCI 请求 ID。 |
+| 阅读接口文档，选择方法、路径、参数和正文 | 验证目标和传输参数，签名最终请求 |
+| 查找区间和资源，处理同名结果、分页和状态筛选 | 发送一次请求，返回状态、响应头和正文 |
+| 在用户授权范围内决定执行步骤 | 隐藏已保存的凭据和签名认证头 |
 
-## 调用示例
+OCI IAM 决定身份实际可以访问的资源和操作。权限拒绝是服务结果，OpenKeylet 不切换身份、扩大权限或绕过它。通用执行能力不等于任意 OCI 身份都具有写入权限。CHECK 是独立的轻量探测，不限制 `http_send` 的业务操作。
 
-在桌面端保存 OCI Compute 项目后，Agent 可以通过现有 `http_send` 读取一页实例。以下示例中的项目名和 compartment ID 需换成实际值。
+## 项目配置与发现
+
+桌面端的 **OCI API** 模板保留区域、租户 OCID、用户 OCID、公钥指纹和 RSA 签名私钥。选定区域后，默认服务 URL 为 `https://iaas.<region>.oraclecloud.com/20160918/`。保存项目后配置和私钥才生效。现有 OCI Compute 项目继续使用，无需迁移或重新导入密钥。
+
+Agent 使用 `items_search` 获取非秘密的 `ociContext.region` 和 `ociContext.tenancyOcid`。租户 OCID 同时是根 compartment 的 OCID，可用于构造区间发现请求。此上下文不包含用户 OCID、公钥指纹或签名私钥。普通模块仍遵守各自的 Agent 可见性开关。
+
+项目可附加普通账号、密码、Token 或自定义字段。Agent 可以用现有 `{{openkeylet:模块名}}` 占位符引用普通秘密模块。OpenKeylet 在本地替换后签名，并对返回内容脱敏。独立的 OCI 签名私钥不能通过模块、占位符、通用填写或终端环境变量读取。
+
+## 请求和目标边界
+
+- 使用现有 `http_send` 的 URL、方法、查询、请求头和正文参数。一次请求只选择 JSON/文本 `body`、原始字节 `bodyBase64`、或 `form`/`files` 中的一种正文形式。
+- 空 URL 或相对路径使用默认 Compute 服务地址。访问 IAM、Object Storage 或其他 OCI 服务时，Agent 提供该服务的绝对 URL。
+- CONNECT 和 TRACE 通道方法不受支持，其他有效 HTTP 方法交给 OCI 服务处理。目标必须为配置区域下的 OCI 商业云 HTTPS 端点，有效端口为 443。支持 `.<region>.oraclecloud.com` 和 `.<region>.oci.oraclecloud.com` 区域后缀，前面的服务域名须合法；不维护服务名或业务路径白名单。其他区域、其他域名、IP、URL 用户信息和片段均拒绝。
+- 保留正常 TLS 证书验证。OCI 请求不使用系统代理或代理环境变量，不跟随同源或跨源重定向，失败不回退到其他地址。
+- 签名及传输所需的 Host、Authorization、Date/X-Date、正文摘要和长度由本机生成，调用方不能覆盖。Agent 可以提供 API 所需的其他头，例如 Content-Type、条件请求头和请求 ID。
+- 最终序列化后的方法、路径、查询顺序和正文参与签名。带正文的请求，以及 POST/PUT/PATCH 的空正文，包含正文 SHA-256、类型和长度。签名后不再调整已签名的请求字节。
+- 正文在本机完成序列化和签名，缓冲上限为 64 MiB。超过上限时不发送，不提供流式分块签名。S3 Signature V4、OAuth、实例主体等其他认证协议不属于此 RSA API 密钥模式。
+
+## 响应和后续调用
+
+`http_send` 返回状态、响应头和正文。Agent 根据对应 API 的文档解释响应、错误和下一步，不由 OpenKeylet 固定业务流程。OCI 响应默认最多读取 2 MiB，可通过正值 `maxResponseBytes` 调整。使用 `saveResponseTo` 时也先完整读取、脱敏，再原子保存到本机文件；超过指定响应上限时失败，不留下部分文件。响应和文件中的已知秘密及签名认证头均受脱敏保护。
+
+每次调用只发送一个请求。列表 API 返回 `opc-next-page` 时，Agent 把令牌原样作为下一次请求的 `page`，保留原有筛选条件，不自行预编码。空列表也可能带下一页令牌，不能仅凭正文为空停止。异步操作按该 API 的响应头和文档继续查询，不能把一次请求接受等同于操作完成。
+
+查找名为 `example-compartment` 的区间时，Agent 应先查询有权访问的区间并取得其 OCID。唯一匹配可以直接继续；同名或路径仍有歧义时才请用户选择。能够自行查询的 OCID 不要求用户反复粘贴。根区间的空实例列表也不能解释为整个租户没有服务器。
+
+## CHECK
+
+项目保存且已导入私钥后，项目页启用 CHECK。CHECK 固定向配置区域发送一次根 compartment 的 `ListInstances`，`limit=1`、30 秒超时和受限响应体积。不读取下一页，不显示实例正文。
+
+只有 HTTP 2xx 算成功。失败返回状态及可用的请求 ID。仅获准访问子区间的身份可能被根区间拒绝，这不一定表示私钥无效。CHECK 不修改通用 `http_send` 的参数或权限。
+
+## 私钥、保存和备份
+
+私钥支持文件、剪贴板和手动输入，共用校验及暂存。只接受未加密 RSA PEM，支持 PKCS#1、PKCS#8、单个开头 UTF-8 BOM 和 Oracle `OCI_API_KEY` 尾标记，至少 2048 位并满足底层 RSA 参数校验。取消、无效替换或保存失败保留原私钥。
+
+有效私钥在保存项目时加密入库，只由本地签名器使用。客户端没有私钥明文查看、复制或单独导出入口。MCP、错误和活动记录不返回私钥或签名认证头。
+
+便携导出、密码保护导出和 GitHub 快照均排除 OCI 签名私钥，保留非秘密配置。恢复后没有本地私钥的项目需重新导入，才能签名或 CHECK。用户需独立保管原始 PEM。
+
+## MCP 使用示例
+
+以下是 Agent 可选择的调用示例，不是 OpenKeylet 内置的固定流程。实际参数和权限以相应 OCI API 文档为准。
+
+先按项目名发现上下文。
 
 ```json
 {
-  "item": "OCI Compute 东京",
+  "query": "oci-readonly-example"
+}
+```
+
+读取返回的 `ociContext`，使用其区域和租户 OCID 构造 IAM 区间查询。
+
+```json
+{
+  "item": "oci-readonly-example",
   "method": "GET",
-  "url": "instances",
+  "url": "https://identity.<region>.oci.oraclecloud.com/20160918/compartments",
   "query": {
-    "compartmentId": "<compartment OCID>",
-    "limit": 20
+    "compartmentId": "<ociContext.tenancyOcid>",
+    "compartmentIdInSubtree": true,
+    "accessLevel": "ACCESSIBLE",
+    "lifecycleState": "ACTIVE",
+    "limit": 100
   }
 }
 ```
+
+Agent 根据名称和父区间确认 `example-compartment` 的唯一 OCID，再调用实例 API。
+
+```json
+{
+  "item": "oci-readonly-example",
+  "method": "GET",
+  "url": "instances",
+  "query": {
+    "compartmentId": "<app compartment OCID>",
+    "lifecycleState": "RUNNING",
+    "limit": 100
+  }
+}
+```
+
+如 API 支持对应的状态筛选，可以直接提交参数；否则 Agent 在返回结果中筛选。接口版本、路径和查询参数不由 OpenKeylet 维护操作名单。
+
+## 验收
+
+本机模拟仅使用合成密钥。测试连接层把经过正式目标校验的请求导向本机 TLS 端点，不在正式目标范围中加入回环地址。
+
+- 用独立参考实现校验无正文、空正文及 JSON、文本、原始字节、表单和文件的实际方法、路径、查询、摘要、长度和 RSA 签名。
+- 验证新路径和查询参数可以直接调用；重复参数及分页令牌保持请求语义。外域、伪后缀、错误区域、非 HTTPS、端口、用户信息、片段和签名头覆盖在发送前失败。
+- 验证响应头、错误和文件结果不会暴露已知秘密、签名或认证头；代理和重定向无回退请求。
+- MCP 发现只暴露非秘密 OCI 上下文，普通模块遵守可见性；附加秘密可本地插值，签名私钥不能绑定或读取。
+- 检查中英文模板、保存取消、CHECK、无私钥恢复和既有 HTTP/SSH 回归。
+- 真实验收使用专用只读项目，查询区间后读取目标区间实例。IAM 拒绝和区间歧义须如实报告，不用模拟通过代替真实结果，不执行云端资源写入。
+
+2026-11-24，新构建的独立 MCP 进程使用只读测试项目（文中匿名为 `oci-readonly-example`）完成只读实测。Agent 从 `ociContext` 取得请求上下文，查询到可访问区间，唯一匹配目标区间，再查询到 `RUNNING` 实例（真实名称与资源数量已省略）。区间与实例请求均返回 HTTP 200，响应未截断且没有下一页。此次没有修改云资源、IAM 权限或保险库项目。
+
+## 参考
 
 - [Oracle OCI 请求签名规范](https://docs.oracle.com/en-us/iaas/Content/API/Concepts/signingrequests.htm)
 - [OCI REST API、区域接入点与分页](https://docs.oracle.com/en-us/iaas/Content/API/Concepts/usingapi.htm)

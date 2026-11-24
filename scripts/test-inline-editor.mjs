@@ -139,8 +139,10 @@ try {
   if (process.argv.includes('--oci')) {
     const openTemplate = async () => {
       await page.locator('#add-connection-button').click();
+      assert.match(await page.locator('[data-item-template="oci"]').innerText(), /OCI API/);
       await page.locator('[data-item-template="oci"]').click();
       await editor.locator('#oci-config').waitFor({state:'visible'});
+      assert.equal(await editor.locator('#oci-config legend').innerText(), 'OCI API');
       await page.locator('#oci-region').selectOption('ap-tokyo-1');
       await page.locator('#connection-name').fill('OCI test');
       await page.locator('#oci-tenancy').fill('ocid1.tenancy.oc1..test');
@@ -288,6 +290,9 @@ try {
     assert.match(await page.locator('#oci-key-status').innerText(),/NOT IMPORTED|No signing|not imported/);
     for (const language of ['en','zh']) {
       await page.locator(`[data-language="${language}"]`).evaluate(button=>button.click());
+      const templateCopy = await page.locator('[data-item-template="oci"]').textContent();
+      assert.match(templateCopy, language==='zh' ? /接口和操作由 Agent 决定/ : /agent chooses API operations/);
+      assert.ok(!templateCopy.includes('List instances'));
       for (const source of ['clipboard','input']) {
         await page.evaluate(()=>{
           document.querySelector('#toast-region').replaceChildren();

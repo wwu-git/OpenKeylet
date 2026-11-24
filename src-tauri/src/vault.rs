@@ -563,7 +563,7 @@ impl Vault {
                     .as_ref()
                     .is_none_or(|item| item.http_auth_type == crate::oci::AUTH_MODE);
                 if !editing_oci {
-                    bail!("Create a separate OCI Compute project");
+                    bail!("Create a separate OCI API project");
                 }
                 config.validate()?;
                 if input.modules.iter().any(|module| module.kind == "url" && !module.alternate_values.is_empty()) {
@@ -603,7 +603,7 @@ impl Vault {
                     .as_ref()
                     .is_some_and(|item| item.http_auth_type == crate::oci::AUTH_MODE))
             {
-                bail!("Edit OCI Compute projects using the OCI signing form");
+                bail!("Edit OCI API projects using the OCI signing form");
             }
             let previous_password =
                 zeroize::Zeroizing::new(secrets.get("password").map(str::to_owned));

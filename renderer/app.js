@@ -132,7 +132,7 @@ const staticCopy = [
   ['[data-item-template="secureNote"] > span', 'html', '安全笔记<small>加密保存长文本</small>', 'SECURE NOTE<small>ENCRYPTED TEXT</small>'],
   ['[data-item-template="ssh"] > span', 'html', 'SSH<small>主机 + 端口 + 账号 + 密码</small>', 'SSH<small>HOST + PORT + USER + PASSWORD</small>'],
   ['[data-item-template="api"] > span', 'html', 'API<small>API 凭据</small>', 'API<small>API CREDENTIAL</small>'],
-  ['[data-item-template="oci"] > span', 'html', 'OCI Compute<small>使用 OCI API 密钥，仅支持读取实例列表</small>', 'OCI Compute<small>List instances with an OCI API key</small>'],
+  ['[data-item-template="oci"] > span', 'html', 'OCI API<small>本地签名代执行，接口和操作由 Agent 决定</small>', 'OCI API<small>Local signing; the agent chooses API operations</small>'],
   ['#oci-region-label', 'text', '区域', 'Region'],
   ['#oci-url-label', 'text', '服务 URL', 'Service URL'],
   ['#oci-tenancy-label', 'text', '租户 OCID', 'Tenancy OCID'],
