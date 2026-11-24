@@ -43,6 +43,13 @@ html[lang] .modal-card .field > span {
 .modal-card .field em { font-size: var(--reading-help); }
 .modal-card .field-grid > .field,
 #connection-modal .field-grid > .field { grid-template-rows: auto auto; }
+.modal-card .field-grid > .field > span {
+  height: auto;
+  margin-bottom: 4px;
+  overflow: visible;
+  line-height: 1.4;
+  white-space: normal;
+}
 
 #connection-modal:not(.inline-editor) .modal-card { width: min(690px, 100%); }
 #connection-modal .form-scroll { padding: 12px; }
