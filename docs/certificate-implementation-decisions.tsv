@@ -8,3 +8,4 @@ ts	phase	decision	why	evidence	result
 2026-11-24T17:47:46+08:00	review	补齐 SSH 主机证书签发 CA 公钥强度校验	连接与通用验证使用相同算法策略	src-tauri/src/certificates/ssh.rs; ssh_host_verification_rejects_weak_ca_even_when_pinned	有效 RSA1024 CA 签名仍被拒绝
 2026-11-24T17:50:06+08:00	vault	CA 用途与独立授权绑定材料; 原子加密签发日志	普通 MCP 写入不能扩大 CA 密钥用途; 重试和并发一致	src-tauri/src/vault_certificate_tests.rs	7 专项和62 保险库测试通过; 版本17迁移及备份限制通过
 2026-11-24T17:50:06+08:00	ssh	显式区分主机公钥与主机 CA 信任	避免隐式降级和跳板认证混用	src-tauri/src/ssh_certificate_tests.rs	21 项通过; 独立本机 OpenSSH 用例通过; 直连/跳板命令和 SFTP 通过
+2026-11-24T17:50:54+08:00	mcp-cli	以固定 Agent/Owner 适配器区分调用者	MCP 不能选择 Owner 或更改签发授权	src-tauri/tests/headless_certificates.rs; src-tauri/src/mcp_certificate_tests.rs	真实 stdio MCP 与 CLI 2项通过; MCP证书5项通过; 不重连撤权生效

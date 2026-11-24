@@ -262,11 +262,130 @@ pub(crate) async fn ssh_trust(vault: &Vault, args: &[String]) -> Result<()> {
             vault.set_ssh_host_trust(uuid::Uuid::parse_str(id).context("Expected project UUID")?, host, port.parse().context("Invalid SSH port")?, Some(fingerprint))?;
             print_json(serde_json::json!({"status":"trusted"}))
         }
+        ["set-ca", id, host, port, fingerprint] => {
+            vault.set_ssh_host_ca_trust(uuid::Uuid::parse_str(id).context("Expected project UUID")?, host, port.parse().context("Invalid SSH port")?, Some(fingerprint))?;
+            print_json(serde_json::json!({"status":"ca-trusted"}))
+        }
         ["remove", id, host, port] => {
             vault.set_ssh_host_trust(uuid::Uuid::parse_str(id).context("Expected project UUID")?, host, port.parse().context("Invalid SSH port")?, None)?;
             print_json(serde_json::json!({"status":"removed"}))
         }
         ["probe", id] => print_json(mcp_vault::ssh_transport::probe(vault, uuid::Uuid::parse_str(id).context("Expected project UUID")?).await?),
-        _ => bail!("Usage: openkeylet ssh-trust <list|set ITEM_ID HOST PORT SHA256:FINGERPRINT|remove ITEM_ID HOST PORT|probe ITEM_ID>"),
+        _ => bail!("Usage: openkeylet ssh-trust <list|set ITEM_ID HOST PORT SHA256:FINGERPRINT|set-ca ITEM_ID HOST PORT SHA256:CA_FINGERPRINT|remove ITEM_ID HOST PORT|probe ITEM_ID>"),
     }
+}
+
+
+pub(crate) fn certificates(vault: &Vault, args: &[String]) -> Result<()> {
+    use mcp_vault::{
+        certificates::{CertificateKind, CertificateRequest, VerifyRequest},
+        model::{CertificateAuthorityBinding, CertificateAuthorityKind},
+        vault::{CertificateActor, SigningPermissionChange},
+    };
+    let args: Vec<_> = args.iter().map(String::as_str).collect();
+    let uuid = |value: &str| uuid::Uuid::parse_str(value).context("Expected UUID");
+    let kinds = |value: &str| -> Result<Vec<CertificateKind>> {
+        value
+            .split(',')
+            .map(|kind| match kind {
+                "sshUser" => Ok(CertificateKind::SshUser),
+                "sshHost" => Ok(CertificateKind::SshHost),
+                "tlsServer" => Ok(CertificateKind::TlsServer),
+                "tlsClient" => Ok(CertificateKind::TlsClient),
+                _ => bail!("Expected sshUser, sshHost, tlsServer or tlsClient"),
+            })
+            .collect()
+    };
+    match args.as_slice() {
+        ["status"] => print_json(vault.certificate_capabilities()?),
+        ["authority", "set", item, "ssh", private] => {
+            vault.set_certificate_authority(
+                uuid(item)?,
+                Some(CertificateAuthorityBinding {
+                    kind: CertificateAuthorityKind::Ssh,
+                    private_key: uuid(private)?,
+                    ca_certificate: None,
+                }),
+            )?;
+            print_json(vault.certificate_capabilities()?)
+        }
+        ["authority", "set", item, "tls", private, certificate] => {
+            vault.set_certificate_authority(
+                uuid(item)?,
+                Some(CertificateAuthorityBinding {
+                    kind: CertificateAuthorityKind::Tls,
+                    private_key: uuid(private)?,
+                    ca_certificate: Some(uuid(certificate)?),
+                }),
+            )?;
+            print_json(vault.certificate_capabilities()?)
+        }
+        ["authority", "clear", item] => {
+            vault.set_certificate_authority(uuid(item)?, None)?;
+            print_json(vault.certificate_capabilities()?)
+        }
+        ["permissions", "enable"] => {
+            print_json(vault.change_signing_permissions(SigningPermissionChange::Enable(true))?)
+        }
+        ["permissions", "disable"] => {
+            print_json(vault.change_signing_permissions(SigningPermissionChange::Enable(false))?)
+        }
+        ["permissions", "remove", item] => print_json(
+            vault.change_signing_permissions(SigningPermissionChange::Remove(uuid(item)?))?,
+        ),
+        ["permissions", "allow", item, permitted, ttl] => print_json(
+            vault.change_signing_permissions(SigningPermissionChange::Allow {
+                item_id: uuid(item)?,
+                kinds: kinds(permitted)?,
+                max_ttl_seconds: ttl.parse().context("Expected TTL in seconds")?,
+            })?,
+        ),
+        ["inspect", file] => print_json(mcp_vault::certificates::inspect_certificate(
+            &read_public_file(file)?,
+        )?),
+        ["verify", file] => {
+            let request: VerifyRequest = serde_json::from_str(&read_public_file(file)?)
+                .map_err(|_| anyhow::anyhow!("Invalid public verification request JSON"))?;
+            print_json(mcp_vault::certificates::verify_certificate(
+                &request,
+                chrono::Utc::now().timestamp(),
+            )?)
+        }
+        ["check-key", item, file] => {
+            print_json(vault.check_item_key(uuid(item)?, None, &read_public_file(file)?)?)
+        }
+        ["check-key", item, file, module] => print_json(vault.check_item_key(
+            uuid(item)?,
+            Some(uuid(module)?),
+            &read_public_file(file)?,
+        )?),
+        ["issue", item, request_id, file, ttl] => {
+            let request: CertificateRequest = serde_json::from_str(&read_public_file(file)?)
+                .map_err(|_| anyhow::anyhow!("Invalid public certificate request JSON"))?;
+            print_json(vault.issue_certificate(
+                CertificateActor::Owner,
+                uuid(item)?,
+                uuid(request_id)?,
+                request,
+                ttl.parse().context("Expected TTL in seconds")?,
+            )?)
+        }
+        _ => bail!(
+            "Usage: openkeylet certificates <status|authority set ITEM ssh KEY_MODULE|authority set ITEM tls KEY_MODULE CA_CERT_MODULE|authority clear ITEM|permissions enable/disable|permissions allow ITEM KIND[,KIND] MAX_TTL_SECONDS|permissions remove ITEM|inspect CERT_FILE|verify REQUEST_JSON|check-key ITEM PUBLIC_FILE [KEY_MODULE]|issue ITEM REQUEST_UUID REQUEST_JSON TTL_SECONDS>"
+        ),
+    }
+}
+
+fn read_public_file(path: &str) -> Result<String> {
+    use std::io::Read;
+    let mut file = File::open(path).context("Could not open public certificate input")?;
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut file)
+        .take((mcp_vault::certificates::MAX_INPUT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() <= mcp_vault::certificates::MAX_INPUT_BYTES,
+        "Certificate input is too large"
+    );
+    String::from_utf8(bytes).context("Certificate input must be UTF-8")
 }

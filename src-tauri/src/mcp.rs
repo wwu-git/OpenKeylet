@@ -149,7 +149,7 @@ impl VaultMcp {
         capability: Option<&str>,
     ) -> Option<DecryptedConnection> {
         let item_id = self.active_item.read().ok().and_then(|item| *item)?;
-        let connection = self.vault.get_connection(item_id).ok()?;
+        let connection = self.vault.agent_connection(item_id).ok()?;
         let supports_action = connection_supports_action(&connection, capability);
         (connection.stored.enabled && supports_action).then_some(connection)
     }
@@ -176,7 +176,7 @@ impl VaultMcp {
         if let Some(item_id) = bound {
             let connection = self
                 .vault
-                .get_connection(item_id)
+                .agent_connection(item_id)
                 .map_err(|_| "The OpenKeylet project bound to this terminal is no longer available; specify item again".to_owned())?;
             if !connection.stored.enabled
                 || !connection
@@ -273,7 +273,7 @@ impl VaultMcp {
                     .modules
                     .iter()
                     .map(|module| -> Result<ItemModuleOutput, String> {
-                        let agent_visible = module.agent_visible();
+                        let agent_visible = module.agent_visible() && !(decrypted.stored.certificate_authority.is_some() && module.is_secret());
                         let configured = if let Some(name) = module.secret_name() {
                             decrypted.secrets.get(name).is_some()
                         } else {
@@ -315,7 +315,11 @@ impl VaultMcp {
                 if decrypted.stored.has_capability(&decrypted.secrets, "http") {
                     actions.push("http_send".to_owned());
                 }
-                let oci_context = if decrypted.stored.http_auth_type == crate::oci::AUTH_MODE {
+                if decrypted.stored.certificate_authority.is_some() {
+                    actions.clear(); actions.push("certificate_issue".to_owned());
+                }
+                if decrypted.stored.modules.iter().any(|module| module.kind == "privateKey") { actions.push("certificate_check_key".to_owned()); }
+                let oci_context = if decrypted.stored.certificate_authority.is_none() && decrypted.stored.http_auth_type == crate::oci::AUTH_MODE {
                     decrypted.stored.oci_bindings.as_ref().and_then(|bindings| {
                         let visible = |id| {
                             decrypted.stored.modules.iter()
@@ -332,6 +336,7 @@ impl VaultMcp {
                     })
                 } else { None };
                 Ok(ItemOutput {
+                    certificate_authority: decrypted.stored.certificate_authority.clone(),
                     oci_bindings: decrypted.stored.oci_bindings.clone(),
                     ssh_jump_item_id: decrypted.stored.ssh_jump_item_id.map(|id|id.to_string()),
                     ssh_jump_unresolved: decrypted.stored.ssh_jump_unresolved,
@@ -423,6 +428,8 @@ impl VaultMcp {
         username: Option<&str>,
     ) -> Result<DecryptedConnection, String> {
         let mut connection = self.resolve_item_for_action(item, Some("ssh"))?;
+        self.vault.guard_agent_secret_use(connection.stored.id).map_err(|error| error.to_string())?;
+        if let Some(jump) = connection.stored.ssh_jump_item_id { self.vault.guard_agent_secret_use(jump).map_err(|error| error.to_string())?; }
         if let Some(host) = host.map(str::trim).filter(|value| !value.is_empty()) {
             connection.stored.host = host.to_owned();
         }
@@ -457,6 +464,7 @@ impl VaultMcp {
         bindings: &HashMap<String, String>,
         item_hint: &str,
     ) -> Result<HashMap<String, String>, String> {
+        self.vault.guard_agent_secret_use(connection.stored.id).map_err(|error| error.to_string())?;
         let mut replacements = HashMap::new();
         for (raw_alias, module_hint) in bindings {
             let alias = raw_alias.trim();
@@ -469,7 +477,7 @@ impl VaultMcp {
             let module = resolve_secret_module(connection, module_hint, item_hint)?;
             let (_, kind, mut value) = self
                 .vault
-                .get_secret_value(connection.stored.id, &module)
+                .agent_secret_value(connection.stored.id, &module)
                 .map_err(|error| error.to_string())?;
             if kind == "totp" {
                 value = current_totp(&value).map_err(|error| error.to_string())?;
@@ -513,6 +521,10 @@ impl VaultMcp {
 }
 
 fn connection_supports_action(connection: &DecryptedConnection, capability: Option<&str>) -> bool {
+    if capability == Some("certificate") {
+        return connection.stored.certificate_authority.is_some() || connection.stored.modules.iter().any(|module| module.kind == "privateKey");
+    }
+    if capability.is_some() && connection.stored.certificate_authority.is_some() { return false; }
     match capability {
         None => !connection
             .stored
@@ -888,6 +900,8 @@ struct ItemsSearchOutput {
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct ItemOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    certificate_authority: Option<crate::model::CertificateAuthorityBinding>,
     #[serde(skip_serializing_if = "Option::is_none")]
     oci_bindings: Option<crate::model::OciModuleBindings>,
     ssh_jump_item_id: Option<String>,
@@ -1353,8 +1367,98 @@ impl<'de, T: serde::de::DeserializeOwned> Deserialize<'de> for WriteRequest<T> {
     }
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CertificateIssueInput {
+    item: String,
+    #[schemars(
+        description = "A new UUID for a new issuance. Reuse the same UUID and identical request/TTL only to recover a committed result after a transport retry."
+    )]
+    request_id: String,
+    request: crate::certificates::CertificateRequest,
+    ttl_seconds: u64,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CertificateInspectInput {
+    certificate: String,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CertificateCheckInput {
+    item: String,
+    key_module_id: Option<String>,
+    public_or_certificate: String,
+}
+
 #[tool_router(router = tool_router)]
 impl VaultMcp {
+    #[tool(name = "certificate_capabilities", description = "Read owner-controlled local CA registration and Agent signing grants, permitted certificate kinds and maximum TTL. Signing is off by default and independent of folder write access. Reports fingerprints/status only, never CA private material. Agent cannot change grants or CA registration.", output_schema = rmcp::handler::server::tool::schema_for_type::<crate::vault::CertificateCapabilities>(), annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false))]
+    async fn certificate_capabilities(&self) -> CallToolResult {
+        into_tool_result(
+            self.vault
+                .certificate_capabilities()
+                .map_err(|error| error.to_string()),
+        )
+    }
+    #[tool(name = "certificate_inspect", description = "Inspect a public SSH or PEM TLS certificate: identities, purpose, issuer/key fingerprints, serial and validity. Inspection alone does not establish trust. Supply public certificate text only, never a private key.", output_schema = rmcp::handler::server::tool::schema_for_type::<crate::certificates::CertificateSummary>(), annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false))]
+    async fn certificate_inspect(
+        &self,
+        Parameters(input): Parameters<CertificateInspectInput>,
+    ) -> CallToolResult {
+        into_tool_result(
+            crate::certificates::inspect_certificate(&input.certificate)
+                .map_err(|error| error.to_string()),
+        )
+    }
+    #[tool(name = "certificate_verify", description = "Verify a public SSH or TLS certificate against explicitly supplied trusted public CA certificates/keys and the exact expected identity and purpose. Checks signature, trust, time, identity and purpose; reports revocationChecked=false. Do not infer trust from an unverified certificate or claim revocation was checked. No network requests.", output_schema = rmcp::handler::server::tool::schema_for_type::<crate::certificates::VerificationReport>(), annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false))]
+    async fn certificate_verify(
+        &self,
+        Parameters(input): Parameters<crate::certificates::VerifyRequest>,
+    ) -> CallToolResult {
+        into_tool_result(
+            crate::certificates::verify_certificate(&input, chrono::Utc::now().timestamp())
+                .map_err(|error| error.to_string()),
+        )
+    }
+    #[tool(name = "certificate_check_key", description = "Check whether a saved private key matches a supplied public key or certificate, without exposing private material. Choose the project and optional stable private-key module ID. Returns algorithm, public fingerprint and matches only.", output_schema = rmcp::handler::server::tool::schema_for_type::<crate::certificates::KeyMatchReport>(), annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false))]
+    async fn certificate_check_key(
+        &self,
+        Parameters(input): Parameters<CertificateCheckInput>,
+    ) -> CallToolResult {
+        let result = (|| {
+            let item = self.resolve_item_for_action(&input.item, Some("certificate"))?;
+            let module = input
+                .key_module_id
+                .map(|id| Uuid::parse_str(&id).map_err(|_| "Invalid module UUID".to_owned()))
+                .transpose()?;
+            self.vault
+                .check_item_key(item.stored.id, module, &input.public_or_certificate)
+                .map_err(|error| error.to_string())
+        })();
+        into_tool_result(result)
+    }
+    #[tool(name = "certificate_issue", description = "Issue an SSH user/host or TLS server/client leaf using an owner-registered CA and current explicit Agent signing grant. First read certificate_capabilities. Submit only a public SSH key plus concrete principals/keyId, or a signed CSR plus exact names, and ttlSeconds within the grant. Never submit or request the CA private key. Use a UUID requestId; identical retries recover the committed certificate, changed payload/TTL or issuer conflicts. Rechecks current authorization on replay; revocation is immediate. Cannot create CAs, expand grants or change trust. Returns public certificate/chain. SSH user certificates can be saved as sshCertificate modules beside the matching privateKey and sshAuthType=certificate. Host certificates require separate user-confirmed host CA trust; never auto-trust a returned signer.", output_schema = rmcp::handler::server::tool::schema_for_type::<crate::certificates::IssuedCertificate>(), annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false))]
+    async fn certificate_issue(
+        &self,
+        Parameters(input): Parameters<CertificateIssueInput>,
+    ) -> CallToolResult {
+        let result = (|| {
+            let item = self.resolve_item_for_action(&input.item, Some("certificate"))?;
+            let request_id = Uuid::parse_str(&input.request_id)
+                .map_err(|_| "Invalid request UUID".to_owned())?;
+            self.vault
+                .issue_certificate(
+                    crate::vault::CertificateActor::Agent,
+                    item.stored.id,
+                    request_id,
+                    input.request,
+                    input.ttl_seconds,
+                )
+                .map_err(|error| error.to_string())
+        })();
+        into_tool_result(result)
+    }
     #[tool(name = "vault_write_capabilities", description = "Read MCP vault write permissions, writable folders, supported fields and authentication modes. Writing is disabled by default. Does not reveal secrets or expand project query permissions.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<crate::vault_write::WriteCapabilities>(),
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false))]
@@ -1460,7 +1564,7 @@ impl VaultMcp {
                     async {
                         let (_, kind, mut value) = self
                             .vault
-                            .get_secret_value(item_id, &module)
+                            .agent_secret_value(item_id, &module)
                             .map_err(|error| anyhow::anyhow!(error))?;
                         if kind == "totp" {
                             value = current_totp(&value)?;
@@ -1687,7 +1791,7 @@ impl VaultMcp {
                     Err(error) => return tool_error(error),
                 };
                 let (_, kind, mut secret) =
-                    match self.vault.get_secret_value(connection.stored.id, &module) {
+                    match self.vault.agent_secret_value(connection.stored.id, &module) {
                         Ok(secret) => secret,
                         Err(error) => return tool_error(error.to_string()),
                     };
@@ -1888,7 +1992,7 @@ impl VaultMcp {
 
     #[tool(
         name = "ssh_run",
-        description = "Execute the requested command through OpenKeylet SSH. The project only needs a saved password or private key: host, port, and username may be supplied at runtime, with saved values as defaults and port 22 as the fallback. stdin sends text directly to the remote command without shell escaping or temporary files. Omit item after selecting a compatible project or when exactly one project stores SSH authentication. command, stdin, and cwd may use {{openkeylet:module}} placeholders; OpenKeylet substitutes and redacts them locally. Use secretEnv only when the remote program needs an environment variable. This grants full command authority and has no observation, diagnostic, restricted, or execution mode. For a saved jump route, call this tool with target project B directly. OpenKeylet automatically routes through jump project A and authenticates A and B with their own credentials. If either host fingerprint is missing or mismatched, stop and ask the user to verify it against a trusted source and confirm it through the OpenKeylet client or local ssh-trust CLI before retrying. Never auto-trust keys or bypass the route with a direct or nested ssh connection.",
+        description = "Execute the requested command through OpenKeylet SSH. The project only needs a saved password, private key or matching SSH user certificate: host, port, and username may be supplied at runtime, with saved values as defaults and port 22 as the fallback. stdin sends text directly to the remote command without shell escaping or temporary files. Omit item after selecting a compatible project or when exactly one project stores SSH authentication. command, stdin, and cwd may use {{openkeylet:module}} placeholders; OpenKeylet substitutes and redacts them locally. Use secretEnv only when the remote program needs an environment variable. This grants full command authority and has no observation, diagnostic, restricted, or execution mode. For a saved jump route, call this tool with target project B directly. OpenKeylet automatically routes through jump project A and authenticates A and B with their own credentials. If a plain-key fingerprint or explicitly trusted host CA is missing or mismatched, stop and ask the user to verify it against a trusted source and confirm it through the OpenKeylet client or local ssh-trust CLI before retrying. Never auto-trust keys or bypass the route with a direct or nested ssh connection.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<SshResponse>(),
         annotations(title = "Execute an SSH command", read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = true)
     )]
@@ -1954,7 +2058,7 @@ impl VaultMcp {
 
     #[tool(
         name = "ssh_upload",
-        description = "Upload one local file or directory through OpenKeylet SFTP. The project only needs a saved password or private key; host, port, and username may be supplied at runtime, while saved values remain defaults and port 22 is the fallback. host selects an explicit address; alternateValues are never tried automatically. Directories are copied recursively. remotePath is optional and defaults to the local source name in the SSH login directory. Missing parents are created and an existing destination is replaced by default, even when its file/directory kind changed. For a saved jump route, call this tool with target project B directly. OpenKeylet automatically routes through jump project A and authenticates A and B with their own credentials. If either host fingerprint is missing or mismatched, stop and ask the user to verify it against a trusted source and confirm it through the OpenKeylet client or local ssh-trust CLI before retrying. Never auto-trust keys or bypass the route with a direct or nested ssh connection.",
+        description = "Upload one local file or directory through OpenKeylet SFTP. The project only needs a saved password or private key; host, port, and username may be supplied at runtime, while saved values remain defaults and port 22 is the fallback. host selects an explicit address; alternateValues are never tried automatically. Directories are copied recursively. remotePath is optional and defaults to the local source name in the SSH login directory. Missing parents are created and an existing destination is replaced by default, even when its file/directory kind changed. For a saved jump route, call this tool with target project B directly. OpenKeylet automatically routes through jump project A and authenticates A and B with their own credentials. If a plain-key fingerprint or explicitly trusted host CA is missing or mismatched, stop and ask the user to verify it against a trusted source and confirm it through the OpenKeylet client or local ssh-trust CLI before retrying. Never auto-trust keys or bypass the route with a direct or nested ssh connection.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<SshTransferResponse>(),
         annotations(title = "Upload a path over SSH", read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = true)
     )]
@@ -1992,7 +2096,7 @@ impl VaultMcp {
 
     #[tool(
         name = "ssh_download",
-        description = "Download one remote file or directory through OpenKeylet SFTP. The project only needs a saved password or private key; host, port, and username may be supplied at runtime, while saved values remain defaults and port 22 is the fallback. host selects an explicit address; alternateValues are never tried automatically. Directories are copied recursively. localPath is optional and defaults to the remote source name in the MCP working directory. Missing parents are created and an existing destination is replaced by default, even when its file/directory kind changed. For a saved jump route, call this tool with target project B directly. OpenKeylet automatically routes through jump project A and authenticates A and B with their own credentials. If either host fingerprint is missing or mismatched, stop and ask the user to verify it against a trusted source and confirm it through the OpenKeylet client or local ssh-trust CLI before retrying. Never auto-trust keys or bypass the route with a direct or nested ssh connection.",
+        description = "Download one remote file or directory through OpenKeylet SFTP. The project only needs a saved password or private key; host, port, and username may be supplied at runtime, while saved values remain defaults and port 22 is the fallback. host selects an explicit address; alternateValues are never tried automatically. Directories are copied recursively. localPath is optional and defaults to the remote source name in the MCP working directory. Missing parents are created and an existing destination is replaced by default, even when its file/directory kind changed. For a saved jump route, call this tool with target project B directly. OpenKeylet automatically routes through jump project A and authenticates A and B with their own credentials. If a plain-key fingerprint or explicitly trusted host CA is missing or mismatched, stop and ask the user to verify it against a trusted source and confirm it through the OpenKeylet client or local ssh-trust CLI before retrying. Never auto-trust keys or bypass the route with a direct or nested ssh connection.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<SshTransferResponse>(),
         annotations(title = "Download a path over SSH", read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = true)
     )]
@@ -2048,6 +2152,7 @@ impl VaultMcp {
             }
             let has_secret_bindings = !input.secret_bindings.is_empty();
             let mut connection = self.resolve_item_for_action(&input.item, Some("http"))?;
+            self.vault.guard_agent_secret_use(connection.stored.id).map_err(|error| error.to_string())?;
             let item_id = connection.stored.id;
             self.prepare_http_secret_bindings(&mut connection, &mut input)?;
             let request = ApiRequestInput {
@@ -2082,7 +2187,7 @@ impl ServerHandler for VaultMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("openkeylet", env!("CARGO_PKG_VERSION")).with_title("OpenKeylet"))
             .with_instructions(
-            "OpenKeylet lets agents use locally saved credentials without receiving hidden plaintext. An explicit item or unique items_search result becomes the current project; later compatible actions may omit item, and a terminal keeps its own binding. When the user names a project and the action is clear, call it directly. Use items_search only for discovery, selection, inspection, or genuine ambiguity. For OCI, http_send is a general signed request executor. The agent reads the OCI API documentation and chooses operations, methods, parameters, pagination and filtering; OpenKeylet validates the target, signs locally and returns the response. items_search exposes non-secret ociContext.region and tenancyOcid. Use the relevant OCI APIs to discover named compartments or resources rather than asking the user for OCIDs that can be retrieved; ask when matches are ambiguous. Use an absolute regional OCI service URL when the API is not under the default Compute base. OCI requests stay within the configured region on HTTPS port 443, never follow redirects, and never use proxies. Resource permissions remain with OCI IAM. Do not bypass IAM denials or claim an empty root-compartment page means the tenancy has no instances. Each call sends one request; handle service pagination and filter returned data as required by the user. OCI signing fields are ordinary modules bound by stable module IDs. Module visibility controls all plaintext returned to the agent, including the signing key and OCI request context. Hidden modules can still be used locally without revealing plaintext. credential_fill understands common module phrases and may infer a sole secret; omit target to use the current running OpenKeylet terminal, otherwise a connected browser or foreground control, and use submit=true to complete the login. terminal_start makes the opened PTY current, so terminal_write, terminal_read, terminal_stop, and terminal credential fills should omit sessionId unless deliberately switching among multiple terminals. Use terminal_run for one-shot local commands and PTY tools only for persistent interaction. Direct {{openkeylet:module}} placeholders work in commands, stdin, paths, terminal input, SSH, and HTTP values; OpenKeylet substitutes and redacts them locally. terminal_run.stdin and ssh_run.stdin pass scripts, JSON, or other text without shell escaping or temporary files. Host and service URL modules may save other addresses in alternateValues; value is the default. Omitted SSH host or HTTP URL uses that default, relative HTTP paths use the default service URL, and explicit host or absolute URL selects another target. Addresses share project credentials and SSH port; there is no automatic failover. A password or private-key project can use SSH without saved target metadata: pass host, optional port, and username at runtime; saved values are defaults and port 22 is the fallback. For a saved SSH jump route, call ssh_run, ssh_upload, or ssh_download with target project B directly. OpenKeylet automatically routes through jump project A and authenticates each endpoint with its own credentials. items_search exposes the saved route; items_create/items_update configure sshJumpItemId under the existing write permissions and revision rules. If either host fingerprint is missing or mismatched, stop and ask the user to verify it against a trusted source and confirm it through the OpenKeylet client or local ssh-trust CLI, confirming A before probing B when needed. Never auto-trust keys or bypass the route with a direct or nested ssh connection. Use secretEnv only when a program needs an environment variable, and HTTP secretBindings only for aliases. Never ask the user to reveal a hidden value. terminal_read.until waits without polling and has no deadline unless waitSeconds is supplied. For vault writing, consult vault_write_capabilities, then items_create/items_update. Writing requires desktop folder authorization, uses stable project/module IDs and expectedRevision, and cannot change visibility. Never echo submitted secrets. OpenKeylet has no observation, diagnostic, restricted, or execution modes.",
+            "OpenKeylet lets agents use locally saved credentials without receiving hidden plaintext. Certificate workflow: certificate_capabilities reports separately owner-granted CA kinds and TTL limits; certificate_inspect and certificate_verify operate on public material, and certificate_check_key compares a saved key locally. certificate_issue accepts public subject keys/CSRs only, a UUID requestId, concrete identities, purpose and ttlSeconds. Reuse the UUID only for identical retries; current grants are checked again before replay. CA-marked projects cannot be delegated through fill, HTTP, SSH, placeholders, secretEnv or terminals even if a module was marked visible. Agent cannot register/unmark a CA or edit signing grants. Existing CA bindings remain protected after module/type edits. Store SSH leaves as a standard sshCertificate module beside its matching privateKey, choose sshAuthType certificate; jump endpoints authenticate independently. Host CA trust requires explicit user confirmation of signer CA fingerprint for each exact item/host/port using the client or ssh-trust set-ca; never auto-trust from a probe. TLS verification does not check revocation. This does not sandbox arbitrary programs already having local-user file access. An explicit item or unique items_search result becomes the current project; later compatible actions may omit item, and a terminal keeps its own binding. When the user names a project and the action is clear, call it directly. Use items_search only for discovery, selection, inspection, or genuine ambiguity. For OCI, http_send is a general signed request executor. The agent reads the OCI API documentation and chooses operations, methods, parameters, pagination and filtering; OpenKeylet validates the target, signs locally and returns the response. items_search exposes non-secret ociContext.region and tenancyOcid. Use the relevant OCI APIs to discover named compartments or resources rather than asking the user for OCIDs that can be retrieved; ask when matches are ambiguous. Use an absolute regional OCI service URL when the API is not under the default Compute base. OCI requests stay within the configured region on HTTPS port 443, never follow redirects, and never use proxies. Resource permissions remain with OCI IAM. Do not bypass IAM denials or claim an empty root-compartment page means the tenancy has no instances. Each call sends one request; handle service pagination and filter returned data as required by the user. OCI signing fields are ordinary modules bound by stable module IDs. Module visibility controls all plaintext returned to the agent, including the signing key and OCI request context. Hidden modules can still be used locally without revealing plaintext. credential_fill understands common module phrases and may infer a sole secret; omit target to use the current running OpenKeylet terminal, otherwise a connected browser or foreground control, and use submit=true to complete the login. terminal_start makes the opened PTY current, so terminal_write, terminal_read, terminal_stop, and terminal credential fills should omit sessionId unless deliberately switching among multiple terminals. Use terminal_run for one-shot local commands and PTY tools only for persistent interaction. Direct {{openkeylet:module}} placeholders work in commands, stdin, paths, terminal input, SSH, and HTTP values; OpenKeylet substitutes and redacts them locally. terminal_run.stdin and ssh_run.stdin pass scripts, JSON, or other text without shell escaping or temporary files. Host and service URL modules may save other addresses in alternateValues; value is the default. Omitted SSH host or HTTP URL uses that default, relative HTTP paths use the default service URL, and explicit host or absolute URL selects another target. Addresses share project credentials and SSH port; there is no automatic failover. A password or private-key project can use SSH without saved target metadata: pass host, optional port, and username at runtime; saved values are defaults and port 22 is the fallback. For a saved SSH jump route, call ssh_run, ssh_upload, or ssh_download with target project B directly. OpenKeylet automatically routes through jump project A and authenticates each endpoint with its own credentials. items_search exposes the saved route; items_create/items_update configure sshJumpItemId under the existing write permissions and revision rules. If a plain-key fingerprint or explicitly trusted host CA is missing or mismatched, stop and ask the user to verify it against a trusted source and confirm it through the OpenKeylet client or local ssh-trust CLI, confirming A before probing B when needed. Never auto-trust keys or bypass the route with a direct or nested ssh connection. Use secretEnv only when a program needs an environment variable, and HTTP secretBindings only for aliases. Never ask the user to reveal a hidden value. terminal_read.until waits without polling and has no deadline unless waitSeconds is supplied. For vault writing, consult vault_write_capabilities, then items_create/items_update. Writing requires desktop folder authorization, uses stable project/module IDs and expectedRevision, and cannot change visibility. Never echo submitted secrets. OpenKeylet has no observation, diagnostic, restricted, or execution modes.",
         )
     }
 
@@ -2261,7 +2366,7 @@ mod tests {
                 query: Some("OCI test".into()),
             })
             .unwrap();
-        assert_eq!(discovered.items[0].actions, ["credential_fill", "http_send"]);
+        assert_eq!(discovered.items[0].actions, ["credential_fill", "http_send", "certificate_check_key"]);
         let context = discovered.items[0].oci_context.as_ref().unwrap();
         assert_eq!(context.region.as_deref(), Some("ap-tokyo-1"));
         assert_eq!(context.tenancy_ocid, Some(crate::oci::tests::config().tenancy_ocid));
@@ -3685,3 +3790,7 @@ mod tests {
     }
 
 }
+
+#[cfg(test)]
+#[path = "mcp_certificate_tests.rs"]
+mod certificate_tests;
