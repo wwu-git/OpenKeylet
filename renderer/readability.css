@@ -59,6 +59,7 @@ html[lang] .modal-card .field > span {
 }
 
 #connection-modal .modal-footer { flex-shrink: 0; }
+#connection-modal .modal-footer .command-well { height: auto; }
 #connection-modal :is(.editor-heading strong, .module-identity strong, .item-enabled-copy strong) {
   font-size: var(--reading-text);
   line-height: 1.35;
