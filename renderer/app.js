@@ -67,6 +67,10 @@ const staticCopy = [
   ['#text-size-label', 'text', '界面字号', 'Text size'],
   ['#text-size option[value="standard"]', 'text', '标准', 'Standard'],
   ['#text-size option[value="large"]', 'text', '大号', 'Large'],
+  ['#item-layout-label', 'text', '项目显示方式', 'Item layout'],
+  ['#item-layout-help', 'text', '仅保存在当前设备', 'Saved on this device'],
+  ['#item-layout option[value="list"]', 'text', '列表', 'List'],
+  ['#item-layout option[value="grid"]', 'text', '宫格', 'Grid'],
   ['label[for="close-behavior"] strong', 'text', '关闭按钮', 'CLOSE BUTTON'],
   ['label[for="close-behavior"] small', 'text', '最小化可保留托盘菜单', 'Minimizing keeps tray controls available.'],
   ['#close-behavior option[value="tray"]', 'text', '最小化到托盘', 'MINIMIZE TO TRAY'],
@@ -2722,7 +2726,7 @@ async function saveItemOrder(visibleOrder, expectedOrder, focusedId) {
 }
 
 function clearItemDropSeam() {
-  $$('.item-drop-before, .item-drop-after', itemList).forEach(row => row.classList.remove('item-drop-before', 'item-drop-after'));
+  $$('.item-drop-before, .item-drop-after', itemList).forEach(row => row.classList.remove('item-drop-before', 'item-drop-after', 'item-drop-side'));
 }
 
 function updateItemDropSeam() {
@@ -2736,6 +2740,22 @@ function updateItemDropSeam() {
   if (!drag.valid) return;
   const others = $$('.connection-card', itemList).filter(row => row !== drag.row);
   if (!others.length) return;
+  if (document.documentElement.dataset.itemLayout === 'grid') {
+    const singleColumn = getComputedStyle(itemList).gridTemplateColumns.trim().split(/\s+/).length === 1;
+    const targets = others.map(row => {
+      const rect = row.getBoundingClientRect();
+      const dx = Math.max(rect.left - drag.x, 0, drag.x - rect.right);
+      const dy = Math.max(rect.top - drag.y, 0, drag.y - rect.bottom);
+      const after = singleColumn || row.classList.contains('is-editing')
+        ? drag.y > rect.top + rect.height / 2
+        : drag.y < rect.top ? false : drag.y > rect.bottom ? true : drag.x > rect.left + rect.width / 2;
+      return { row, distance: dx * dx + dy * dy, after };
+    });
+    drag.target = targets.reduce((nearest, target) => target.distance < nearest.distance ? target : nearest);
+    drag.target.row.classList.add(drag.target.after ? 'item-drop-after' : 'item-drop-before');
+    drag.target.row.classList.toggle('item-drop-side', !singleColumn && !drag.target.row.classList.contains('is-editing'));
+    return;
+  }
   const seams = others.map(row => ({ row, after: false, y: row.getBoundingClientRect().top }));
   seams.push({ row: others.at(-1), after: true, y: others.at(-1).getBoundingClientRect().bottom });
   drag.target = seams.reduce((nearest, seam) => Math.abs(drag.y - seam.y) < Math.abs(drag.y - nearest.y) ? seam : nearest);

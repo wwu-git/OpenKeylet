@@ -152,7 +152,139 @@ try {
   const row = id => page.locator(`.connection-card[data-item-id="${id}"]`);
   const toggle = id => row(id).locator('.item-disclosure');
   const editor = page.locator('#connection-modal');
-  if (process.argv.includes('--api-services')) {
+  if (process.argv.includes('--grid')) {
+    const order = () => page.locator('.connection-card').evaluateAll(rows => rows.map(row => row.dataset.itemId));
+    const switchLayout = async layout => page.locator('#item-layout').evaluate((select, value) => { select.value = value; select.dispatchEvent(new Event('change', {bubbles:true})); }, layout);
+    const search = async text => {
+      if (!await page.locator('#title-search-input').isVisible()) await page.locator('#title-search-toggle').click();
+      await page.locator('#title-search-input').fill(text);
+    };
+    const drag = async (from, target, after, cancel = false, vertical = false) => {
+      await row(from).locator('.connection-name').scrollIntoViewIfNeeded();
+      const start = await row(from).locator('.connection-name').boundingBox();
+      const end = await row(target).boundingBox();
+      await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(vertical ? end.x+end.width/2 : after ? end.x+end.width-5 : end.x+5, vertical ? after ? end.y+end.height-5 : end.y+5 : end.y+end.height/2, {steps:8});
+      if (cancel) await page.keyboard.press('Escape');
+      await page.mouse.up();
+      await page.waitForFunction(() => !document.querySelector('#connections-list').hasAttribute('aria-busy'));
+    };
+    assert.equal(await page.locator('html').getAttribute('data-item-layout'), 'list');
+    await page.locator('[data-page="settings"]').click();
+    await page.locator('#item-layout').selectOption('grid');
+    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('openkeylet.appearance.v1')).itemLayout), 'grid');
+    await page.reload();
+    await page.locator('.connection-card').first().waitFor();
+    assert.equal(await page.locator('html').getAttribute('data-item-layout'), 'grid');
+    await page.setViewportSize({width:690,height:1000});
+    const a = await row('alpha').boundingBox(), b = await row('beta').boundingBox();
+    assert.ok(Math.abs(a.y-b.y)<1 && b.x>a.x, 'Grid puts two cards on the same row at 690px');
+    await drag('alpha','beta',true);
+    assert.deepEqual(await order(), ['beta','alpha','gamma']);
+    await drag('gamma','beta',false);
+    assert.deepEqual(await order(), ['gamma','beta','alpha']);
+    await row('alpha').locator('.connection-name').press('Home');
+    await page.waitForFunction(() => !document.querySelector('#connections-list').hasAttribute('aria-busy'));
+    assert.deepEqual(await order(), ['alpha','gamma','beta']);
+    const startEnd=await row('alpha').locator('.connection-name').boundingBox(), lastEnd=await row('beta').boundingBox();
+    await page.mouse.move(startEnd.x+10,startEnd.y+10);
+    await page.mouse.down();
+    await page.mouse.move(lastEnd.x+5,lastEnd.y+lastEnd.height+15,{steps:8});
+    await page.mouse.up();
+    await page.waitForFunction(() => !document.querySelector('#connections-list').hasAttribute('aria-busy'));
+    assert.deepEqual(await order(),['gamma','beta','alpha'],'Bottom whitespace appends after the last tile');
+    await row('alpha').locator('.connection-name').press('Home');
+    await page.waitForFunction(() => !document.querySelector('#connections-list').hasAttribute('aria-busy'));
+    await drag('alpha','beta',true,true);
+    assert.deepEqual(await order(), ['alpha','gamma','beta']);
+    await page.evaluate(() => { fixture.failOrder=true; });
+    await drag('alpha','beta',true);
+    assert.deepEqual(await order(), ['alpha','gamma','beta']);
+    await page.evaluate(async () => {
+      fixture.failOrder=false;
+      fixture.state.connections.push({...structuredClone(fixture.state.connections[0]),id:'delta',name:'Second synthetic API',folder:'test'});
+      fixture.state.connections.find(item=>item.id==='alpha').folder='test';
+      fixture.state.connections.find(item=>item.id==='beta').enabled=false;
+      await refresh();
+    });
+    await page.locator('[data-item-type-filter="api"]').click();
+    await drag('delta','alpha',false);
+    assert.deepEqual(await page.evaluate(() => fixture.state.connections.map(item=>item.id)), ['delta','gamma','beta','alpha']);
+    await search('synthetic');
+    await page.locator('#connection-folder-filter').selectOption('folder:test');
+    await page.locator('#connection-status-filter').selectOption('enabled');
+    assert.deepEqual(await order(), ['delta','alpha']);
+    await page.locator('#title-search-toggle').click();
+    await page.locator('[data-item-type-filter="ssh"]').click();
+    assert.equal(await page.locator('.empty-state').isVisible(),true);
+    await page.locator('.empty-state [data-action="clear-connection-filters"]').click();
+    await toggle('alpha').click();
+    await page.locator('#connection-description').fill('Unsaved grid edit');
+    await editor.locator('[data-secret-value]').fill('SYNTHETIC-UNSAVED');
+    await page.evaluate(() => { window.gridEditorNode=document.querySelector('#connection-modal'); });
+    await switchLayout('list');
+    await switchLayout('grid');
+    assert.equal(await page.evaluate(() => window.gridEditorNode===document.querySelector('#connection-modal')),true);
+    assert.equal(await page.locator('#connection-description').inputValue(),'Unsaved grid edit');
+    assert.equal(await editor.locator('[data-secret-value]').inputValue(),'SYNTHETIC-UNSAVED');
+    assert.equal(await page.evaluate(() => fixture.saved.length),0);
+    const editing = await row('alpha').boundingBox(), list = await page.locator('#connections-list').boundingBox();
+    assert.ok(Math.abs(editing.width-list.width)<2,'Expanded grid editor spans the full list');
+    await search('not-a-match');
+    assert.deepEqual(await order(),['alpha']);
+    assert.equal(await page.locator('#connection-description').inputValue(),'Unsaved grid edit');
+    await search('');
+    await page.locator('#title-search-toggle').click();
+    await toggle('alpha').click();
+    await editor.waitFor({state:'hidden'});
+    await page.keyboard.press('Escape');
+    await page.setViewportSize({width:460,height:1000});
+    const narrowA=await row('delta').boundingBox(), narrowB=await row('gamma').boundingBox();
+    assert.ok(Math.abs(narrowA.x-narrowB.x)<1&&narrowB.y>narrowA.y,'460px grid uses one column');
+    await drag('delta','gamma',true,false,true);
+    assert.deepEqual(await order(),['gamma','delta','beta','alpha'],'Single-column downward drag uses vertical position');
+    await drag('delta','gamma',false,false,true);
+    assert.deepEqual(await order(),['delta','gamma','beta','alpha'],'Single-column upward drag uses vertical position');
+    for (const width of [1000,690,460]) {
+      await page.setViewportSize({width,height:1000});
+      for (const size of ['standard','large']) {
+        await page.locator('#text-size').evaluate((select, value) => {select.value=value;select.dispatchEvent(new Event('change',{bubbles:true}));},size);
+        for (const language of ['en','zh']) {
+          await page.locator(`[data-language="${language}"]`).click();
+          for (const theme of ['dark','light']) {
+            if (await page.locator('html').getAttribute('data-theme')!==theme) await page.locator('#theme-toggle').click();
+            const geometry=await page.locator('.connection-card').evaluateAll(cards=>cards.map(card=>{
+              const outer=card.getBoundingClientRect();
+              return {width:outer.width,overflow:card.scrollWidth>card.clientWidth+1,controls:[...card.querySelectorAll('button')].map(button=>{const r=button.getBoundingClientRect();return r.left>=outer.left&&r.right<=outer.right+1;})};
+            }));
+            assert.ok(geometry.every(card=>!card.overflow&&card.controls.every(Boolean)),JSON.stringify(geometry));
+            assert.equal(await page.evaluate(() => document.documentElement.scrollWidth<=innerWidth),true);
+            await page.screenshot({path:path.join(artifacts,`grid-${width}-${size}-${language}-${theme}.png`)});
+          }
+        }
+      }
+    }
+    await switchLayout('list');
+    await page.reload();
+    await page.locator('.connection-card').first().waitFor();
+    assert.equal(await page.locator('html').getAttribute('data-item-layout'),'list');
+    await page.evaluate(() => localStorage.setItem('openkeylet.appearance.v1',JSON.stringify({itemLayout:'invalid'})));
+    await page.reload();
+    await page.locator('.connection-card').first().waitFor();
+    assert.equal(await page.locator('html').getAttribute('data-item-layout'),'list');
+    await page.addInitScript(() => {
+      Object.defineProperty(Storage.prototype,'getItem',{value(){throw Error('Unavailable test storage');}});
+      Object.defineProperty(Storage.prototype,'setItem',{value(){throw Error('Unavailable test storage');}});
+    });
+    await page.reload();
+    await page.locator('.connection-card').first().waitFor();
+    assert.equal(await page.locator('html').getAttribute('data-item-layout'),'list');
+    await switchLayout('grid');
+    assert.equal(await page.locator('html').getAttribute('data-item-layout'),'grid','Unavailable storage still permits session-only layout changes');
+    assert.deepEqual(errors,[]);
+    console.log(`Grid display passed: ${artifacts}`);
+  } else if (process.argv.includes('--api-services')) {
     const picker = page.locator('#api-service-modal');
     const urls = () => editor.locator('[data-kind="url"]');
     const addresses = () => urls().locator('[data-module-value], [data-module-alternate-value]');

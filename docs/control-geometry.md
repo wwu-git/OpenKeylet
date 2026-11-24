@@ -61,3 +61,21 @@ captions and state colors, including disabled controls. ON and OFF labels must
 have at least 4.5:1 contrast against their well. The interaction suite also checks
 caption updates after dragging, Space and Enter, shared ordinary-action ink,
 distinct destructive-action ink and unchanged floor material across states.
+
+## Item list and grid
+
+Settings > Appearance, window and lock > Item layout switches between List and
+Grid. List is the default. The choice belongs to this device's local appearance
+preferences, alongside theme and text size. It does not change the vault or MCP.
+
+Both layouts use the same item cards, actions, filters and saved order. Grid
+columns adapt to the available width. An expanded editor spans the full row.
+Changing the layout preserves the live form and its unsaved values. Grid cards
+show the existing name, type, enabled state and actions without extra secrets or
+address summaries.
+
+Pointer sorting in the grid uses both coordinates. Keyboard sorting retains the
+logical item order. Reordering filtered items retains the hidden items' slots.
+
+Run `OPENKEYLET_TEST_CHROME=chrome node scripts/test-inline-editor.mjs --grid`
+for the isolated grid regression. It uses simulated items, not the user's vault.
