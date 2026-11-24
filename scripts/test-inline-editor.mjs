@@ -64,6 +64,7 @@ try {
         return structuredClone(fixture.integrations);
       }
       if (command === 'update_settings') { fixture.settingsWrites.push(args.patch); Object.assign(state.settings, args.patch); return state.settings; }
+      if (command === 'owner_secret_view' && args.id === 'aws') return { fields: Object.entries(fixture.awsSecrets || {}).map(([name,value]) => ({name,value})) };
       if (command === 'owner_secret_view' && args.id === 'oci') return { fields: Object.entries(fixture.ociSecrets || {}).map(([name, value]) => ({ name, value })) };
       if (command === 'owner_secret_view' && fixture.keyActionSecret) return { fields: [{name:'privateKey',value:fixture.keyActionSecret}] };
       if (command === 'copy_owner_value') { fixture.copiedValue = args.value; return; }
@@ -119,7 +120,12 @@ try {
         if (fixture.failOciSave && (args.input.httpAuthType === 'oci-signature' || args.input.id === 'oci')) throw Error('Synthetic save rejected');
         if (args.pendingOciKeyId && args.pendingOciKeyId !== fixture.pendingOciKey) throw Error('Missing pending key');
         fixture.saved.push(structuredClone(args.input));
-        const saved = { ...existing, ...args.input, id: args.input.id || 'oci', updatedAt: `revision-${++fixture.revision}` };
+        const saved = { ...existing, ...args.input, id: args.input.id || (args.input.httpAuthType === 'aws-sigv4' ? 'aws' : 'oci'), updatedAt: `revision-${++fixture.revision}` };
+        if (saved.id === 'aws') {
+          fixture.awsSecrets = {...fixture.awsSecrets, ...args.input.secrets.namedSecrets};
+          saved.modules = saved.modules.map(module => ({...module,configured:Boolean(fixture.awsSecrets[module.name])}));
+          saved.canTest = false; saved.capabilities = ['http'];
+        }
         if (saved.id === 'oci') {
           fixture.savedOci = structuredClone(args);
           const next = { ...args.input.secrets.namedSecrets, privateKey: args.input.secrets.privateKey || fixture.ociSecrets?.privateKey || '' };
@@ -153,7 +159,54 @@ try {
   const row = id => page.locator(`.connection-card[data-item-id="${id}"]`);
   const toggle = id => row(id).locator('.item-disclosure');
   const editor = page.locator('#connection-modal');
-  if (process.argv.includes('--field-labels')) {
+  if (process.argv.includes('--aws-provider')) {
+    await page.locator('[data-language="zh"]').click();
+    await page.locator('#add-connection-button').click();
+    await page.locator('[data-item-template="aws"]').click();
+    assert.equal(await page.locator('#http-auth-type').inputValue(), 'aws-sigv4');
+    assert.equal(await editor.locator('.module-row').count(), 5);
+    const awsRow = name => editor.locator(`.module-row[data-name="${name}"]`);
+    for (const name of ['aws_access_key_id','aws_secret_access_key','aws_session_token']) {
+      assert.equal(await awsRow(name).locator('[data-module-agent-visible]').getAttribute('aria-pressed'), 'false');
+      assert.equal(await awsRow(name).locator('[data-module-drag-handle]').count(), 1);
+      assert.equal(await awsRow(name).locator('[data-remove-module]').count(), 1);
+      assert.equal(await awsRow(name).locator('[data-copy-module-secret]').count(), 1);
+    }
+    assert.equal(await awsRow('aws_region').locator('[data-module-agent-visible]').getAttribute('aria-pressed'), 'true');
+    await page.locator('#connection-name').fill('Synthetic AWS');
+    await awsRow('aws_access_key_id').locator('[data-secret-value]').fill('ASIAMOCKEXAMPLE');
+    await awsRow('aws_secret_access_key').locator('[data-secret-value]').fill('synthetic-aws-secret');
+    await awsRow('aws_session_token').locator('[data-secret-value]').fill('synthetic-aws-token');
+    const keyId = await awsRow('aws_access_key_id').getAttribute('data-module-id');
+    await awsRow('aws_access_key_id').locator('[data-module-name]').fill('renamed_access_key');
+    await page.locator('#aws-bindings summary').click();
+    assert.equal(await page.locator('[data-aws-binding="accessKeyId"]').inputValue(), keyId);
+    for (const width of [690, 460]) {
+      await page.setViewportSize({width,height:900});
+      const geometry=await editor.locator('#aws-bindings').evaluate(element=>{
+        const box=element.getBoundingClientRect();
+        const scroll=element.closest('.form-scroll');
+        return {viewport:innerWidth,documentWidth:document.documentElement.scrollWidth,hostWidth:scroll.clientWidth,hostScroll:scroll.scrollWidth,controlFits:[...element.querySelectorAll('select')].every(control=>{const r=control.getBoundingClientRect();return r.left>=box.left-1&&r.right<=box.right+1;})};
+      });
+      assert.ok(geometry.controlFits && geometry.documentWidth <= geometry.viewport && geometry.hostScroll <= geometry.hostWidth + 1, JSON.stringify(geometry));
+      await editor.locator('#aws-bindings').screenshot({path:path.join(artifacts,`aws-bindings-${width}.png`)});
+    }
+    await page.locator('#save-connection-button').click();
+    await page.waitForFunction(()=>fixture.saved.length===1);
+    await editor.waitFor({state:'hidden'});
+    assert.equal(await page.evaluate(()=>fixture.saved[0].awsBindings.accessKeyId),keyId);
+    assert.equal(await page.evaluate(()=>fixture.saved[0].secrets.namedSecrets.renamed_access_key),'ASIAMOCKEXAMPLE');
+    await toggle('aws').click();
+    const secret=awsRow('aws_secret_access_key').locator('[data-secret-value]');
+    assert.equal(await secret.inputValue(),'synthetic-aws-secret');
+    await secret.fill('unsaved-replacement');
+    await editor.locator('.modal-footer [data-close-modal]').click();
+    await editor.waitFor({state:'hidden'});
+    assert.equal(await page.evaluate(()=>fixture.state.connections.find(item=>item.id==='aws').secrets.namedSecrets.aws_secret_access_key),'synthetic-aws-secret');
+    assert.equal(await page.evaluate(()=>fixture.drafts[0].input.secrets.namedSecrets.aws_secret_access_key),'unsaved-replacement');
+    assert.deepEqual(errors,[]);
+    console.log(JSON.stringify({passed:true,checks:['standard AWS modules','hidden credentials','stable ID rename','save and encrypted draft boundary','690/460 binding layout'],artifacts}));
+  } else if (process.argv.includes('--field-labels')) {
     const results = [];
     for (const mode of ['modal', 'inline']) for (const width of [690, 460]) for (const size of ['standard', 'large']) for (const language of ['zh', 'en']) {
       await page.setViewportSize({width, height: 900});

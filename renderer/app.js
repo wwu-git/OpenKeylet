@@ -136,6 +136,7 @@ const staticCopy = [
   ['[data-item-template="secureNote"] > span', 'html', '安全笔记<small>加密保存长文本</small>', 'SECURE NOTE<small>ENCRYPTED TEXT</small>'],
   ['[data-item-template="ssh"] > span', 'html', 'SSH<small>主机 + 端口 + 账号 + 密码</small>', 'SSH<small>HOST + PORT + USER + PASSWORD</small>'],
   ['[data-item-template="api"] > span', 'html', 'API<small>API 凭据</small>', 'API<small>API CREDENTIAL</small>'],
+  ['[data-item-template="aws"] > span', 'html', 'AWS API<small>SigV4 本地签名，操作由 Agent 决定</small>', 'AWS API<small>Local SigV4 signing; the agent chooses operations</small>'],
   ['[data-item-template="oci"] > span', 'html', 'OCI API<small>本地签名代执行，接口和操作由 Agent 决定</small>', 'OCI API<small>Local signing; the agent chooses API operations</small>'],
   ['#api-service-title', 'text', '选择服务', 'Choose a service'],
   ['#api-service-modal [data-close-service-picker]', 'aria-label', '关闭', 'Close'],
@@ -307,6 +308,7 @@ let currentDraftId = '';
 let removedSecretFields = new Set();
 let editorHttpAuthType = 'auto';
 let editorOciBindings = null;
+let editorAwsBindings = null;
 let moduleKeyInput = null;
 let editorDerivedOciUrl = "";
 let ociRegionOptions = [];
@@ -1426,6 +1428,8 @@ function renderApiServicePicker() {
   if (entry) {
     const hint = entry.authMode === 'external'
       ? localized('仅填写地址。OpenKeylet 尚未内置该服务的请求签名。', 'Address only. Native request signing is not implemented for this service.')
+      : entry.authMode === 'aws-sigv4' && editorHttpAuthType !== 'aws-sigv4'
+        ? localized('此服务需要 AWS SigV4。请选择 AWS API 模板或绑定 AWS 签名字段；填写地址不会配置凭据。', 'This service needs AWS SigV4. Choose the AWS API template or bind signing fields; filling the address does not configure credentials.')
       : entry.authMode === 'oci-signature' && editorHttpAuthType !== 'oci-signature'
         ? localized('此服务需要 OCI 签名认证。填写地址不会配置认证或私钥。', 'This service needs OCI signing. Filling the address does not configure authentication or keys.')
         : localized('仅填写服务地址，不更改凭据、认证或可见性。', 'Only fills the address. Credentials, authentication and visibility stay unchanged.');
@@ -1691,20 +1695,36 @@ const OCI_BINDING_FIELDS = [
   ['privateKey', 'RSA 签名私钥', 'RSA signing private key'],
 ];
 
+const AWS_BINDING_FIELDS = [
+  ['region', '签名区域', 'Signing region'],
+  ['serviceUrl', '服务 URL', 'Service URL'],
+  ['accessKeyId', 'Access Key ID', 'Access Key ID'],
+  ['secretAccessKey', 'Secret Access Key', 'Secret Access Key'],
+  ['sessionToken', 'Session Token，可选', 'Session Token, optional'],
+];
+
+function renderAuthBindingFields(fields, bindings, attribute) {
+  return fields.map(([role, zh, en]) => {
+    const bound = bindings?.[role] || '';
+    const missing = bound && !currentModules.some(module => module.id === bound);
+    const candidates = currentModules.filter(module => role === 'serviceUrl' ? module.kind === 'url' : moduleHasPlaintextReveal(module.kind));
+    return `<label class="field"><span>${localized(zh, en)}</span><select class="input" ${attribute}="${role}"><option value="">${localized('未绑定', 'Not bound')}</option>${missing ? `<option value="${escapeHtml(bound)}" selected>${localized('模块已删除', 'Module removed')}</option>` : ''}${candidates.map(module => `<option value="${escapeHtml(module.id)}" ${module.id === bound ? 'selected' : ''}>${escapeHtml(module.kind === 'customSecret' ? module.name || localized('未命名字段', 'Unnamed field') : moduleLabel(module.kind))}</option>`).join('')}</select></label>`;
+  }).join('');
+}
+
 function renderHttpAuthentication() {
   const select = $('#http-auth-type');
   if (!select) return;
   const selected = editorHttpAuthType || 'auto';
-  const existingModes = [...new Set([selected, editorSourceInput?.httpAuthType])].filter(mode => mode && !['auto', 'oci-signature'].includes(mode));
-  select.innerHTML = `<option value="auto">${localized('自动', 'Automatic')}</option><option value="oci-signature">OCI API</option>${existingModes.map(mode => `<option value="${escapeHtml(mode)}">${escapeHtml(mode)}</option>`).join('')}`;
+  const existingModes = [...new Set([selected, editorSourceInput?.httpAuthType])].filter(mode => mode && !['auto', 'oci-signature', 'aws-sigv4'].includes(mode));
+  select.innerHTML = `<option value="auto">${localized('自动', 'Automatic')}</option><option value="oci-signature">OCI API</option><option value="aws-sigv4">AWS SigV4</option>${existingModes.map(mode => `<option value="${escapeHtml(mode)}">${escapeHtml(mode)}</option>`).join('')}`;
   select.value = selected;
   $('#oci-bindings').classList.toggle('hidden', selected !== 'oci-signature');
-  $('#oci-binding-fields').innerHTML = OCI_BINDING_FIELDS.map(([role, zh, en]) => {
-    const bound = editorOciBindings?.[role] || '';
-    const missing = bound && !currentModules.some(module => module.id === bound);
-    const candidates = currentModules.filter(module => role === 'serviceUrl' ? module.kind === 'url' : moduleHasPlaintextReveal(module.kind));
-    return `<label class="field"><span>${localized(zh, en)}</span><select class="input" data-oci-binding="${role}"><option value="">${localized('未绑定', 'Not bound')}</option>${missing ? `<option value="${escapeHtml(bound)}" selected>${localized('模块已删除', 'Module removed')}</option>` : ''}${candidates.map(module => `<option value="${escapeHtml(module.id)}" ${module.id === bound ? 'selected' : ''}>${escapeHtml(module.kind === 'customSecret' ? module.name || localized('未命名字段', 'Unnamed field') : moduleLabel(module.kind))}</option>`).join('')}</select></label>`;
-  }).join('');
+  $('#oci-binding-fields').innerHTML = renderAuthBindingFields(OCI_BINDING_FIELDS, editorOciBindings, 'data-oci-binding');
+  $('#aws-bindings').classList.toggle('hidden', selected !== 'aws-sigv4');
+  $('#aws-bindings-summary').textContent = localized('AWS 签名模块', 'AWS signing modules');
+  $('#aws-bindings-note').textContent = localized('区域须与服务 URL 一致。绑定已有字段，凭据在本机签名；临时凭据还需 Session Token。不自动获取或续期凭据。', 'Region must match the service URL. Bind ordinary fields for local signing; temporary credentials require a Session Token. Credentials are not acquired or refreshed automatically.');
+  $('#aws-binding-fields').innerHTML = renderAuthBindingFields(AWS_BINDING_FIELDS, editorAwsBindings, 'data-aws-binding');
 }
 
 function syncModuleKeyControls() {
@@ -1773,7 +1793,18 @@ $('#module-list').addEventListener('keydown', event => {
 function applyTemplate(template) {
   editorHttpAuthType = template === 'oci' ? 'oci-signature' : 'auto';
   editorOciBindings = null;
+  editorAwsBindings = null;
   editorDerivedOciUrl = '';
+  if (template === 'aws') {
+    editorHttpAuthType = 'aws-sigv4';
+    const fields = [['serviceUrl', 'url'], ['region', 'aws_region'], ['accessKeyId', 'aws_access_key_id'], ['secretAccessKey', 'aws_secret_access_key'], ['sessionToken', 'aws_session_token']];
+    currentModules = fields.map(([role, name]) => ({ id: crypto.randomUUID(), kind: role === 'serviceUrl' ? 'url' : 'customSecret', name, value: role === 'serviceUrl' ? 'https://ec2.us-east-1.amazonaws.com/' : '', alternateValues: [], secretValue: role === 'region' ? 'us-east-1' : '', configured: false, existing: false, privateKeyName: '', pending: '', agentVisible: ['region', 'serviceUrl'].includes(role) }));
+    editorAwsBindings = Object.fromEntries(fields.map(([role], index) => [role, currentModules[index].id]));
+    value('#connection-type', 'api');
+    $('#template-picker').classList.add('hidden');
+    renderModules();
+    return;
+  }
   if (template === 'oci') {
     const fields = [['region', 'region'], ['serviceUrl', 'url'], ['tenancyOcid', 'tenancy_ocid'], ['userOcid', 'user_ocid'], ['fingerprint', 'fingerprint'], ['privateKey', 'privateKey']];
     currentModules = fields.map(([role, name]) => ({ id: crypto.randomUUID(), kind: role === 'serviceUrl' ? 'url' : role === 'privateKey' ? 'privateKey' : 'customSecret', name, value: '', alternateValues: [], secretValue: '', configured: false, existing: false, privateKeyName: '', pending: '', agentVisible: role === 'serviceUrl' }));
@@ -1886,6 +1917,7 @@ async function openEditor(item = null, draft = null) {
     editorSourceInput = source;
     editorHttpAuthType = source?.httpAuthType || 'auto';
     editorOciBindings = source?.ociBindings ? structuredClone(source.ociBindings) : null;
+    editorAwsBindings = source?.awsBindings ? structuredClone(source.awsBindings) : null;
     moduleKeyInput = null;
     editorDerivedOciUrl = '';
     editorJumpSelection = source?.sshJumpUnresolved ? `unresolved:${source?.sshJumpItemId || ''}` : source?.sshJumpItemId || '';
@@ -2043,6 +2075,7 @@ function serializeItem(validate = true) {
     sshAuthType: editorSourceInput?.sshAuthType || '',
     httpAuthType: editorHttpAuthType,
     ociBindings: editorHttpAuthType === 'oci-signature' ? editorOciBindings || {} : null,
+    awsBindings: editorHttpAuthType === 'aws-sigv4' ? editorAwsBindings || {} : null,
     authHeader: editorSourceInput?.authHeader || '',
     authLocation: editorSourceInput?.authLocation || '',
     authPrefix: editorSourceInput?.authPrefix || '',
@@ -3164,6 +3197,15 @@ $('#http-auth-type').addEventListener('change', () => {
   syncModuleDraft();
   editorHttpAuthType = value('#http-auth-type');
   if (editorHttpAuthType === 'oci-signature') editorOciBindings ||= {};
+  if (editorHttpAuthType === 'aws-sigv4') editorAwsBindings ||= {};
+  renderModules();
+});
+$('#aws-binding-fields').addEventListener('change', event => {
+  const role = event.target.dataset.awsBinding;
+  if (!role) return;
+  syncModuleDraft();
+  editorAwsBindings ||= {};
+  editorAwsBindings[role] = event.target.value || null;
   renderModules();
 });
 $('#oci-binding-fields').addEventListener('change', event => {

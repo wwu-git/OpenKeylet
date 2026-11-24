@@ -160,10 +160,10 @@ html[data-item-layout="grid"] #connections-list.is-reordering > .connection-card
 }
 
 #connection-modal .http-auth-config { margin: 6px 0 10px; }
-#connection-modal #oci-bindings { margin-top: 8px; font-size: var(--reading-help); }
-#connection-modal #oci-bindings summary { cursor: pointer; }
-#connection-modal #oci-bindings p, #connection-modal .module-key-input p { font-size: var(--reading-help); line-height: 1.4; }
-#connection-modal #oci-binding-fields { margin-top: 8px; }
+#connection-modal :is(#oci-bindings, #aws-bindings) { margin-top: 8px; font-size: var(--reading-help); }
+#connection-modal :is(#oci-bindings, #aws-bindings) summary { cursor: pointer; }
+#connection-modal :is(#oci-bindings, #aws-bindings) p, #connection-modal .module-key-input p { font-size: var(--reading-help); line-height: 1.4; }
+#connection-modal :is(#oci-binding-fields, #aws-binding-fields) { margin-top: 8px; }
 #connection-modal .module-key-input { min-width: 0; margin-top: 8px; }
 #connection-modal .module-key-input .button-row { flex-wrap: wrap; }
 #connection-modal .template-grid [data-item-template="oci"] {
