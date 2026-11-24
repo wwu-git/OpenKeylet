@@ -133,6 +133,9 @@ const staticCopy = [
   ['[data-item-template="ssh"] > span', 'html', 'SSH<small>主机 + 端口 + 账号 + 密码</small>', 'SSH<small>HOST + PORT + USER + PASSWORD</small>'],
   ['[data-item-template="api"] > span', 'html', 'API<small>API 凭据</small>', 'API<small>API CREDENTIAL</small>'],
   ['[data-item-template="oci"] > span', 'html', 'OCI API<small>本地签名代执行，接口和操作由 Agent 决定</small>', 'OCI API<small>Local signing; the agent chooses API operations</small>'],
+  ['#oci-config-note', 'text', '模板预填签名字段，其他信息可通过「添加模块」补充。', 'The template prefills signing fields. Add other information with Add module.'],
+  ['#oci-key-label', 'text', 'RSA 签名私钥', 'RSA signing private key'],
+  ['#oci-key-privacy', 'text', '仅本地签名 · Agent 不可见', 'Local signing only · never visible to the Agent'],
   ['#oci-region-label', 'text', '区域', 'Region'],
   ['#oci-url-label', 'text', '服务 URL', 'Service URL'],
   ['#oci-tenancy-label', 'text', '租户 OCID', 'Tenancy OCID'],
@@ -184,6 +187,7 @@ function applyLanguage() {
   syncActivityFilterControl();
   syncSettingsFilterControl();
   syncTitleSearch();
+  if (ociEditor) renderOciKeyStatus();
 }
 
 const ociKeyErrorMessages = {

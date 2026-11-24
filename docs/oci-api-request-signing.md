@@ -16,7 +16,7 @@ OCI IAM 决定身份实际可以访问的资源和操作。权限拒绝是服务
 
 ## 项目配置与发现
 
-桌面端的 **OCI API** 模板保留区域、租户 OCID、用户 OCID、公钥指纹和 RSA 签名私钥。选定区域后，默认服务 URL 为 `https://iaas.<region>.oraclecloud.com/20160918/`。保存项目后配置和私钥才生效。现有 OCI Compute 项目继续使用，无需迁移或重新导入密钥。
+桌面端的 **OCI API** 模板预填区域、租户 OCID、用户 OCID、公钥指纹和 RSA 签名私钥。这些字段在项目模块区域使用统一的行样式，其他信息可通过「添加模块」补充。签名配置仍使用专用存储，不受普通模块的可见性、排序和删除操作控制。选定区域后，默认服务 URL 为 `https://iaas.<region>.oraclecloud.com/20160918/`。保存项目后配置和私钥才生效。现有 OCI Compute 项目继续使用，无需迁移或重新导入密钥。
 
 Agent 使用 `items_search` 获取非秘密的 `ociContext.region` 和 `ociContext.tenancyOcid`。租户 OCID 同时是根 compartment 的 OCID，可用于构造区间发现请求。此上下文不包含用户 OCID、公钥指纹或签名私钥。普通模块仍遵守各自的 Agent 可见性开关。
 

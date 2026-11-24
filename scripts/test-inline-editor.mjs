@@ -143,6 +143,10 @@ try {
       await page.locator('[data-item-template="oci"]').click();
       await editor.locator('#oci-config').waitFor({state:'visible'});
       assert.equal(await editor.locator('#oci-config legend').innerText(), 'OCI API');
+      assert.equal(await editor.locator('.module-editor #oci-config').count(), 1);
+      assert.equal(await editor.locator('#oci-config .module-row').count(), 6);
+      assert.equal(await editor.locator('#oci-config [data-module-agent-visible], #oci-config [data-remove-module], #oci-config [data-module-drag-handle]').count(), 0);
+      assert.equal(await editor.locator('#oci-config [data-secret-value], #oci-config [data-copy-module-secret]').count(), 0);
       await page.locator('#oci-region').selectOption('ap-tokyo-1');
       await page.locator('#connection-name').fill('OCI test');
       await page.locator('#oci-tenancy').fill('ocid1.tenancy.oc1..test');
@@ -153,11 +157,20 @@ try {
       if (!await page.locator('#oci-key-source-menu').evaluate(el=>el.open)) await page.locator('#oci-import-key').click();
       await page.locator(`[data-stage-oci-key="${source}"]`).click();
     };
+    const assertKeyStatusLanguages = async (zh,en) => {
+      for (const [language,expected] of [['zh',zh],['en',en]]) {
+        await page.locator(`[data-language="${language}"]`).evaluate(button=>button.click());
+        assert.equal(await page.locator('#oci-key-status').innerText(),expected);
+      }
+    };
     const input = page.locator('#oci-key-text');
     const inputPanel = page.locator('#oci-key-input-panel');
     const save = page.locator('#save-connection-button');
     await openTemplate();
     assert.equal(await page.locator('#oci-url').inputValue(),'https://iaas.ap-tokyo-1.oraclecloud.com/20160918/');
+    await page.locator('#oci-region').selectOption('ap-osaka-1');
+    assert.equal(await page.locator('#oci-url').inputValue(),'https://iaas.ap-osaka-1.oraclecloud.com/20160918/');
+    await page.locator('#oci-region').selectOption('ap-tokyo-1');
     await chooseSource('file');
     await page.waitForFunction(()=>Boolean(fixture.pendingOciKey));
     const first = await page.evaluate(()=>fixture.pendingOciKey);
@@ -170,6 +183,7 @@ try {
     await page.getByText('Invalid RSA PEM',{exact:true}).last().waitFor();
     assert.equal(await page.evaluate(()=>fixture.pendingOciKey),first);
     assert.match(await page.locator('#oci-key-status').innerText(),/pending/);
+    await assertKeyStatusLanguages('签名私钥待保存','Signing key pending save');
     await chooseSource('input');
     await input.fill('SYNTHETIC-MANUAL-KEY-MARKER');
     assert.equal(await save.isDisabled(),true);
@@ -245,6 +259,16 @@ try {
     await page.locator('[data-language="en"]').click();
     await toggle('oci').click();
     assert.match(await page.locator('#oci-key-status').innerText(),/configured/);
+    await assertKeyStatusLanguages('已配置签名私钥','Signing key configured');
+    await page.locator('#oci-region').selectOption('ap-osaka-1');
+    await page.locator('#oci-tenancy').fill('ocid1.tenancy.oc1..cancelled');
+    await editor.locator('.modal-footer [data-close-modal]').click();
+    await editor.waitFor({state:'hidden'});
+    assert.equal(await page.evaluate(()=>JSON.stringify(fixture.savedOci)),saved);
+    await toggle('oci').click();
+    assert.equal(await page.locator('#oci-region').inputValue(),'ap-tokyo-1');
+    assert.equal(await page.locator('#oci-tenancy').inputValue(),'ocid1.tenancy.oc1..test');
+    assert.match(await page.locator('#oci-key-status').innerText(),/configured/);
     await page.evaluate(()=>{fixture.rejectOciKey=true;});
     await chooseSource('clipboard');
     await page.waitForFunction(()=>!document.querySelector('#oci-key-clipboard').disabled);
@@ -288,6 +312,7 @@ try {
     await page.waitForFunction(()=>fixture.pendingOciKey===null);
     assert.equal(await page.locator('#oci-key-clipboard').isEnabled(),true);
     assert.match(await page.locator('#oci-key-status').innerText(),/NOT IMPORTED|No signing|not imported/);
+    await assertKeyStatusLanguages('尚未导入签名私钥','No signing key imported');
     for (const language of ['en','zh']) {
       await page.locator(`[data-language="${language}"]`).evaluate(button=>button.click());
       const templateCopy = await page.locator('[data-item-template="oci"]').textContent();
@@ -330,6 +355,9 @@ try {
           const panelGeometry = await inputPanel.evaluate(el=>({width:el.clientWidth,scroll:el.scrollWidth,children:[...el.querySelectorAll('*')].map(x=>({tag:x.tagName,id:x.id,w:x.clientWidth,s:x.scrollWidth}))}));
           assert.ok(panelGeometry.scroll<=panelGeometry.width+1,JSON.stringify(panelGeometry));
           assert.equal(await inputPanel.locator('button').evaluateAll(buttons=>buttons.every(button=>button.scrollWidth<=button.clientWidth+1&&button.scrollHeight<=button.clientHeight+1)),true);
+          const configGeometry = await page.locator('#oci-config').evaluate(el=>({width:el.clientWidth,scroll:el.scrollWidth,rows:[...el.querySelectorAll('.oci-config-row')].map(row=>({width:row.clientWidth,scroll:row.scrollWidth,identityBottom:row.querySelector('.module-identity').getBoundingClientRect().bottom,controlTop:row.querySelector('.module-control').getBoundingClientRect().top}))}));
+          assert.ok(configGeometry.scroll<=configGeometry.width+1,JSON.stringify(configGeometry));
+          assert.ok(configGeometry.rows.every(row=>row.scroll<=row.width+1&&row.controlTop>=row.identityBottom-1),JSON.stringify(configGeometry));
           await editor.screenshot({path:path.join(artifacts,`oci-key-input-${width}-${language}-${theme}.png`)});
           await page.locator('#oci-key-input-cancel').click();
           await page.locator('#oci-import-key').click();
