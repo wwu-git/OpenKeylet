@@ -169,6 +169,135 @@ fn input(key: &str, mode: &str) -> ConnectInput {
 }
 
 #[tokio::test]
+async fn discovery_uses_get_and_returns_only_verified_private_backup_candidates() {
+    let remote_bytes =
+        encrypt_snapshot(b"test snapshot", &generate_recovery_key().unwrap()).unwrap();
+    let invalid_envelope = serde_json::to_vec(&json!({
+        "format": CLOUD_FORMAT, "version": 1, "cipher": "xchacha20poly1305",
+        "payload": {"version": 1, "nonce": "bad", "ciphertext": "invalid"}
+    }))
+    .unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let router = Router::new().fallback({
+        let requests = requests.clone();
+        move |method: Method, uri: Uri, headers: HeaderMap, body: Bytes| {
+            let requests = requests.clone();
+            let remote_bytes = remote_bytes.clone();
+            let invalid_envelope = invalid_envelope.clone();
+            async move {
+                assert_eq!(method, Method::GET);
+                assert_eq!(headers["authorization"], "Bearer test-token");
+                assert!(body.is_empty());
+                requests.lock().unwrap().push(uri.path().to_owned());
+                let entry = |id, owner, name, private, archived, disabled| {
+                    json!({
+                        "id": id, "name": name, "owner": {"login": owner}, "private": private,
+                        "archived": archived, "disabled": disabled, "default_branch": "main",
+                    })
+                };
+                let metadata = |id, private| {
+                    json!({
+                        "id": id, "private": private, "archived": false,
+                        "disabled": false, "default_branch": "trunk",
+                    })
+                };
+                let file = |bytes: &[u8]| {
+                    Json(json!({
+                        "type": "file", "sha": blob_sha(bytes), "size": bytes.len(),
+                        "encoding": "base64", "content": STANDARD.encode(bytes),
+                    }))
+                    .into_response()
+                };
+                match uri.path() {
+                    "/user" => Json(json!({"login":"test"})).into_response(),
+                    "/user/repos" => {
+                        let query = uri.query().unwrap();
+                        assert!(query.contains("visibility=private"));
+                        assert!(query.contains("affiliation=owner"));
+                        if query.split('&').any(|pair| pair == "page=1") {
+                            (
+                                [("link", "<http://127.0.0.1:1/do-not-follow>; rel=\"next\"")],
+                                Json(json!([
+                                    entry(1, "test", "openkeylet-vault", true, false, false),
+                                    entry(2, "test", "public", false, false, false),
+                                    entry(3, "test", "archived", true, true, false),
+                                    entry(4, "test", "disabled", true, false, true),
+                                    entry(5, "other", "foreign", true, false, false),
+                                ])),
+                            )
+                                .into_response()
+                        } else {
+                            assert!(query.split('&').any(|pair| pair == "page=2"));
+                            Json(json!([
+                                entry(6, "test", "invalid", true, false, false),
+                                entry(7, "test", "missing", true, false, false),
+                                entry(8, "test", "turned-public", true, false, false),
+                                entry(9, "test", "protected", true, false, false),
+                            ]))
+                            .into_response()
+                        }
+                    }
+                    "/repos/test/openkeylet-vault" => Json(metadata(1, true)).into_response(),
+                    "/repos/test/invalid" => Json(metadata(6, true)).into_response(),
+                    "/repos/test/missing" => Json(metadata(7, true)).into_response(),
+                    "/repos/test/turned-public" => Json(metadata(8, false)).into_response(),
+                    "/repos/test/protected" => Json(metadata(9, true)).into_response(),
+                    path if path.ends_with(&format!("/contents/{CLOUD_FILE}")) => {
+                        assert_eq!(uri.query(), Some("ref=trunk"));
+                        match path.split('/').nth(3).unwrap() {
+                            "openkeylet-vault" => file(&remote_bytes),
+                            "invalid" => file(&invalid_envelope),
+                            "missing" => StatusCode::NOT_FOUND.into_response(),
+                            "protected" => StatusCode::FORBIDDEN.into_response(),
+                            _ => panic!("unexpected snapshot probe"),
+                        }
+                    }
+                    _ => panic!("unexpected repository probe"),
+                }
+            }
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::open(directory.path().join("vault")).unwrap();
+    let data_dir = vault.data_dir().to_owned();
+    let original = fs::read(data_dir.join("vault.json")).unwrap();
+    let mut manager = GithubBackup::new(vault).unwrap();
+    manager.api_base = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let found = manager
+        .discover(AuthInput {
+            auth_source: "token".into(),
+            token: "test-token".into(),
+        })
+        .await
+        .unwrap();
+    task.abort();
+
+    assert_eq!(
+        serde_json::to_value(found).unwrap(),
+        json!({
+            "repositories": [{"repository": "test/openkeylet-vault", "branch": "trunk"}],
+            "partial": true,
+        })
+    );
+    assert_eq!(
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|path| *path == "/user/repos")
+            .count(),
+        2
+    );
+    assert!(!data_dir.join(LOCAL_FILE).exists());
+    assert!(!data_dir.join("github-backup.lock").exists());
+    assert_eq!(fs::read(data_dir.join("vault.json")).unwrap(), original);
+}
+
+#[tokio::test]
 async fn account_check_and_private_repository_creation_do_not_upload_secrets() {
     let remote = MockGithub::start().await;
     remote.state.lock().unwrap().missing_repo = true;

@@ -5,6 +5,7 @@ window.OpenKeyletGithubBackup = {
     const modal = $('github-modal');
     let status = { connected: false };
     let busy = false;
+    let discovering = false;
     let refreshing = false;
     let secretEpoch = 0;
     let previousFocus;
@@ -12,6 +13,7 @@ window.OpenKeyletGithubBackup = {
     let lastError = '';
     let formError = '';
     let accountLogin = '';
+    let discovery = null;
 
     const copy = {
       'github-heading': ['GitHub 加密备份', 'GITHUB BACKUP'],
@@ -49,6 +51,8 @@ window.OpenKeyletGithubBackup = {
       'github-mode-label': ['连接方式', 'Connection mode'],
       'github-mode-new': ['创建新备份', 'Create a new backup'],
       'github-mode-existing': ['连接已有备份', 'Connect an existing backup'],
+      'github-discover': ['查找已有备份', 'Find existing backups'],
+      'github-discovery-label': ['找到的备份', 'Found backups'],
       'github-key-label': ['恢复密钥', 'Recovery key'],
       'github-generate-key': ['生成恢复密钥', 'GENERATE KEY'],
       'github-copy-key': ['复制密钥', 'COPY KEY'],
@@ -129,11 +133,24 @@ window.OpenKeyletGithubBackup = {
       $('github-form-error').textContent = formError ? errorText(formError) : '';
       $('github-form-error').classList.toggle('hidden', !formError);
       for (const button of document.querySelectorAll('#github-backup-card button, #github-modal button')) button.disabled = busy || !isUnlocked();
+      $('github-modal-close').disabled = !isUnlocked() || (busy && !discovering);
       for (const input of document.querySelectorAll('#github-form input, #github-form select, #github-form textarea')) input.disabled = busy;
       $('github-upload').disabled = busy || !isUnlocked() || status.needsRestore;
       $('github-restore').disabled = busy || !isUnlocked() || !status.hasRemoteBackup;
       const isNew = $('github-mode').value === 'new';
       const useCli = $('github-auth-source').value === 'cli';
+      $('github-discovery').classList.toggle('hidden', isNew);
+      $('github-discovery-field').classList.toggle('hidden', !discovery?.repositories.length);
+      const discoveryStatus = $('github-discovery-status');
+      discoveryStatus.classList.toggle('hidden', !discovery);
+      if (discovery) {
+        const count = discovery.repositories.length;
+        const result = count ? localized(`找到 ${count} 个私有备份。`, `Found ${count} private backups.`)
+          : localized('未找到可确认的私有备份。', 'No confirmed private backups found.');
+        discoveryStatus.textContent = discovery.partial
+          ? `${result} ${localized('搜索未覆盖全部仓库。仍可手动输入仓库名。', 'The search did not cover every repository. You can enter a repository manually.')}`
+          : result;
+      }
       $('github-token-section').classList.toggle('hidden', useCli);
       $('github-cli-help').classList.toggle('hidden', !useCli);
       $('github-login-help').classList.toggle('hidden', !useCli);
@@ -167,6 +184,7 @@ window.OpenKeyletGithubBackup = {
       $('github-recovery-key').value = '';
       formError = '';
       accountLogin = '';
+      clearDiscovery();
       inertElements.forEach((element) => { element.inert = false; });
       inertElements = [];
       if (restoreFocus && previousFocus?.isConnected && !previousFocus.closest('.hidden')) previousFocus.focus();
@@ -204,11 +222,11 @@ window.OpenKeyletGithubBackup = {
 
     $('github-connect').addEventListener('click', openModal);
     $('github-reconfigure').addEventListener('click', openModal);
-    $('github-modal-close').addEventListener('click', () => { if (!busy) closeModal(); });
-    modal.addEventListener('click', (event) => { if (event.target === modal && !busy) closeModal(); });
+    $('github-modal-close').addEventListener('click', () => { if (!busy || discovering) closeModal(); });
+    modal.addEventListener('click', (event) => { if (event.target === modal && (!busy || discovering)) closeModal(); });
     modal.addEventListener('keydown', (event) => {
       event.stopPropagation();
-      if (event.key === 'Escape') { event.preventDefault(); if (!busy) closeModal(); }
+      if (event.key === 'Escape') { event.preventDefault(); if (!busy || discovering) closeModal(); }
       if (event.key === 'Tab') {
         const focusable = [...modal.querySelectorAll('button, input, select, textarea')].filter((element) => !element.disabled && !element.closest('.hidden'));
         if (!focusable.length) { event.preventDefault(); return; }
@@ -220,15 +238,56 @@ window.OpenKeyletGithubBackup = {
     });
     $('github-mode').addEventListener('change', () => {
       secretEpoch += 1;
+      clearDiscovery();
       $('github-recovery-key').value = '';
       $('github-key-saved').checked = false;
       render();
     });
     $('github-first-upload').addEventListener('change', render);
     $('github-auth-source').addEventListener('change', () => {
-      secretEpoch++; accountLogin=''; formError=''; $('github-token').value=''; render();
+      secretEpoch++; accountLogin=''; formError=''; $('github-token').value=''; clearDiscovery(); render();
     });
-    $('github-token').addEventListener('input', () => { accountLogin=''; render(); });
+    $('github-token').addEventListener('input', () => { secretEpoch++; accountLogin=''; clearDiscovery(); render(); });
+    function clearDiscovery() {
+      discovery = null;
+      $('github-discovery-results').replaceChildren();
+      $('github-discovery-status').textContent = '';
+      $('github-discovery-status').classList.add('hidden');
+      $('github-discovery-field').classList.add('hidden');
+    }
+    $('github-discover').addEventListener('click', async () => {
+      if (busy || !isUnlocked() || $('github-mode').value !== 'existing') return;
+      const epoch = secretEpoch;
+      const input = {authSource: $('github-auth-source').value, token: $('github-token').value.trim()};
+      const current = () => epoch === secretEpoch && isUnlocked() && !modal.classList.contains('hidden');
+      clearDiscovery();
+      busy = true;
+      discovering = true;
+      formError = '';
+      render();
+      try {
+        const result = await invoke('github_backup_discover', {input});
+        if (!current()) return;
+        discovery = result;
+        $('github-discovery-results').replaceChildren(
+          new Option(localized('请选择仓库', 'Select a repository'), ''),
+          ...result.repositories.map(({repository, branch}) => new Option(`${repository} · ${branch}`, repository)),
+        );
+      } catch (error) {
+        if (current()) formError = error;
+      } finally {
+        input.token = '';
+        busy = false;
+        discovering = false;
+        render();
+      }
+    });
+    $('github-discovery-results').addEventListener('change', () => {
+      const repository = $('github-discovery-results').value;
+      if (!busy && isUnlocked() && repository && $('github-mode').value === 'existing') {
+        $('github-repository').value = repository;
+      }
+    });
     $('github-check-account').addEventListener('click', async () => {
       if (busy || !isUnlocked()) return;
       const epoch = secretEpoch;

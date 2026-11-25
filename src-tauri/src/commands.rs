@@ -1243,6 +1243,19 @@ async fn github_backup_account(
 }
 
 #[tauri::command]
+async fn github_backup_discover(
+    runtime: State<'_, AppRuntime>,
+    input: github_backup::AuthInput,
+) -> Result<github_backup::DiscoveryResult, String> {
+    let epoch = runtime.owner_epoch().await?;
+    let backup = runtime.github_backup.lock().await;
+    drop(runtime.same_owner(epoch).await?);
+    let result = backup.discover(input).await;
+    let _owner = runtime.same_owner(epoch).await?;
+    result.map_err(command_error)
+}
+
+#[tauri::command]
 async fn github_backup_generate_key(runtime: State<'_, AppRuntime>) -> Result<String, String> {
     require_owner_unlocked(&runtime).await?;
     github_backup::generate_recovery_key().map_err(command_error)
@@ -2026,6 +2039,7 @@ pub fn run_gui() -> Result<()> {
             undo_ssh_import,
             github_backup_status,
             github_backup_account,
+            github_backup_discover,
             github_backup_generate_key,
             github_backup_recovery_key,
             github_backup_connect,

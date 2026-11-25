@@ -361,6 +361,11 @@
             <h3 class="github-step" id="github-step-repository">2 · Private repository</h3>
             <label class="field" for="github-mode"><span id="github-mode-label">Connection method</span><select class="input" id="github-mode"><option value="new" id="github-mode-new">Create a new backup</option><option value="existing" id="github-mode-existing">Connect an existing backup</option></select></label>
             <label class="field" for="github-repository"><span id="github-repository-input-label">Private repository</span><input class="input" id="github-repository" placeholder="owner/openkeylet-vault" maxlength="240" required spellcheck="false" autocapitalize="off" /></label>
+            <div id="github-discovery" class="hidden">
+              <div class="github-help-row"><button class="button secondary" type="button" id="github-discover">Find existing backups</button></div>
+              <p class="github-note hidden" id="github-discovery-status" role="status"></p>
+              <label class="field hidden" id="github-discovery-field" for="github-discovery-results"><span id="github-discovery-label">Found backups</span><select class="input" id="github-discovery-results"></select></label>
+            </div>
             <label class="github-key-confirm" id="github-create-repository-field"><input type="checkbox" id="github-create-repository" /><span id="github-create-repository-label">Create this private repository in my account</span></label>
             <div class="github-help-row"><button class="button quiet" type="button" data-github-help="repository" id="github-create-repo">Create private repository ↗</button><button class="button quiet" type="button" data-github-help="token" id="github-create-token">Create access token ↗</button></div>
             <h3 class="github-step" id="github-step-key">3 · Recovery key</h3>

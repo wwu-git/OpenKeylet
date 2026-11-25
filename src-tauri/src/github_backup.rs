@@ -14,7 +14,7 @@ use anyhow::{Context, Result, bail};
 use atomic_write_file::AtomicWriteFile;
 use base64::{
     Engine,
-    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE_NO_PAD},
 };
 use chrono::Utc;
 use fs2::FileExt;
@@ -49,7 +49,9 @@ const MAX_CLOUD_BYTES: usize = 8 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: usize = MAX_CLOUD_BYTES * 2;
 
 mod auth;
+mod discovery;
 pub use auth::{AccountStatus, AuthInput};
+pub use discovery::DiscoveryResult;
 
 #[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
 #[serde(rename_all = "camelCase")]
@@ -540,15 +542,26 @@ impl GithubBackup {
     }
 
     async fn remote_file(&self, config: &DeviceConfig) -> Result<Option<RemoteFile>> {
+        self.repository_snapshot(&config.owner, &config.repo, &config.branch, &config.token)
+            .await
+    }
+
+    async fn repository_snapshot(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+        token: &str,
+    ) -> Result<Option<RemoteFile>> {
         let response = self
             .request(
                 Method::GET,
-                &config.owner,
-                &config.repo,
+                owner,
+                repo,
                 &["contents", CLOUD_FILE],
-                &config.token,
+                token,
             )?
-            .query(&[("ref", &config.branch)])
+            .query(&[("ref", branch)])
             .send()
             .await
             .context("GITHUB_NETWORK")?;
@@ -571,10 +584,10 @@ impl GithubBackup {
             let response = self
                 .request(
                     Method::GET,
-                    &config.owner,
-                    &config.repo,
+                    owner,
+                    repo,
                     &["git", "blobs", &file.sha],
-                    &config.token,
+                    token,
                 )?
                 .send()
                 .await
@@ -637,7 +650,7 @@ fn encrypt_snapshot(plain: &[u8], recovery_key: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn decrypt_snapshot(bytes: &[u8], recovery_key: &str) -> Result<Zeroizing<Vec<u8>>> {
+fn parse_cloud_file(bytes: &[u8]) -> Result<CloudFile> {
     if bytes.len() > MAX_CLOUD_BYTES {
         bail!("GITHUB_BACKUP_TOO_LARGE");
     }
@@ -645,6 +658,11 @@ fn decrypt_snapshot(bytes: &[u8], recovery_key: &str) -> Result<Zeroizing<Vec<u8
     if file.format != CLOUD_FORMAT || file.version != 1 || file.cipher != "xchacha20poly1305" {
         bail!("GITHUB_BACKUP_INVALID");
     }
+    Ok(file)
+}
+
+fn decrypt_snapshot(bytes: &[u8], recovery_key: &str) -> Result<Zeroizing<Vec<u8>>> {
+    let file = parse_cloud_file(bytes)?;
     let key = parse_recovery_key(recovery_key)?;
     Ok(Zeroizing::new(
         decrypt_bytes(&key, &file.payload, CLOUD_AAD).context("GITHUB_KEY_MISMATCH")?,

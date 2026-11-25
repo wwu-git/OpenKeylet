@@ -15,7 +15,7 @@ const server=http.createServer(async(req,res)=>{
   catch{res.writeHead(404);res.end();}
 });
 server.listen(0,"127.0.0.1");await once(server,"listening");
-const browser=await chromium.launch({headless:true});
+const browser=await chromium.launch({headless:true,executablePath:process.env.OPENKEYLET_TEST_CHROMIUM || undefined});
 try{
   const page=await browser.newPage({viewport:{width:460,height:690}});
   const errors=[];page.on("pageerror",error=>errors.push(error.message));
@@ -28,6 +28,14 @@ try{
       if(command==="owner_editor_drafts"||command==="agent_mcp_status")return [];
       if(command==="github_backup_status")return structuredClone(fixture.status);
       if(command==="github_backup_account")return {login:"fixture-user"};
+      if(command==="github_backup_discover"){
+        (fixture.discoveryCalls ??= []).push(structuredClone(args.input));
+        if(fixture.deferDiscovery)await new Promise(resolve=>{fixture.finishDiscovery=resolve;});
+        return fixture.discoveryResult ?? {repositories:[
+          {repository:"fixture-user/archive-vault",branch:"backup"},
+          {repository:"fixture-user/openkeylet-vault",branch:"main"},
+        ],partial:true};
+      }
       if(command==="github_backup_generate_key")return "okv1_"+"A".repeat(43);
       if(command==="github_backup_connect"){
         if(fixture.failConnect)throw Error("GITHUB_PRIVATE_REQUIRED");
@@ -52,6 +60,8 @@ try{
   await page.locator("#github-connect").click();
   await page.locator("#github-check-account").click();
   await page.waitForFunction(()=>document.querySelector("#github-account-status").textContent.includes("fixture-user"));
+  assert.equal(await page.evaluate(()=>fixture.discoveryCalls?.length ?? 0),0);
+  assert.ok(await page.locator("#github-discover").isHidden());
   assert.equal(await page.locator("#github-repository").inputValue(),"fixture-user/openkeylet-vault");
   assert.equal(await page.locator("#github-token").isVisible(),false);
   await page.screenshot({path:path.join(artifacts,"account.png")});
@@ -75,6 +85,25 @@ try{
   await page.locator("#github-auth-source").selectOption("token");
   await page.locator("#github-token").fill("synthetic-pat");
   await page.locator("#github-recovery-key").fill("okv1_"+"A".repeat(43));
+  await page.locator("#github-discover").click();
+  await page.locator("#github-discovery-results").waitFor({state:"visible"});
+  assert.deepEqual(await page.evaluate(()=>fixture.discoveryCalls[0]),{authSource:"token",token:"synthetic-pat"});
+  assert.match(await page.locator("#github-discovery-status").textContent(),/未覆盖全部/);
+  await page.screenshot({path:path.join(artifacts,"discovery.png")});
+  await page.locator("#github-discovery-results").selectOption("fixture-user/archive-vault");
+  assert.equal(await page.locator("#github-repository").inputValue(),"fixture-user/archive-vault");
+  assert.equal(await page.locator("#github-recovery-key").inputValue(),"okv1_"+"A".repeat(43));
+  assert.deepEqual(await page.evaluate(()=>[fixture.connects.length,fixture.uploads,fixture.restores]),[1,1,0]);
+  await page.locator("#github-auth-source").selectOption("cli");
+  assert.ok(await page.locator("#github-discovery-results").isHidden());
+  await page.evaluate(()=>fixture.discoveryResult={repositories:[],partial:false});
+  await page.locator("#github-discover").click();
+  await page.waitForFunction(()=>document.querySelector("#github-discovery-status").textContent.includes("未找到"));
+  assert.ok(await page.locator("#github-discovery-results").isHidden());
+  assert.ok(await page.locator("#github-repository").isEnabled());
+  await page.evaluate(()=>delete fixture.discoveryResult);
+  await page.locator("#github-auth-source").selectOption("token");
+  await page.locator("#github-token").fill("synthetic-pat");
   await page.locator("#github-key-saved").check();
   await page.locator("#github-submit").click();
   await page.locator("#github-modal").waitFor({state:"hidden"});
@@ -108,8 +137,27 @@ try{
   await page.waitForFunction(()=>fixture.uploads===2);
   await page.locator("#github-reconfigure").click();
   await page.locator("#github-auth-source").selectOption("token");
+  await page.locator("#github-mode").selectOption("existing");
   await page.locator("#github-token").fill("synthetic-private-value");
+  await page.evaluate(()=>fixture.deferDiscovery=true);
+  await page.locator("#github-discover").click();
+  await page.waitForFunction(()=>typeof fixture.finishDiscovery==="function");
+  await page.locator("#github-modal-close").click();
+  await page.locator("#github-modal").waitFor({state:"hidden"});
+  await page.evaluate(()=>{fixture.finishDiscovery();delete fixture.finishDiscovery;});
+  await page.locator("#github-reconfigure").click();
+  assert.equal(await page.locator("#github-discovery-results option").count(),0);
+  await page.locator("#github-auth-source").selectOption("token");
+  await page.locator("#github-mode").selectOption("existing");
+  await page.locator("#github-token").fill("synthetic-private-value");
+  await page.locator("#github-discover").click();
+  await page.waitForFunction(()=>typeof fixture.finishDiscovery==="function");
   await page.evaluate(async()=>{fixture.unlocked=false;await refreshOwnerLock();});
+  await page.evaluate(()=>fixture.finishDiscovery());
+  await page.waitForFunction(()=>!document.querySelector("#github-discover").disabled ||
+    document.querySelector("#github-backup-card").getAttribute("aria-busy")==="false");
+  assert.ok(await page.locator("#github-discovery-results").isHidden());
+  assert.equal(await page.locator("#github-discovery-results option").count(),0);
   assert.equal(await page.locator("#github-token").inputValue(),"");
   assert.equal(await page.locator("#github-modal").isVisible(),false);
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
