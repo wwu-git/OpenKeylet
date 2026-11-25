@@ -9,10 +9,39 @@ use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use uuid::Uuid;
+use zeroize::Zeroizing;
+
+const TOTP_DRAFT_TTL: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
 pub struct Session {
     unlocked_until: Option<Instant>,
+    totp_draft: Option<TotpDraft>,
+}
+
+struct TotpDraft {
+    id: Uuid,
+    item_id: Uuid,
+    revision: u64,
+    website: String,
+    uri: Zeroizing<String>,
+    pin_configured: bool,
+    deadline: Instant,
+}
+
+impl Session {
+    pub(crate) fn totp_draft_deadline(&self) -> Option<Instant> {
+        self.totp_draft.as_ref().map(|draft| draft.deadline)
+    }
+
+    pub(crate) fn expire_totp_draft(&mut self) {
+        if self
+            .totp_draft_deadline()
+            .is_some_and(|deadline| deadline <= Instant::now())
+        {
+            self.totp_draft = None;
+        }
+    }
 }
 
 fn text<'a>(p: &'a Value, name: &str) -> Result<&'a str> {
@@ -65,14 +94,25 @@ pub async fn handle(
 ) -> Result<Value> {
     let pin_configured = vault.owner_pin_configured()?;
     let unlocked = !pin_configured || session.unlocked_until.is_some_and(|t| t > Instant::now());
+    session.expire_totp_draft();
+    if !unlocked
+        || session
+            .totp_draft
+            .as_ref()
+            .is_some_and(|draft| draft.pin_configured != pin_configured)
+    {
+        session.totp_draft = None;
+    }
     match method {
         "status" => return Ok(json!({"pinConfigured":pin_configured,"locked":!unlocked})),
         "unlock" => {
+            session.totp_draft = None;
             verify(vault, p["pin"].as_str().unwrap_or_default(), throttle).await?;
             session.unlocked_until = Some(Instant::now() + Duration::from_secs(300));
             return Ok(json!({"ok":true}));
         }
         "lock" => {
+            session.totp_draft = None;
             session.unlocked_until = None;
             return Ok(json!({"ok":true}));
         }
@@ -227,9 +267,80 @@ pub async fn handle(
                 .map_err(|_| anyhow::anyhow!("The saved one-time code configuration is invalid"))?;
             Ok(json!({"code": code}))
         }
+        "password.totp.prepare" => {
+            session.totp_draft = None;
+            let website = text(p, "origin")?;
+            ensure!(
+                website.len() <= 8192 && totp_website(&passkey::origin(website)?),
+                "One-time codes require HTTPS or localhost"
+            );
+            let uri = text(p, "uri")?.trim();
+            let preview = crate::browser::preview_totp_uri(uri)
+                .map_err(|_| anyhow::anyhow!("The QR code is not a valid time-based setup code"))?;
+            let item = vault.get_connection(Uuid::parse_str(text(p, "id")?)?)?;
+            require_totp_login(&item.stored, &item.secrets, website)?;
+            let id = Uuid::new_v4();
+            let deadline = Instant::now() + TOTP_DRAFT_TTL;
+            let deadline = if pin_configured {
+                deadline.min(
+                    session
+                        .unlocked_until
+                        .context("OpenKeylet is locked; enter your PIN")?,
+                )
+            } else {
+                deadline
+            };
+            session.totp_draft = Some(TotpDraft {
+                id,
+                item_id: item.stored.id,
+                revision: item.stored.revision,
+                website: website.to_owned(),
+                uri: Zeroizing::new(uri.to_owned()),
+                pin_configured,
+                deadline,
+            });
+            Ok(json!({
+                "draftId": id,
+                "issuer": preview.issuer,
+                "account": preview.account,
+                "destination": item.stored.name,
+                "username": item.secrets.get("username").unwrap_or_default(),
+                "replaces": item.secrets.get("totp").is_some_and(|seed| !seed.trim().is_empty()),
+            }))
+        }
+        "password.totp.commit" => {
+            let id = Uuid::parse_str(text(p, "draftId")?)?;
+            let draft = session
+                .totp_draft
+                .take_if(|draft| draft.id == id)
+                .context("The setup preview is unavailable; scan the QR code again")?;
+            ensure!(
+                draft.website == text(p, "origin")?,
+                "The website changed; scan the QR code again"
+            );
+            vault.save_browser_totp(draft)?;
+            Ok(json!({"ok": true}))
+        }
+        "password.totp.cancel" => {
+            let id = Uuid::parse_str(text(p, "draftId")?)?;
+            session.totp_draft.take_if(|draft| draft.id == id);
+            Ok(json!({"ok": true}))
+        }
         "password.save" => vault.save_browser_login(p),
         _ => bail!("Unsupported browser operation"),
     }
+}
+
+fn require_totp_login(
+    stored: &StoredConnection,
+    secrets: &SecretBundle,
+    website: &str,
+) -> Result<()> {
+    ensure!(
+        stored.enabled && same_origin(stored, website) && secrets.get("password").is_some(),
+        "This login does not belong to the current website"
+    );
+    Ok(())
 }
 
 fn personal_fields(kind: &str) -> Result<&'static [&'static str]> {
@@ -392,6 +503,46 @@ impl Vault {
         };
         let saved = self.save_connection_checked(input, expected)?;
         Ok(json!({"id":saved.id,"updatedAt":saved.updated_at}))
+    }
+
+    fn save_browser_totp(&self, mut draft: TotpDraft) -> Result<()> {
+        self.update_document_with_result(|document| {
+            ensure!(
+                Instant::now() < draft.deadline
+                    && document.owner_pin.is_some() == draft.pin_configured,
+                "The setup preview expired; scan the QR code again"
+            );
+            let stored = document
+                .connections
+                .iter_mut()
+                .find(|item| item.id == draft.item_id)
+                .context("Login was deleted; reload the extension")?;
+            ensure!(
+                stored.revision == draft.revision,
+                "Login changed in OpenKeylet; scan the QR code again"
+            );
+            let mut secrets: SecretBundle =
+                self.unprotect_local_state(&stored.encrypted_secrets)?;
+            require_totp_login(stored, &secrets, &draft.website)?;
+            if !stored.modules.iter().any(|module| module.kind == "totp") {
+                stored.modules.push(ItemModule {
+                    id: Uuid::new_v4(),
+                    kind: "totp".into(),
+                    name: "totp".into(),
+                    agent_visible: Some(false),
+                    ..Default::default()
+                });
+            }
+            let _previous = Zeroizing::new(
+                secrets
+                    .named_secrets
+                    .0
+                    .insert("totp".into(), std::mem::take(&mut *draft.uri)),
+            );
+            stored.encrypted_secrets = self.protect_local_state(&secrets)?;
+            stored.updated_at = chrono::Utc::now().to_rfc3339();
+            Ok(())
+        })
     }
 
     pub fn save_browser_login(&self, p: &Value) -> Result<Value> {
@@ -674,6 +825,132 @@ mod tests {
             .await
             .is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn scanned_totp_is_one_shot_website_bound_and_preserves_login() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open(dir.path().to_owned()).unwrap();
+        let website = "https://example.test/verify";
+        let uri = "otpauth://totp/Example:alice?secret=JBSWY3DPEHPK3PXP&issuer=Example&digits=8";
+        let login = vault
+            .save_browser_login(&json!({
+                "origin":website,"name":"Example","username":"alice","password":"fixture-password",
+            }))
+            .unwrap();
+        let id = Uuid::parse_str(login["id"].as_str().unwrap()).unwrap();
+        let prepare = json!({"id":id,"origin":website,"uri":uri});
+        let mut session = Session::default();
+        let throttle = Mutex::new(Instant::now());
+        for action in [
+            "cancel", "lock", "unlock", "expire", "navigate", "change", "save",
+        ] {
+            let preview = handle(
+                &vault,
+                &mut session,
+                &throttle,
+                "password.totp.prepare",
+                &prepare,
+            )
+            .await
+            .unwrap();
+            assert_eq!(preview["issuer"], "Example");
+            assert_eq!(preview["account"], "alice");
+            assert_eq!(preview["destination"], "Example");
+            assert_eq!(preview["username"], "alice");
+            assert_eq!(preview["replaces"], false);
+            assert!(!preview.to_string().contains("JBSWY3DPEHPK3PXP"));
+            assert!(
+                vault
+                    .get_connection(id)
+                    .unwrap()
+                    .secrets
+                    .get("totp")
+                    .is_none()
+            );
+            let mut commit = json!({"draftId":preview["draftId"],"origin":website});
+            match action {
+                "cancel" => {
+                    handle(
+                        &vault,
+                        &mut session,
+                        &throttle,
+                        "password.totp.cancel",
+                        &commit,
+                    )
+                    .await
+                    .unwrap();
+                }
+                "lock" | "unlock" => {
+                    handle(&vault, &mut session, &throttle, action, &json!({}))
+                        .await
+                        .unwrap();
+                }
+                "expire" => session.totp_draft.as_mut().unwrap().deadline = Instant::now(),
+                "navigate" => commit["origin"] = json!("https://example.test/different"),
+                "change" => {
+                    vault.set_connection_enabled(id, false).unwrap();
+                    vault.set_connection_enabled(id, true).unwrap();
+                }
+                _ => {}
+            }
+            let result = handle(
+                &vault,
+                &mut session,
+                &throttle,
+                "password.totp.commit",
+                &commit,
+            )
+            .await;
+            if action == "save" {
+                assert_eq!(result.unwrap(), json!({"ok":true}));
+                assert!(
+                    handle(
+                        &vault,
+                        &mut session,
+                        &throttle,
+                        "password.totp.commit",
+                        &commit
+                    )
+                    .await
+                    .is_err()
+                );
+            } else {
+                assert!(result.is_err(), "unexpectedly saved after {action}");
+            }
+        }
+        let saved = vault.get_connection(id).unwrap();
+        assert_eq!(saved.secrets.get("password"), Some("fixture-password"));
+        assert_eq!(saved.secrets.get("username"), Some("alice"));
+        assert_eq!(saved.secrets.get("totp"), Some(uri));
+        assert!(saved.secrets.password_history.is_empty());
+        let module = saved
+            .stored
+            .modules
+            .iter()
+            .find(|module| module.kind == "totp")
+            .unwrap();
+        assert!(!module.agent_visible());
+        let preview = handle(
+            &vault,
+            &mut session,
+            &throttle,
+            "password.totp.prepare",
+            &prepare,
+        )
+        .await
+        .unwrap();
+        assert_eq!(preview["replaces"], true);
+        let actual = handle(
+            &vault,
+            &mut session,
+            &throttle,
+            "password.totp",
+            &json!({"id":id,"origin":website}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(actual["code"].as_str().unwrap().len(), 8);
     }
 
     #[tokio::test]

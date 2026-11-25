@@ -1,6 +1,6 @@
 # OpenKeylet privacy policy
 
-Last updated: October 20, 2026
+Last updated: November 25, 2026
 
 This policy covers the OpenKeylet browser extension and its connection to the OpenKeylet desktop application. OpenKeylet is a local password and credential manager. It does not require an OpenKeylet account or operate a developer-hosted vault service.
 
@@ -19,6 +19,10 @@ Save suggestions are off until you enable them in the extension. When enabled, t
 Username-only steps may be held in background memory for up to two minutes. Login suggestions, including passwords, remain in background memory for at most five minutes. They are not written to extension storage. Suggestions may be compared with your unlocked local vault to avoid duplicates. The extension writes a login to the vault only when you review and confirm it.
 
 Disabling suggestions, explicitly locking from the extension, disconnecting the bridge, closing the relevant tab or navigating to another origin clears applicable temporary data. Browser/worker restarts also discard it. Manual “Save login” remains available without enabling automatic suggestions.
+
+## Scan a 2FA QR code
+
+When you choose to scan, the extension captures the visible area of the current tab and decodes the QR code in memory on your device. The screenshot is discarded after decoding. The decoded TOTP setup key goes to the desktop application over the local browser bridge. The desktop application keeps the preview for up to 60 seconds and encrypts the setup key in the selected login only after you confirm.
 
 ## Where information goes
 

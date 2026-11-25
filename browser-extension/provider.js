@@ -4,7 +4,10 @@ const credentialRequests = new Map();
 const preparingCredentials = new Map();
 let totpSession = 0;
 function bridgeCall(method, params = {}) {
-  if (method === "lock") totpSession++;
+  if (method === "lock") {
+    totpSession++;
+    clearTotpImport();
+  }
   if (socket?.readyState !== WebSocket.OPEN) return Promise.reject(new Error("Open OpenKeylet and connect Browser Bridge first"));
   if (bridgeRequests.size >= 32) return Promise.reject(new Error("Too many pending requests"));
   const requestId = crypto.randomUUID();
@@ -22,6 +25,7 @@ function finishBridgeRequest(message) {
 }
 function failBridgeRequests() {
   totpSession++;
+  clearTotpImport();
   clearLoginCaptures();
   for (const p of bridgeRequests.values()) { clearTimeout(p.timer); p.reject(new Error("OpenKeylet disconnected")); }
   bridgeRequests.clear();

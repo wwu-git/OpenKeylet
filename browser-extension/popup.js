@@ -3,6 +3,8 @@ const $ = s => document.querySelector(s);
 let currentOrigin = "", entries = [], saving = false, reading = false, loading = false, editingVersion = "";
 let refreshError = false;
 let personalEntries = [], personalEdit = null;
+let totpImportPort;
+const totpImportDialog = $("#totp-import");
 const captureParams = new URLSearchParams(location.search);
 let captureContext = captureParams.get("capture") || "";
 document.body.classList.toggle("capture-page", Boolean(captureContext));
@@ -25,6 +27,7 @@ async function refresh() {
     $("#detail").textContent = `127.0.0.1:${stored.bridgePort || 39272}`;
     const state = await call("list");
     if (saving || reading) return;
+    updateTotpImportEntry(state);
     if (state.captureExpired) { captureContext = ""; closeSave(); }
     $("#status").textContent = "已连接本地密码库 / CONNECTED";
     $("#lamp").classList.add("on");
@@ -81,6 +84,8 @@ async function refresh() {
       }
     }
   } catch(e) {
+    dismissTotpImport(true);
+    $("#scan-totp").hidden = true;
     closeSave(); closePersonal(); OpenKeyletVaultUI.close();
     $("#status").textContent = "暂不可用 / UNAVAILABLE";
     $("#lamp").classList.remove("on");
@@ -95,7 +100,87 @@ async function refresh() {
   } finally { loading=false; }
 }
 $("#unlock-form").addEventListener("submit", async e => { e.preventDefault(); try { await call("unlock",{pin:$("#pin").value}); $("#pin").value=""; showError(""); await refresh(); } catch(e) { showError(e); } });
-$("#lock").addEventListener("click",async () => { closeSave(); closePersonal(); OpenKeyletVaultUI.close(); $("#generator-output").value=""; try { await call("lock"); await refresh(); } catch(e) { showError(e); } });
+$("#lock").addEventListener("click",async () => { dismissTotpImport(true); closeSave(); closePersonal(); OpenKeyletVaultUI.close(); $("#generator-output").value=""; try { await call("lock"); await refresh(); } catch(e) { showError(e); } });
+function updateTotpImportEntry(state) {
+  const available = !captureContext && state.pageAvailable && !state.locked && state.entries.length > 0;
+  $("#scan-totp").hidden = !available;
+  if (!available || state.origin !== currentOrigin) dismissTotpImport(true);
+}
+
+function dismissTotpImport(cancelPending = false) {
+  if (!cancelPending && $("#totp-import-confirm").disabled) return;
+  const port = totpImportPort;
+  totpImportPort = null;
+  port?.disconnect();
+  if (totpImportDialog.open) totpImportDialog.close();
+  $("#totp-import-target").replaceChildren();
+  $("#totp-import-confirm").disabled = false;
+  $("#totp-import-cancel").disabled = false;
+  for (const id of ["issuer", "account", "destination"]) $("#totp-import-" + id).textContent = "";
+}
+
+function scanTotpImport(id) {
+  if (totpImportPort || !id || !totpImportDialog.open) return;
+  $("#totp-import-choice").hidden = true;
+  $("#totp-import-progress").hidden = false;
+  const port = chrome.runtime.connect({ name: "totp-import-ui" });
+  totpImportPort = port;
+  port.onMessage.addListener(message => {
+    if (totpImportPort !== port) return;
+    if (message.error) {
+      dismissTotpImport(true);
+      showError(message.error);
+      return;
+    }
+    if (message.action === "scan") {
+      const { issuer, account, destination, username, replaces } = message.result;
+      $("#totp-import-issuer").textContent = issuer || "未提供 / Not specified";
+      $("#totp-import-account").textContent = account;
+      $("#totp-import-destination").textContent = username ? destination + " · " + username : destination;
+      $("#totp-import-warning").hidden = !replaces;
+      $("#totp-import-progress").hidden = true;
+      $("#totp-import-preview").hidden = false;
+      $("#totp-import-title").focus();
+    } else if (message.action === "confirm") {
+      dismissTotpImport(true);
+      showError("已保存 2FA / 2FA saved");
+      void refresh();
+    }
+  });
+  port.onDisconnect.addListener(() => {
+    if (totpImportPort !== port) return;
+    totpImportPort = null;
+    dismissTotpImport(true);
+    showError("扫码预览已失效，请重新扫码 / Scan expired; scan again");
+  });
+  port.postMessage({ action: "scan", id, origin: currentOrigin });
+}
+
+$("#scan-totp").addEventListener("click", () => {
+  if (!entries.length || reading || saving || captureContext || totpImportDialog.open) return;
+  const target = $("#totp-import-target");
+  target.replaceChildren(new Option("请选择 / Select a login", ""), ...entries.map(item =>
+    new Option(item.username ? item.name + " · " + item.username : item.name, item.id)));
+  $("#totp-import-scan").disabled = true;
+  $("#totp-import-choice").hidden = false;
+  $("#totp-import-preview").hidden = true;
+  $("#totp-import-progress").hidden = true;
+  showError("");
+  totpImportDialog.showModal();
+  if (entries.length === 1) scanTotpImport(entries[0].id);
+});
+$("#totp-import-target").addEventListener("change", event => { $("#totp-import-scan").disabled = !event.target.value; });
+$("#totp-import-scan").addEventListener("click", () => scanTotpImport($("#totp-import-target").value));
+$("#totp-import-confirm").addEventListener("click", () => {
+  if (!totpImportPort) return;
+  $("#totp-import-confirm").disabled = true;
+  $("#totp-import-cancel").disabled = true;
+  totpImportPort.postMessage({ action: "confirm" });
+});
+$("#totp-import-cancel").addEventListener("click", () => dismissTotpImport());
+totpImportDialog.addEventListener("cancel", event => { event.preventDefault(); dismissTotpImport(); });
+window.addEventListener("pagehide", () => dismissTotpImport(true));
+
 $("#read-form").addEventListener("click", async () => {
   if (reading || saving) return;
   reading = true;

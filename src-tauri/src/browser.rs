@@ -685,7 +685,14 @@ async fn extension_socket(socket: WebSocket, state: BridgeServerState) {
     let (job_sender, mut jobs) = mpsc::channel(8);
     state.extensions.lock().await.add(connection_id, job_sender);
     loop {
+        let totp_deadline = browser_session.totp_draft_deadline();
         tokio::select! {
+            () = async {
+                match totp_deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+                    None => std::future::pending().await,
+                }
+            } => browser_session.expire_totp_draft(),
             job = jobs.recv() => {
                 let Some(job) = job else { break; };
                 if !job_is_deliverable(&state, &job).await { continue; }
@@ -774,14 +781,12 @@ fn unix_millis() -> u64 {
         .as_millis() as u64
 }
 
-#[cfg(any(feature = "gui", test))]
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct TotpUriPreview {
-    issuer: String,
-    account: String,
+    pub(crate) issuer: String,
+    pub(crate) account: String,
 }
 
-#[cfg(any(feature = "gui", test))]
 pub(crate) fn preview_totp_uri(uri: &str) -> Result<TotpUriPreview> {
     let uri = uri.trim();
     anyhow::ensure!(

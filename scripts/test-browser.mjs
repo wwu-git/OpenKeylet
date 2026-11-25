@@ -32,11 +32,27 @@ function readCbor(bytes, start=0) {
   return read();
 }
 const html='<!doctype html><meta charset="utf-8"><title>OpenKeylet fixture</title><form><label>Username <input id="username" autocomplete="username"></label><label>Password <input id="password" type="password" autocomplete="current-password"></label><button>Sign in</button></form><form><input id="otp" type="tel" autocomplete="one-time-code" maxlength="6"><input id="hidden-otp" type="hidden" autocomplete="one-time-code"></form><form><input id="cardholder" autocomplete="cc-name"><input id="cardnumber" autocomplete="cc-number"><select id="cardmonth" autocomplete="cc-exp-month"><option value=""></option><option value="7">July</option></select><input id="cardyear" autocomplete="cc-exp-year"><input id="cardcode" autocomplete="cc-csc"><input id="hidden-card" autocomplete="cc-number" type="hidden"></form><form><input id="full-name" autocomplete="name"><input id="identity-email" autocomplete="email"><input id="address" autocomplete="address-line1"></form>';
-const server=http.createServer((req,res)=>{res.setHeader("Content-Type","text/html");res.end(html);});
+const totpSetupImage = await fs.readFile(path.join(repo, "scripts/fixtures/totp-setup-qr.png"));
+const server=http.createServer((req,res)=>{
+  if (req.url === "/totp-setup.png") {
+    res.setHeader("Content-Type", "image/png");
+    res.end(totpSetupImage);
+    return;
+  }
+  res.setHeader("Content-Type","text/html");
+  res.end(req.url === "/totp-setup" ? html + '<img id="totp-setup-image" src="/totp-setup.png" width="310" height="310" alt="Test 2FA setup">' : html);
+});
 server.listen(0,"127.0.0.1"); await once(server,"listening");
 const origin=`http://localhost:${server.address().port}`;
 const portProbe=net.createServer();portProbe.listen(0,"127.0.0.1");await once(portProbe,"listening");const port=portProbe.address().port;await new Promise(r=>portProbe.close(r));
 await fs.cp(path.join(repo,"browser-extension"),extension,{recursive:true});
+const manifestPath = path.join(extension, "manifest.json");
+const testManifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+assert.ok(testManifest.permissions.includes("activeTab"));
+assert.ok(!testManifest.host_permissions.includes("<all_urls>"));
+// The headless test opens the popup URL without a toolbar gesture.
+testManifest.host_permissions.push("<all_urls>");
+await fs.writeFile(manifestPath, JSON.stringify(testManifest));
 const swPath=path.join(extension,"service-worker.js");await fs.writeFile(swPath,(await fs.readFile(swPath,"utf8")).replaceAll("39272",String(port)));
 const child=spawn(fixture,[root,String(port),origin],{windowsHide:true,stdio:["ignore","pipe","pipe"]});
 let output="", context;
@@ -90,6 +106,69 @@ try {
   const items=await worker.evaluate(o=>bridgeCall("password.list",{origin:o}),origin);
   const login=items[0];
   assert.equal((await worker.evaluate(p=>bridgeCall("password.get",p),{id:login.id,origin})).password,"browser-update-secret");
+  const setupUrl = origin + "/totp-setup";
+  await site.goto(setupUrl);
+  await site.locator("#totp-setup-image").evaluate(image => image.decode());
+  await popup.evaluate(() => refresh());
+  const scanTotp = popup.locator("#scan-totp");
+  const confirmTotp = popup.locator("#totp-import-confirm");
+  let lastScan = 0;
+  const scanSetup = async () => {
+    await new Promise(resolve => setTimeout(resolve, Math.max(0, lastScan + 1050 - Date.now())));
+    await site.locator("#totp-setup-image").evaluate(image => image.decode());
+    await site.bringToFront();
+    await scanTotp.click();
+    lastScan = Date.now();
+    await confirmTotp.waitFor({ state: "visible", timeout: 10000 }).catch(async error => {
+      throw new Error(await popup.locator("#error").textContent() || "No QR preview", { cause: error });
+    });
+    assert.equal(await popup.locator("#totp-import-issuer").textContent(), "Local QA");
+    assert.equal(await popup.locator("#totp-import-account").textContent(), "file-user");
+    assert.match(await popup.locator("#totp-import-destination").textContent(), /Fixture login/);
+    assert.doesNotMatch(await popup.locator("#totp-import").innerText(), /otpauth|JBSWY3DPEHPK3PXP/i);
+  };
+  const storedTotp = () => worker.evaluate(url => bridgeCall("password.list", { origin: url })
+    .then(entries => entries[0]?.hasTotp), setupUrl);
+  await scanSetup();
+  assert.equal(await storedTotp(), false);
+  await popup.locator("#totp-import-cancel").click();
+  assert.equal(await storedTotp(), false);
+  await scanSetup();
+  await site.reload();
+  if (await confirmTotp.isVisible()) await confirmTotp.click();
+  await confirmTotp.waitFor({ state: "hidden" });
+  assert.equal(await storedTotp(), false, "Reload cannot save a preview for the previous document");
+  await scanSetup();
+  await worker.evaluate(() => bridgeCall("lock"));
+  await popup.evaluate(() => refresh());
+  await popup.locator("#unlock-form").waitFor({ state: "visible" });
+  await confirmTotp.waitFor({ state: "hidden" });
+  await popup.locator("#pin").fill("123456");
+  await site.bringToFront();
+  await popup.locator("#unlock-form button").click();
+  await scanSetup();
+  assert.equal(await storedTotp(), false, "Lock invalidates the preview and cannot save");
+  await confirmTotp.click();
+  await until(() => storedTotp(), "confirmed scanned TOTP saved");
+  assert.equal((await worker.evaluate(p => bridgeCall("password.get",p), {id:login.id,origin})).password, "browser-update-secret");
+  assert.ok(!(await fs.readFile(path.join(root, "vault/vault.json"), "utf8")).includes("JBSWY3DPEHPK3PXP"));
+  const scannedCounter = Math.floor(Date.now() / 30000);
+  await site.bringToFront();
+  await popup.getByRole("button", { name: "填写验证码 / Fill one-time code" }).click();
+  await until(async () => /^\d{6}$/.test(await site.locator("#otp").inputValue()), "scanned TOTP filled");
+  const scannedCodes = [scannedCounter, Math.floor(Date.now() / 30000)].map(counter => {
+    const input = Buffer.alloc(8);
+    input.writeBigUInt64BE(BigInt(counter));
+    const digest = createHmac("sha1", Buffer.from("48656c6c6f21deadbeef", "hex")).update(input).digest();
+    const offset = digest.at(-1) & 15;
+    return String((digest.readUInt32BE(offset) & 0x7fffffff) % 1000000).padStart(6, "0");
+  });
+  assert.ok(scannedCodes.includes(await site.locator("#otp").inputValue()));
+  assert.equal(await site.locator("#hidden-otp").inputValue(), "");
+  assert.equal(site.url(), setupUrl);
+  console.log("Offline page QR capture, preview, cancel/reload/lock, encrypted save and TOTP autofill verified");
+  await site.goto(origin);
+  await site.bringToFront();
   await fs.writeFile(path.join(root,"desktop-edit.json"),JSON.stringify({id:login.id,name:"Desktop renamed login",loginUris:[{uri:origin+"/",matchType:"exact"},{uri:origin+"/alternate",matchType:"exact"},{uri:origin+"/blocked",matchType:"never"}],modules:[{kind:"url",value:origin},{kind:"username"},{kind:"password"},{kind:"totp"}],secrets:{password:"desktop-update-secret",namedSecrets:{username:"alice",totp:"GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"}}}));
   await until(async()=>fs.access(path.join(root,"desktop-edited")).then(()=>true,()=>false),"desktop edit");
   await popup.getByRole("button",{name:/Desktop renamed login/}).waitFor();

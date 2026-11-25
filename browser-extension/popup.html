@@ -59,6 +59,26 @@
         <section id="vault-history" hidden><strong>密码历史 / Password history</strong><p>最近 20 条旧密码 / Latest 20 previous passwords</p><div id="vault-history-rows"></div><button id="vault-history-clear" type="button">清除历史 / Clear history</button><button id="vault-history-close" type="button" class="secondary">关闭 / Close</button></section>
         <dialog id="vault-confirm" hidden aria-label="Confirm vault action"><p id="vault-confirm-message"></p><div class="personal-actions"><button id="vault-confirm-accept" type="button">确认 / Confirm</button><button id="vault-confirm-cancel" type="button" class="secondary">取消 / Cancel</button></div></dialog>
         <div id="entries" class="entries"></div>
+        <button id="scan-totp" type="button" class="secondary" hidden>扫描网页 2FA 二维码 / Scan page 2FA QR</button>
+        <dialog id="totp-import" aria-labelledby="totp-import-title">
+          <strong id="totp-import-title" tabindex="-1">导入 2FA / Import 2FA</strong>
+          <div id="totp-import-choice">
+            <label for="totp-import-target">登录项目 / Login item</label>
+            <select id="totp-import-target"></select>
+            <button id="totp-import-scan" type="button" disabled>扫描并预览 / Scan and preview</button>
+          </div>
+          <p id="totp-import-progress" role="status" hidden>正在本机识别当前网页 / Scanning the current page locally</p>
+          <div id="totp-import-preview" hidden>
+            <dl>
+              <dt>发行方 / Issuer</dt><dd id="totp-import-issuer"></dd>
+              <dt>二维码账户 / QR account</dt><dd id="totp-import-account"></dd>
+              <dt>保存到 / Save to</dt><dd id="totp-import-destination"></dd>
+            </dl>
+            <p id="totp-import-warning" role="status" hidden>将替换现有 2FA 密钥 / This replaces the existing 2FA key.</p>
+            <button id="totp-import-confirm" type="button">确认保存 2FA / Confirm and save 2FA</button>
+          </div>
+          <button id="totp-import-cancel" type="button" class="secondary">取消 / Cancel</button>
+        </dialog>
         <button id="read-form" type="button">保存当前网站的账号 / Save login</button>
         <details class="personal-vault"><summary>密码生成器 / Password generator</summary>
           <label for="generator-length">长度 / Length · 8–128</label><input id="generator-length" type="number" min="8" max="128" value="24">

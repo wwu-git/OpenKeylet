@@ -101,3 +101,11 @@ details form { padding: 12px 0; }
 .capture-page .page-hint { margin-top:10px; padding:12px; }
 #save-form button { margin-top:8px; }
 #capture-complete button { margin-top:12px; }
+#scan-totp { margin-bottom: 8px; }
+#totp-import { border: 1px solid #5b6970; background: #343b40; color: inherit; width: calc(100% - 32px); max-height: 85vh; overflow: auto; margin: auto; padding: 14px; border-radius: 5px; }
+#totp-import::backdrop { background: #0009; }
+#totp-import dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 10px; font-size: 12px; }
+#totp-import dt { color: #b7cbd5; }
+#totp-import dd { margin: 0; overflow-wrap: anywhere; }
+#totp-import button { margin-top: 8px; }
+#totp-import-warning { color: #edbfaa; }

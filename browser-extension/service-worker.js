@@ -268,5 +268,5 @@ function writeToFocusedControl(value, expiresAt, submit = false) {
   }
 }
 
-importScripts("form-reader.js", "provider.js", "capture.js");
+importScripts("form-reader.js", "provider.js", "capture.js", "qr-decoder.js", "totp-import.js");
 requestConnect();
