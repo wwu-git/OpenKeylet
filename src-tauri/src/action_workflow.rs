@@ -1,6 +1,10 @@
 use crate::{
     model::StoredConnection,
     native_workflow::{NativeLookup, NativeWorkflow},
+    special_workflow::{
+        DesktopInstructions, DesktopWorkflow, FillTarget, TerminalOpenPlan, TerminalRunPlan,
+        TerminalSessionStep, VaultWriteOperation,
+    },
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -40,6 +44,35 @@ pub(crate) enum ActionCapabilitiesInput {
         item_id: Option<Uuid>,
         workflow: NativeWorkflow,
     },
+    CredentialFill {
+        #[serde(default)]
+        item: String,
+        item_id: Option<Uuid>,
+        #[serde(default)]
+        module: String,
+        target: FillTarget,
+        session_id: Option<Uuid>,
+        #[serde(default)]
+        submit: bool,
+    },
+    TerminalRun {
+        request: TerminalRunPlan,
+    },
+    TerminalOpen {
+        request: TerminalOpenPlan,
+    },
+    TerminalSession {
+        session_id: Option<Uuid>,
+        request: TerminalSessionStep,
+    },
+    VaultWrite {
+        operation: VaultWriteOperation,
+        item_id: Option<Uuid>,
+        folder: Option<String>,
+    },
+    Desktop {
+        workflow: DesktopWorkflow,
+    },
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -64,9 +97,10 @@ pub(crate) enum SelectionReason {
     Explicit,
     Session,
     Unique,
+    Terminal,
 }
 
-#[derive(Serialize, JsonSchema)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct ProjectCandidate {
     pub(crate) id: Uuid,
     pub(crate) name: String,
@@ -109,6 +143,7 @@ pub(crate) enum UnavailableCode {
     ProjectNotFound,
     NoCompatibleProject,
     UnsupportedOperation,
+    WritePermissionDenied,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -121,6 +156,10 @@ pub(crate) enum NeedInputCode {
     MissingSecretBinding,
     MissingParameter,
     InvalidParameter,
+    MissingCredentialModule,
+    BrowserUnavailable,
+    TerminalUnavailable,
+    InvalidTemplate,
     UnsupportedTarget,
 }
 
@@ -146,6 +185,40 @@ pub(crate) struct NextCall {
 }
 
 #[derive(Serialize, JsonSchema)]
+#[serde(untagged)]
+pub(crate) enum ActionTarget {
+    Http(HttpTarget),
+    Local(LocalTarget),
+}
+
+#[derive(Serialize, JsonSchema)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub(crate) enum LocalTarget {
+    Credential {
+        channel: FillTarget,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<Uuid>,
+    },
+    LocalCommand,
+    Terminal {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<Uuid>,
+    },
+    Vault {
+        folder: String,
+        write_tool: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        item_id: Option<Uuid>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<u64>,
+    },
+}
+
+#[derive(Serialize, JsonSchema)]
 #[serde(
     tag = "status",
     rename_all = "camelCase",
@@ -157,14 +230,16 @@ pub(crate) enum ActionResponse {
         project: SelectedProject,
     },
     Ready {
-        project: SelectedProject,
-        target: HttpTarget,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        project: Option<SelectedProject>,
+        target: ActionTarget,
         next_call: NextCall,
         #[serde(skip_serializing_if = "Option::is_none")]
         lookup: Option<NativeLookup>,
     },
     NeedsInput {
-        project: SelectedProject,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        project: Option<SelectedProject>,
         code: NeedInputCode,
         missing_inputs: Vec<MissingInput>,
     },
@@ -179,6 +254,40 @@ pub(crate) enum ActionResponse {
         #[serde(skip_serializing_if = "Vec::is_empty")]
         candidates: Vec<ProjectCandidate>,
     },
+    DesktopAction {
+        desktop: DesktopInstructions,
+    },
+}
+
+impl ActionResponse {
+    pub(crate) fn local(
+        target: LocalTarget,
+        next_call: NextCall,
+        project: Option<SelectedProject>,
+    ) -> Self {
+        Self::Ready {
+            project,
+            target: ActionTarget::Local(target),
+            next_call,
+            lookup: None,
+        }
+    }
+
+    pub(crate) fn missing(
+        code: NeedInputCode,
+        name: &str,
+        source: &'static str,
+        project: Option<SelectedProject>,
+    ) -> Self {
+        Self::NeedsInput {
+            project,
+            code,
+            missing_inputs: vec![MissingInput {
+                name: name.to_owned(),
+                source,
+            }],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema)]

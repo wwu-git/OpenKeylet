@@ -21,6 +21,7 @@ mod oci;
 pub mod passkey;
 pub mod policy;
 pub mod runtime_epoch;
+mod special_workflow;
 pub mod storage;
 pub mod terminal;
 pub mod vault;

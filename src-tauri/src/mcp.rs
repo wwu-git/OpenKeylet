@@ -1,7 +1,7 @@
 use crate::{
     action_workflow::{
-        ActionCapabilitiesInput, ActionResponse, HttpRemoteError, HttpResponseFormat,
-        HttpPagination, HttpTarget, HttpToolResponse, MissingInput, NeedInputCode, NextCall, ProjectCandidate,
+        ActionCapabilitiesInput, ActionResponse, ActionTarget, HttpRemoteError, HttpResponseFormat,
+        HttpPagination, HttpTarget, HttpToolResponse, LocalTarget, MissingInput, NeedInputCode, NextCall, ProjectCandidate,
         SelectedProject, SelectionReason, TargetSource, UnavailableCode,
     },
     browser::{BrowserBridge, current_totp},
@@ -12,6 +12,7 @@ use crate::{
     },
     model::NewActivity,
     native_workflow::NativeWorkflow,
+    special_workflow::{FillTarget, TerminalSessionStep, VaultWriteOperation},
     terminal::{TerminalManager, TerminalOpenResult, TerminalReadResult},
     vault::{DecryptedConnection, Vault},
 };
@@ -549,7 +550,7 @@ impl VaultMcp {
                 capability.missing_fields
             };
             return Ok(ActionResponse::NeedsInput {
-                project,
+                project: Some(project),
                 code: NeedInputCode::MissingConfiguration,
                 missing_inputs: fields.into_iter().map(|name| MissingInput { name, source: "project" }).collect(),
             });
@@ -557,7 +558,7 @@ impl VaultMcp {
         let prepared = match workflow.prepare(&connection) {
             Ok(prepared) => prepared,
             Err(issue) => return Ok(ActionResponse::NeedsInput {
-                project,
+                project: Some(project),
                 code: if issue.invalid { NeedInputCode::InvalidParameter } else { NeedInputCode::MissingParameter },
                 missing_inputs: vec![MissingInput { name: issue.field.to_owned(), source: issue.source }],
             }),
@@ -565,11 +566,117 @@ impl VaultMcp {
         protect_native_context(&mut connection);
         let target = describe_http_target(&connection, TargetSource::Saved, url::Url::parse(&prepared.request.url).ok());
         Ok(ActionResponse::Ready {
-            project,
-            target,
+            project: Some(project),
+            target: ActionTarget::Http(target),
             next_call: native_next_call(connection.stored.id, &workflow),
             lookup: prepared.lookup,
         })
+    }
+
+    fn preview_terminal_id(&self, requested: Option<Uuid>, running: bool) -> Option<Uuid> {
+        let id = requested.or_else(|| self.active_terminal.read().ok().and_then(|id| *id))?;
+        (self.terminal.contains(id).unwrap_or(false)
+            && (!running || self.terminal.preview_running(id).unwrap_or(false)))
+            .then_some(id)
+    }
+
+    fn plan_credential_fill(
+        &self,
+        item: &str,
+        item_id: Option<Uuid>,
+        module: &str,
+        target: FillTarget,
+        requested_session: Option<Uuid>,
+        submit: bool,
+    ) -> Result<ActionResponse, String> {
+        let session_id = match target {
+            FillTarget::Terminal => {
+                let Some(id) = self.preview_terminal_id(requested_session, true) else {
+                    return Ok(ActionResponse::missing(NeedInputCode::TerminalUnavailable, "sessionId", "terminalStart", None));
+                };
+                Some(id)
+            }
+            _ if requested_session.is_some() => {
+                return Ok(ActionResponse::missing(NeedInputCode::InvalidParameter, "sessionId", "caller", None));
+            }
+            _ => None,
+        };
+        let bound = if item.trim().is_empty() && item_id.is_none() {
+            session_id.and_then(|session| self.terminal_items.read().ok()?.get(&session).copied())
+        } else {
+            None
+        };
+        let matched = self.match_action_project(item, item_id.or(bound), Some("fill"))?;
+        let ProjectMatch::Selected(connection, reason) = matched else {
+            return Ok(matched.workflow_response());
+        };
+        let reason = if bound.is_some() { SelectionReason::Terminal } else { reason };
+        let project = SelectedProject::new(&connection.stored, reason);
+        if matches!(target, FillTarget::Browser) && !self.browser.fill_configured() {
+            return Ok(ActionResponse::missing(NeedInputCode::BrowserUnavailable, "browser", "desktop", Some(project)));
+        }
+        let Ok(module) = resolve_secret_module(&connection, module, item) else {
+            return Ok(ActionResponse::missing(NeedInputCode::MissingCredentialModule, "module", "caller", Some(project)));
+        };
+        Ok(ActionResponse::local(
+            LocalTarget::Credential { channel: target, session_id },
+            target.next_call(connection.stored.id, &module, session_id, submit),
+            Some(project),
+        ))
+    }
+
+    fn plan_vault_write(
+        &self,
+        operation: VaultWriteOperation,
+        item_id: Option<Uuid>,
+        folder: Option<&str>,
+    ) -> Result<ActionResponse, String> {
+        let capabilities = self.vault.write_capabilities().map_err(|error| error.to_string())?;
+        let denied = || ActionResponse::Unavailable {
+            code: UnavailableCode::WritePermissionDenied,
+            project: None,
+            candidates: Vec::new(),
+        };
+        if !capabilities.enabled {
+            return Ok(denied());
+        }
+        let permitted = |folder: &str| capabilities.folders.iter().any(|allowed| allowed == folder);
+        let mut existing = None;
+        if matches!(operation, VaultWriteOperation::Update) {
+            let Some(id) = item_id else {
+                return Ok(ActionResponse::missing(NeedInputCode::MissingParameter, "itemId", "itemsSearch", None));
+            };
+            existing = self.vault.list_connections().map_err(|error| error.to_string())?
+                .into_iter().find(|project| project.id == id && permitted(&project.folder)
+                    && project.certificate_authority.is_none());
+            if existing.is_none() {
+                return Ok(ActionResponse::Unavailable {
+                    code: UnavailableCode::ProjectNotFound,
+                    project: None,
+                    candidates: Vec::new(),
+                });
+            }
+        } else if item_id.is_some() {
+            return Ok(ActionResponse::missing(NeedInputCode::InvalidParameter, "itemId", "caller", None));
+        }
+        let selected_folder = folder.map(str::trim).filter(|name| !name.is_empty())
+            .or_else(|| existing.as_ref().map(|item| item.folder.as_str()));
+        let Some(folder) = selected_folder else {
+            return Ok(ActionResponse::missing(NeedInputCode::MissingParameter, "folder", "caller", None));
+        };
+        if !permitted(folder) {
+            return Ok(denied());
+        }
+        Ok(ActionResponse::local(
+            LocalTarget::Vault {
+                folder: folder.to_owned(),
+                write_tool: operation.write_tool(),
+                item_id,
+                expected_revision: existing.map(|item| item.revision),
+            },
+            operation.next_call(),
+            None,
+        ))
     }
 
     fn prepare_ssh_connection(
@@ -1228,6 +1335,7 @@ struct CredentialFillOutput {
     target: String,
     module: String,
     submitted: bool,
+    project: ProjectCandidate,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1700,7 +1808,7 @@ struct ApiServiceCapabilitiesInput {
 impl VaultMcp {
     #[tool(
         name = "action_capabilities",
-        description = "Preview the next step without executing it or changing session selection. Use selectProject for selection alone, httpRequest for generic HTTP, or nativeApi for a provider-specific read and pagination. Reports the exact project, eligible candidates or missing inputs.",
+        description = "Preview the next step without executing it or changing session selection. Use selectProject, httpRequest, nativeApi, credentialFill, terminalRun, terminalOpen, terminalSession, vaultWrite or desktop. Returns a callable next step, eligible candidates, missing inputs, or desktop instructions.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<ActionResponse>(),
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
@@ -1715,6 +1823,38 @@ impl VaultMcp {
                     .map(ProjectMatch::workflow_response),
                 ActionCapabilitiesInput::NativeApi { item, item_id, workflow } =>
                     self.plan_native_http(&item, item_id, workflow),
+                ActionCapabilitiesInput::CredentialFill { item, item_id, module, target, session_id, submit } =>
+                    self.plan_credential_fill(&item, item_id, &module, target, session_id, submit),
+                ActionCapabilitiesInput::TerminalRun { request } => {
+                    if request.command.trim().is_empty() || request.command.contains('\0') {
+                        return Ok(ActionResponse::missing(NeedInputCode::InvalidParameter, "command", "caller", None));
+                    }
+                    let mut placeholders = HashSet::new();
+                    for text in [Some(&request.command), request.stdin.as_ref(), request.cwd.as_ref()].into_iter().flatten() {
+                        collect_secret_placeholders_text(text, &mut placeholders)?;
+                    }
+                    if let Some(template) = &request.env_template {
+                        if !placeholders.is_empty() || crate::env_template::resolve(&self.vault, template).is_err() {
+                            return Ok(ActionResponse::missing(NeedInputCode::InvalidTemplate, "envTemplate", "desktopImport", None));
+                        }
+                    } else if !placeholders.is_empty() {
+                        return Ok(ActionResponse::missing(NeedInputCode::MissingParameter, "envTemplate", "desktopImport", None));
+                    }
+                    Ok(ActionResponse::local(LocalTarget::LocalCommand, request.next_call(), None))
+                }
+                ActionCapabilitiesInput::TerminalOpen { request } =>
+                    Ok(ActionResponse::local(LocalTarget::Terminal { session_id: None }, request.next_call(), None)),
+                ActionCapabilitiesInput::TerminalSession { session_id, request } => {
+                    let running = matches!(&request, TerminalSessionStep::Write { .. });
+                    let Some(session_id) = self.preview_terminal_id(session_id, running) else {
+                        return Ok(ActionResponse::missing(NeedInputCode::TerminalUnavailable, "sessionId", "terminalStart", None));
+                    };
+                    Ok(ActionResponse::local(LocalTarget::Terminal { session_id: Some(session_id) }, request.next_call(session_id), None))
+                }
+                ActionCapabilitiesInput::VaultWrite { operation, item_id, folder } =>
+                    self.plan_vault_write(operation, item_id, folder.as_deref()),
+                ActionCapabilitiesInput::Desktop { workflow } =>
+                    Ok(ActionResponse::DesktopAction { desktop: workflow.instructions() }),
                 ActionCapabilitiesInput::HttpRequest { item, item_id, url, method, query, body } => {
                     let project = self.match_action_project(&item, item_id, Some("http"))?;
                     let ProjectMatch::Selected(mut connection, reason) = project else {
@@ -1744,7 +1884,7 @@ impl VaultMcp {
                         .is_err()
                     {
                         return Ok(ActionResponse::NeedsInput {
-                            project,
+                            project: Some(project),
                             code: NeedInputCode::MissingSecretBinding,
                             missing_inputs: vec![MissingInput { name: "secretBindings".to_owned(), source: "project" }],
                         });
@@ -1760,15 +1900,15 @@ impl VaultMcp {
                                 ApiPreviewIssue::UnsupportedTarget => (NeedInputCode::UnsupportedTarget, "url", "caller"),
                             };
                             return Ok(ActionResponse::NeedsInput {
-                                project,
+                                project: Some(project),
                                 code,
                                 missing_inputs: vec![MissingInput { name: name.to_owned(), source }],
                             });
                         }
                     };
                     Ok(ActionResponse::Ready {
-                        project,
-                        target: describe_http_target(&connection, source, Some(target)),
+                        project: Some(project),
+                        target: ActionTarget::Http(describe_http_target(&connection, source, Some(target))),
                         next_call: NextCall { tool: "http_send", arguments },
                         lookup: None,
                     })
@@ -2021,6 +2161,7 @@ impl VaultMcp {
                 target: actual_target,
                 module,
                 submitted: submit,
+                project: ProjectCandidate::from(&connection.stored),
             })
         }
         .await;

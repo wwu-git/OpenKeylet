@@ -224,6 +224,78 @@ def verify(binary, directory, address, requests):
                 assert incomplete["status"] == "needsInput" and incomplete["missingInputs"][0]["name"] == "owner"
         assert len(requests) == before
         print("PASS: native MCP planning preserves provider and project, detects missing input, rejects overridden targets")
+
+        def plan(action, **arguments):
+            return session.data("action_capabilities", action=action, **arguments)
+
+        def follow(preview):
+            assert preview["status"] == "ready", preview
+            call = preview["nextCall"]
+            return session.data(call["tool"], **call["arguments"])
+
+        bindings = []
+        for variable, value in [("FIXTURE_ALPHA", "alpha-value"), ("FIXTURE_BETA", "beta-value")]:
+            project = session.data("items_create", name=variable, folder="Workflow",
+                                   itemType="custom", modules=[
+                {"kind": "customSecret", "name": "Value", "value": value},
+            ])
+            item = session.data("items_search", query=variable)["items"][0]
+            bindings.append(variable + "={{openkeylet:" + project["id"] + "/" + item["modules"][0]["id"] + "}}")
+        template = "\n".join(bindings)
+        preview = plan("terminalRun", request={
+            "command": 'test "$FIXTURE_ALPHA" = alpha-value && test "$FIXTURE_BETA" = beta-value && printf "%s" "$FIXTURE_ALPHA"',
+            "envTemplate": template, "timeoutSeconds": 5,
+        })
+        result = follow(preview)
+        assert result["exitCode"] == 0 and result["stdout"] == "[REDACTED]"
+        invalid = plan("terminalRun", request={"command": "true", "envTemplate": "NAME=raw-value"})
+        assert invalid["code"] == "invalidTemplate" and "nextCall" not in invalid
+
+        missing_terminal = plan("terminalSession", request={"step": "read"})
+        assert missing_terminal["code"] == "terminalUnavailable"
+        terminal_id = follow(plan("terminalOpen", request={"program": "/bin/sh"}))["sessionId"]
+        try:
+            def terminal(step, **arguments):
+                preview = plan("terminalSession", sessionId=terminal_id,
+                               request={"step": step, **arguments})
+                assert preview["target"]["sessionId"] == terminal_id
+                return follow(preview)
+
+            totp = session.data("items_create", name="Fixture 2FA", folder="Workflow",
+                                itemType="custom", modules=[
+                {"kind": "totp", "value": "JBSWY3DPEHPK3PXP"},
+            ])
+            unavailable = plan("credentialFill", itemId=totp["id"], target="browser")
+            assert unavailable["code"] == "browserUnavailable" and "nextCall" not in unavailable
+            terminal("write",
+                     text=r"""printf '%s%s\n' 'fill-' 'ready'; IFS= read -r code; case "$code" in [0-9][0-9][0-9][0-9][0-9][0-9]) printf '%s%s\n' 'fill-' 'ok';; esac""",
+                     submit=True)
+            assert "fill-ready" in terminal("read", until="fill-ready", waitSeconds=5)["output"]
+            result = follow(plan("credentialFill", itemId=totp["id"], module="totp",
+                                 target="terminal", sessionId=terminal_id, submit=True))
+            assert result["project"]["id"] == totp["id"] and result["target"] == "terminal"
+            assert "fill-ok" in terminal("read", until="fill-ok", waitSeconds=5)["output"]
+        finally:
+            terminal("stop")
+        assert plan("terminalSession", sessionId=terminal_id, request={"step": "read"})["code"] == "terminalUnavailable"
+
+        write_preview = plan("vaultWrite", operation="update", itemId=second["id"])
+        assert write_preview["target"]["writeTool"] == "items_update"
+        assert write_preview["target"]["folder"] == "Workflow"
+        assert write_preview["target"]["expectedRevision"] == second["revision"]
+        assert follow(write_preview)["enabled"]
+        denied = plan("vaultWrite", operation="create", folder="Unauthorized")
+        assert denied["code"] == "writePermissionDenied" and "nextCall" not in denied
+        subprocess.run([binary, "permissions", "disable"], env=env, check=True,
+                       capture_output=True, timeout=15)
+        denied = plan("vaultWrite", operation="update", itemId=second["id"])
+        assert denied["code"] == "writePermissionDenied" and "nextCall" not in denied
+        for workflow in ["envImport", "passwordVaultImport", "twoFactorImageImport",
+                         "twoFactorBrowserImport", "githubBackupRestore"]:
+            desktop = plan("desktop", workflow=workflow)
+            assert desktop["status"] == "desktopAction" and desktop["desktop"]["steps"]
+            assert "nextCall" not in desktop
+        print("PASS: local env template, PTY lifecycle, TOTP fill, vault grants and desktop workflow steps")
     finally:
         session.close()
 

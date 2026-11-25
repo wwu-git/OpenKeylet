@@ -80,6 +80,15 @@ struct TerminalSession {
 }
 
 impl TerminalSession {
+    fn process_running(&self) -> Result<bool> {
+        Ok(self.child
+            .lock()
+            .map_err(lock_error)?
+            .try_wait()
+            .context("Could not read terminal process status")?
+            .is_none())
+    }
+
     fn close_pty_io(&self) {
         if let Ok(mut master) = self.master.lock() {
             master.take();
@@ -310,17 +319,15 @@ impl TerminalManager {
 
     pub fn is_running(&self, session_id: Uuid) -> Result<bool> {
         let session = self.session(session_id)?;
-        let running = session
-            .child
-            .lock()
-            .map_err(lock_error)?
-            .try_wait()
-            .context("Could not read terminal process status")?
-            .is_none();
+        let running = session.process_running()?;
         if !running {
             session.close_pty_io();
         }
         Ok(running)
+    }
+
+    pub(crate) fn preview_running(&self, session_id: Uuid) -> Result<bool> {
+        self.session(session_id)?.process_running()
     }
 
     pub fn contains(&self, session_id: Uuid) -> Result<bool> {

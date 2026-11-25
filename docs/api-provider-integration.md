@@ -35,6 +35,27 @@ Azure ARM、GCP Compute/Resource Manager 仅保留已有 access token 的显式 
 
 ## MCP 使用
 
+需要确认下一步时，调用只读工具 `action_capabilities`。它返回 `nextCall.tool` 和 `nextCall.arguments`，或返回候选项目、缺少的字段和参数来源。查询不会发送 API 请求或改变会话选中的项目。返回的调用使用项目 UUID，可直接传给对应工具。
+
+例如，从 OCI 区间名查运行中的实例：
+
+```json
+{
+  "action": "nativeApi",
+  "item": "OCI 项目",
+  "workflow": {
+    "operation": "ociRunningInstances",
+    "compartmentName": "app"
+  }
+}
+```
+
+执行返回的 `nextCall`。如果响应提供 `pagination.nextCall`，继续使用它，直到查完所有页。合并各页的 `lookup.matches`。找到唯一匹配后，使用相同的 `itemId` 和匹配的 `compartmentId` 再查一次能力。遇到同名区间时，用候选区间和父级确认目标。
+
+原生流程还提供 `githubCommits`、`awsRunningInstances`、`cloudflareDnsRecords`、`digitalOceanDroplets` 和 `hetznerServers`。通用请求用 `httpRequest`。直接调用 `http_send` 时，默认保留 `body`；使用 `responseFormat: "structured"` 时，完整 JSON 放入 `data`，文本和截断内容仍放在 `body`。远端 HTTP 错误包含状态码和可用的请求 ID。
+
+同一入口也支持 `credentialFill`、`terminalRun`、`terminalOpen`、`terminalSession`、`vaultWrite` 和 `desktop`。桌面流程返回导入或恢复的实际界面步骤。凭据写入流程检查文件夹授权，并给出更新所需的项目 ID 和版本。
+
 新增只读工具 `api_service_capabilities`，可查询已有 `item`，也可只提供 `url`。`items_search` 的 `apiService` 返回同样的服务信息。
 
 返回内容包括服务商、具体服务、认证模式、`ready` / `needsConfiguration` / `unsupported`、缺少的字段、官方文档、使用说明和限制。URL 单独查询只能说明协议支持，不能证明凭据已配置。区域只在对应字段可见时返回；不返回 Access Key、Secret Key、Session Token 或原始隐藏 URL。服务类别及固定文档属于公开能力说明。
@@ -65,7 +86,7 @@ Agent 配置 AWS 时沿用写入白名单、版本号和可见性限制。可先
 }
 ```
 
-这不是硬编码的列实例功能。JSON 服务可自行提供文档要求的 `Content-Type` 和 `X-Amz-Target`。AWS 的 POST 可能是查询，也可能修改资源，不能仅凭 HTTP 方法判断操作性质。分页、错误解释和下一页请求由 Agent 处理，下一页 URL 仍接受目标校验。
+这是手动调用示例。常用的运行实例查询可用 `awsRunningInstances` 生成请求和续页。其他操作可自行提供文档要求的参数，例如 JSON 服务的 `Content-Type` 和 `X-Amz-Target`。AWS 的 POST 可能是查询，也可能修改资源，具体行为取决于操作。
 
 ## 目标和传输规则
 
