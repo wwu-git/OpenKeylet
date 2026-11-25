@@ -1,4 +1,7 @@
-use crate::model::StoredConnection;
+use crate::{
+    model::StoredConnection,
+    native_workflow::{NativeLookup, NativeWorkflow},
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -6,7 +9,12 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 #[derive(Debug, Deserialize, JsonSchema)]
-#[serde(tag = "action", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+#[serde(
+    tag = "action",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 #[schemars(extend("type" = "object"))]
 pub(crate) enum ActionCapabilitiesInput {
     SelectProject {
@@ -25,6 +33,12 @@ pub(crate) enum ActionCapabilitiesInput {
         #[serde(default)]
         query: HashMap<String, Value>,
         body: Option<Value>,
+    },
+    NativeApi {
+        #[serde(default)]
+        item: String,
+        item_id: Option<Uuid>,
+        workflow: NativeWorkflow,
     },
 }
 
@@ -85,7 +99,7 @@ impl SelectedProject {
 
 #[derive(Serialize, JsonSchema)]
 pub(crate) struct MissingInput {
-    pub(crate) name: &'static str,
+    pub(crate) name: String,
     pub(crate) source: &'static str,
 }
 
@@ -94,6 +108,7 @@ pub(crate) struct MissingInput {
 pub(crate) enum UnavailableCode {
     ProjectNotFound,
     NoCompatibleProject,
+    UnsupportedOperation,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -104,6 +119,8 @@ pub(crate) enum NeedInputCode {
     InvalidHttpMethod,
     MissingConfiguration,
     MissingSecretBinding,
+    MissingParameter,
+    InvalidParameter,
     UnsupportedTarget,
 }
 
@@ -129,7 +146,11 @@ pub(crate) struct NextCall {
 }
 
 #[derive(Serialize, JsonSchema)]
-#[serde(tag = "status", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 #[schemars(extend("type" = "object"))]
 pub(crate) enum ActionResponse {
     Selected {
@@ -139,6 +160,8 @@ pub(crate) enum ActionResponse {
         project: SelectedProject,
         target: HttpTarget,
         next_call: NextCall,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        lookup: Option<NativeLookup>,
     },
     NeedsInput {
         project: SelectedProject,
@@ -151,6 +174,8 @@ pub(crate) enum ActionResponse {
     },
     Unavailable {
         code: UnavailableCode,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        project: Option<SelectedProject>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         candidates: Vec<ProjectCandidate>,
     },
@@ -186,6 +211,16 @@ pub(crate) struct HttpToolResponse {
     pub(crate) data: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<HttpRemoteError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) pagination: Option<HttpPagination>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) lookup: Option<NativeLookup>,
+}
+
+#[derive(Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HttpPagination {
+    pub(crate) next_call: NextCall,
 }
 
 #[derive(Serialize, JsonSchema)]

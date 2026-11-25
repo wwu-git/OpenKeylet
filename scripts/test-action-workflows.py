@@ -191,7 +191,39 @@ def verify(binary, directory, address, requests):
         assert select_project(itemId=requested_id)["status"] == "unavailable"
         assert session.tool("http_send", itemId=requested_id).get("isError")
         assert len(requests) == before
-        print("PASS: MCP selection, discovery purity, stable ID after rename/session switch, exact authenticated HTTP dispatch")
+        print("PASS: MCP selection, stable project IDs, HTTP dispatch, structured data and error redaction")
+
+        for name, service_url, operation, inputs in [
+            ("GitHub", "https://api.github.com", "githubCommits",
+             {"owner": "fixture-owner", "repo": "fixture-repo"}),
+            ("Cloudflare", "https://api.cloudflare.com/client/v4", "cloudflareDnsRecords",
+             {"zoneName": "fixture.invalid"}),
+            ("DigitalOcean", "https://api.digitalocean.com/v2", "digitalOceanDroplets", {}),
+            ("Hetzner", "https://api.hetzner.cloud/v1", "hetznerServers", {}),
+        ]:
+            project = session.data("items_create", name=name, folder="Workflow",
+                                   itemType="api", httpAuthType="bearer", modules=[
+                {"kind": "url", "value": service_url},
+                {"kind": "apiCredential", "value": "synthetic-native-token"},
+            ])
+            session.data("items_search", query="Cloud Two")
+            workflow = {"operation": operation, **inputs}
+            preview = session.data("action_capabilities", action="nativeApi", workflow=workflow)
+            assert preview["status"] == "ready" and preview["project"]["id"] == project["id"], preview
+            call = preview["nextCall"]
+            assert call["tool"] == "http_send" and call["arguments"]["itemId"] == project["id"]
+            assert call["arguments"]["workflow"]["operation"] == operation
+            assert "synthetic-native-token" not in json.dumps(preview)
+            assert session.tool("http_send", **{**call["arguments"], "itemId": second["id"]}).get("isError")
+            assert session.tool("http_send", **{**call["arguments"], "url": address}).get("isError")
+            if operation == "cloudflareDnsRecords":
+                assert preview["lookup"]["nextInput"] == "zoneId" and preview["lookup"]["collectAllPages"]
+            if operation == "githubCommits":
+                incomplete = session.data("action_capabilities", action="nativeApi",
+                                          workflow={"operation": operation})
+                assert incomplete["status"] == "needsInput" and incomplete["missingInputs"][0]["name"] == "owner"
+        assert len(requests) == before
+        print("PASS: native MCP planning preserves provider and project, detects missing input, rejects overridden targets")
     finally:
         session.close()
 

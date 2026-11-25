@@ -16,6 +16,7 @@ pub mod login_uri;
 pub mod mcp;
 pub mod migration;
 pub mod model;
+mod native_workflow;
 mod oci;
 pub mod passkey;
 pub mod policy;
