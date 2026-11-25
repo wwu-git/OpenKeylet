@@ -14,13 +14,17 @@ use std::{
 use tokio::{process::Command, time::timeout};
 use toml_edit::{Array, DocumentMut, Item, Table, value};
 
-const CLIENT_IDS: [&str; 6] = [
+#[path = "agent_registry_dsh.rs"]
+mod dsh;
+
+const CLIENT_IDS: [&str; 7] = [
     "codex",
     "claude-code",
     "cursor",
     "opencode",
     "openclaw",
     "antigravity",
+    "deepseek-harness",
 ];
 const STATUS_CLI_TIMEOUT: Duration = Duration::from_secs(3);
 const ACTION_CLI_TIMEOUT: Duration = Duration::from_secs(20);
@@ -69,6 +73,8 @@ pub struct AgentRegistry {
     opencode_instruction_dir: PathBuf,
     openclaw_config: PathBuf,
     antigravity_config: PathBuf,
+    dsh_home: PathBuf,
+    dsh_profile: Option<String>,
     path_dirs: Vec<PathBuf>,
     app_data: PathBuf,
     local_app_data: PathBuf,
@@ -103,6 +109,8 @@ impl AgentRegistry {
         let openclaw_config = resolve_openclaw_config(&home, env_path("OPENCLAW_CONFIG_PATH"));
         let antigravity_config =
             resolve_antigravity_config(&home, env_path("ANTIGRAVITY_CONFIG_DIR"));
+        let dsh_home = env_path("DSH_HOME").unwrap_or_else(|| home.join(".dsh"));
+        let dsh_profile = env::var("DSH_PROFILE").ok().filter(|name| !name.is_empty());
         Ok(Self {
             executable: normalize_path(executable),
             home,
@@ -114,6 +122,8 @@ impl AgentRegistry {
             opencode_instruction_dir,
             openclaw_config,
             antigravity_config,
+            dsh_home,
+            dsh_profile,
             path_dirs,
             app_data,
             local_app_data,
@@ -149,6 +159,8 @@ impl AgentRegistry {
             opencode_instruction_dir: home.join(".config").join("opencode"),
             openclaw_config: resolve_openclaw_config(&home, None),
             antigravity_config: resolve_antigravity_config(&home, None),
+            dsh_home: home.join(".dsh"),
+            dsh_profile: None,
             home,
             path_dirs,
         }
@@ -157,15 +169,16 @@ impl AgentRegistry {
     pub async fn list(&self) -> Vec<AgentClientStatus> {
         // CLI-backed clients may need to start a Node process. Scan every client
         // concurrently so a slow or broken CLI cannot serially stall the settings page.
-        let (codex, claude, cursor, opencode, openclaw, antigravity) = tokio::join!(
+        let (codex, claude, cursor, opencode, openclaw, antigravity, deepseek) = tokio::join!(
             self.status(CLIENT_IDS[0]),
             self.status(CLIENT_IDS[1]),
             self.status(CLIENT_IDS[2]),
             self.status(CLIENT_IDS[3]),
             self.status(CLIENT_IDS[4]),
             self.status(CLIENT_IDS[5]),
+            self.status(CLIENT_IDS[6]),
         );
-        vec![codex, claude, cursor, opencode, openclaw, antigravity]
+        vec![codex, claude, cursor, opencode, openclaw, antigravity, deepseek]
     }
 
     pub async fn register(&self, client_ids: &[String]) -> Vec<AgentActionResult> {
@@ -215,7 +228,7 @@ impl AgentRegistry {
             Ok(())
         };
         let result = match result {
-            Ok(()) => self.mutate_mcp_client(client_id, action).await,
+            Ok(()) => self.mutate_mcp_client(client_id, action, &before.config_path).await,
             Err(error) => Err(error),
         };
         let result = if result.is_ok() && action != "remove" {
@@ -245,24 +258,51 @@ impl AgentRegistry {
         }
     }
 
-    async fn mutate_mcp_client(&self, client_id: &str, action: &str) -> Result<()> {
+    fn deepseek_config(&self) -> Result<Option<PathBuf>> {
+        if !self.dsh_home.is_absolute() {
+            bail!("DSH_HOME must be an absolute path");
+        }
+        dsh::config_path(&self.dsh_home, self.dsh_profile.as_deref())
+    }
+
+    async fn mutate_mcp_client(&self, client_id: &str, action: &str, config_path: &str) -> Result<()> {
         match client_id {
             "codex" => self.mutate_codex(action),
             "claude-code" | "cursor" | "opencode" | "antigravity" => {
                 self.mutate_json_client(client_id, action)
             }
             "openclaw" => self.mutate_cli_client(client_id, action).await,
+            "deepseek-harness" => {
+                let path = self.deepseek_config()?.context("No DeepSeek Harness profile found")?;
+                if path != Path::new(config_path) {
+                    bail!("DeepSeek Harness profile changed; rescan and try again");
+                }
+                dsh::mutate(&path, &self.executable, action)
+            }
             _ => unreachable!(),
         }
     }
 
     async fn status(&self, client_id: &str) -> AgentClientStatus {
         let display_name = display_name(client_id).to_owned();
-        let config_path = self.config_path(client_id);
+        let deepseek = client_id == "deepseek-harness";
+        let config_path = if deepseek {
+            match self.deepseek_config() {
+                Ok(path) => path.unwrap_or_default(),
+                Err(error) => {
+                    let mut status = self.error_status(client_id, "inspect", &error.to_string()).client;
+                    status.detected = true;
+                    return status;
+                }
+            }
+        } else {
+            self.config_path(client_id)
+        };
         let executable = self.find_client_executable(client_id);
         let detected = config_path.is_file()
             || executable.is_some()
             || self.desktop_install_exists(client_id)
+            || (deepseek && !config_path.as_os_str().is_empty())
             || (client_id == "opencode" && self.opencode_config_target_exists());
         let install_path = executable
             .as_ref()
@@ -290,6 +330,10 @@ impl AgentRegistry {
         }
 
         let inspected = match client_id {
+            "deepseek-harness" if config_path.as_os_str().is_empty() => {
+                Err(anyhow::anyhow!("Open DeepSeek Harness to initialize a profile, then rescan"))
+            }
+            "deepseek-harness" => dsh::inspect(&config_path, &self.executable),
             "codex" => self.inspect_codex(),
             // Claude's `mcp get` performs a health check and may fetch remote
             // connectors. Inspect the user scope we manage without starting it.
@@ -348,6 +392,9 @@ impl AgentRegistry {
                 status.can_register = false;
                 status.message = error.to_string();
             }
+        }
+        if deepseek && status.state == "conflict" {
+            status.can_repair = false;
         }
         if app_translocated(&self.executable) {
             status.state = "pathChanged".to_owned();
@@ -494,6 +541,9 @@ impl AgentRegistry {
 
     fn inspect_json_client(&self, client_id: &str) -> Result<EntryState> {
         let path = self.config_path(client_id);
+        if client_id == "antigravity" {
+            reject_linked_config(&path)?;
+        }
         if !path.is_file() {
             return Ok(EntryState::Available);
         }
@@ -674,6 +724,9 @@ impl AgentRegistry {
 
     fn mutate_json_client(&self, client_id: &str, action: &str) -> Result<()> {
         let path = self.config_path(client_id);
+        if client_id == "antigravity" {
+            reject_linked_config(&path)?;
+        }
         let original = read_or(&path, "{}\n")?;
         let root = CstRootNode::parse(&original, &ParseOptions::default())
             .context("Invalid Agent JSON/JSONC configuration; no changes were made")?;
@@ -962,6 +1015,7 @@ impl AgentRegistry {
             "claude-code" => &["claude"],
             "cursor" => &["cursor-agent", "cursor"],
             "antigravity" => &["agy", "antigravity"],
+            "deepseek-harness" => &["dsh"],
             _ => &[client_id],
         };
         self.find_named_command(names)
@@ -970,6 +1024,7 @@ impl AgentRegistry {
     fn find_named_command(&self, names: &[&str]) -> Option<PathBuf> {
         let mut directories = vec![
             self.home.join(".local").join("bin"),
+            self.home.join(".gemini").join("bin"),
             self.home.join("bin"),
             self.home.join(".bun").join("bin"),
             self.home.join(".volta").join("bin"),
@@ -1061,6 +1116,10 @@ impl AgentRegistry {
                 PathBuf::from("/Applications/OpenCode.app"),
                 self.home.join("Applications/OpenCode.app"),
             ],
+            ("deepseek-harness", "macos") => vec![
+                PathBuf::from("/Applications/DeepSeek Harness.app"),
+                self.home.join("Applications/DeepSeek Harness.app"),
+            ],
             ("antigravity", "macos") => vec![
                 PathBuf::from("/Applications/Antigravity.app"),
                 PathBuf::from("/Applications/Antigravity IDE.app"),
@@ -1124,7 +1183,7 @@ fn apply_entry_state(status: &mut AgentClientStatus, state: EntryState) {
             status.state = "DISABLED".to_owned();
             status.can_register = false;
             status.can_remove = true;
-            status.message = "OpenKeylet is disabled in Antigravity".to_owned();
+            status.message = format!("OpenKeylet is disabled in {}", status.display_name);
         }
         EntryState::Registered => {
             status.state = "registered".to_owned();
@@ -1483,6 +1542,17 @@ fn strip_instruction_block(text: &str, start_marker: &str, end_marker: &str) -> 
     Ok(before)
 }
 
+fn reject_linked_config(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!("Configuration is a symbolic link; edit its target manually")
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("Unable to inspect Agent configuration"),
+    }
+}
+
 fn write_atomic_checked(path: &Path, expected: &str, value: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).context("Unable to create Agent configuration directory")?;
@@ -1553,6 +1623,7 @@ fn display_name(client_id: &str) -> &str {
         "opencode" => "OpenCode",
         "openclaw" => "OpenClaw",
         "antigravity" => "Antigravity",
+        "deepseek-harness" => "DeepSeek Harness",
         _ => "Unknown Agent",
     }
 }
@@ -2333,6 +2404,56 @@ mod tests {
         fs::write(unrelated, b"test").unwrap();
         fs::remove_file(opencode).unwrap();
         assert_eq!(registry.find_client_executable("opencode"), baseline_opencode);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn new_adapters_keep_linked_configs_intact() {
+        use std::os::unix::fs::symlink;
+
+        let (_temp, registry) = registry();
+        let dsh_profile = registry.dsh_home.join("profiles/web");
+        fs::create_dir_all(&dsh_profile).unwrap();
+        for (id, path, content) in [
+            ("antigravity", registry.config_path("antigravity"), "{}\n"),
+            ("deepseek-harness", dsh_profile.join("cordis.patch.yml"), "[]\n"),
+        ] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let target = registry.home.join(format!("{id}-linked-config"));
+            fs::write(&target, content).unwrap();
+            symlink(&target, &path).unwrap();
+            let status = registry.status(id).await;
+            assert_eq!(status.state, "error");
+            assert!(status.message.contains("symbolic link"));
+            assert!(!registry.register(&[id.to_owned()]).await[0].ok);
+            assert!(fs::symlink_metadata(&path).unwrap().is_symlink());
+            assert_eq!(fs::read_to_string(&target).unwrap(), content);
+        }
+    }
+
+    #[tokio::test]
+    async fn deepseek_requires_an_unambiguous_profile_and_changes_only_that_patch() {
+        let (_temp, mut registry) = registry();
+        let web = registry.dsh_home.join("profiles/web");
+        let desktop = registry.dsh_home.join("profiles/desktop");
+        fs::create_dir_all(&web).unwrap();
+        fs::create_dir_all(&desktop).unwrap();
+        let other = desktop.join("cordis.patch.yml");
+        fs::write(&other, "# Existing desktop setup\n[]\n").unwrap();
+
+        let ambiguous = registry.status("deepseek-harness").await;
+        assert_eq!(ambiguous.state, "error");
+        assert!(!ambiguous.can_register);
+        assert!(ambiguous.message.contains("DSH_PROFILE"));
+
+        registry.dsh_profile = Some("web".into());
+        let registered = registry.register(&["deepseek-harness".into()]).await.remove(0);
+        assert!(registered.ok, "{}", registered.client.message);
+        assert_eq!(registered.client.state, "registered");
+        assert_eq!(Path::new(&registered.client.config_path), web.join("cordis.patch.yml"));
+        assert!(registry.remove("deepseek-harness").await.ok);
+        assert_eq!(registry.status("deepseek-harness").await.state, "available");
+        assert_eq!(fs::read_to_string(other).unwrap(), "# Existing desktop setup\n[]\n");
     }
 
     #[tokio::test]

@@ -84,7 +84,11 @@ OpenKeylet 注册的是本地 `stdio` MCP。Agent 调用时才会启动对应 MC
 
 ## MCP 客户端兼容性
 
-OpenKeylet 的 Agent 接入界面可以检测、连接并修复 **Codex**、**Claude Code**、**Cursor**、**OpenCode** 与 **OpenClaw** 的本地配置。其他 AI 助手或编程 Agent 只要支持本地 `stdio` MCP 服务，也可以使用下方的手动配置接入。
+OpenKeylet 的 Agent 接入界面可以检测、连接并修复 **Codex**、**Claude Code**、**Cursor**、**OpenCode**、**OpenClaw**、**Antigravity** 与 **DeepSeek Harness** 的本地配置。其他 AI 助手或编程 Agent 只要支持本地 `stdio` MCP 服务，也可以使用下方的手动配置接入。
+
+Antigravity 使用 `~/.gemini/config/mcp_config.json`。如果客户端使用其他目录，在启动 OpenKeylet 时设置 `ANTIGRAVITY_CONFIG_DIR`。
+
+DeepSeek Harness 使用 `~/.dsh/profiles` 下已有 profile 的 `cordis.patch.yml`。如果存在多个 profile，在启动 OpenKeylet 时设置 `DSH_PROFILE`。如使用自定义 Harness 根目录，将 `DSH_HOME` 设为绝对路径。注册后重启对应客户端，检查它是否加载了 MCP 服务。
 
 ## 一个项目，多种动作
 

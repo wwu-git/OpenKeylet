@@ -84,7 +84,11 @@ OpenKeylet registers a local `stdio` MCP command. The MCP process starts on dema
 
 ## MCP client compatibility
 
-OpenKeylet's Agent connection screen can detect, connect, and repair local configuration for **Codex**, **Claude Code**, **Cursor**, **OpenCode**, and **OpenClaw**. Other AI assistants and coding agents can connect through the manual configuration below whenever they support a local `stdio` MCP server.
+OpenKeylet's Agent connection screen can detect, connect, and repair local configuration for **Codex**, **Claude Code**, **Cursor**, **OpenCode**, **OpenClaw**, **Antigravity**, and **DeepSeek Harness**. Other AI assistants and coding agents can connect through the manual configuration below whenever they support a local `stdio` MCP server.
+
+Antigravity uses the user MCP configuration at `~/.gemini/config/mcp_config.json`. Set `ANTIGRAVITY_CONFIG_DIR` when launching OpenKeylet if your client uses a different directory.
+
+DeepSeek Harness uses `cordis.patch.yml` in an existing profile under `~/.dsh/profiles`. If more than one profile exists, set `DSH_PROFILE` when launching OpenKeylet. Set `DSH_HOME` to an absolute path for a custom Harness home. Restart the selected client to check that it loads the registered MCP server.
 
 ## One item, several actions
 
