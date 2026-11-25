@@ -21,6 +21,7 @@ type Entry = (PortableConnection, SecretBundle);
 
 #[cfg(any(feature = "gui", test))]
 mod curl;
+mod keepass;
 #[cfg(feature = "gui")]
 pub(crate) use curl::parse_curl;
 
@@ -70,6 +71,7 @@ pub fn parse(bytes: &[u8], format: &str) -> Result<Parsed> {
     let entries = match format {
         "bitwarden" => bitwarden(bytes, &mut preview)?,
         "chrome" => chrome_csv(bytes, &mut preview)?,
+        "keepass" => keepass::parse(bytes, &mut preview)?,
         _ => bail!("Unsupported import format"),
     };
     ensure!(

@@ -2713,6 +2713,12 @@ const importUndoIds = new Map();
 const selectableImportFormats = new Set(['env', 'ssh', 'aws']);
 let migrationBusy = false;
 const migrationWarnings = {
+  keepassHistory: ['已跳过历史版本。', 'Historical versions were skipped.'],
+  keepassAttachments: ['已跳过附件。', 'Attachments were skipped.'],
+  keepassProtected: ['无法读取的受保护字段已跳过。', 'Unreadable protected fields were skipped.'],
+  keepassNonWebUris: ['无法用于填充的网址已存为加密字段。', 'URLs unavailable for autofill were saved as encrypted fields.'],
+  keepassEmptyEntries: ['已跳过没有可导入内容的条目。', 'Entries without importable content were skipped.'],
+  keepassCustomFields: ['已跳过不受支持的自定义字段。', 'Unsupported custom fields were skipped.'],
   nonWebUris: ['非网页地址已保留，设为“不匹配”。','Non-web addresses are preserved with matching disabled.'],
   defaultDomainMatch: ['未指定规则的网址使用主域名匹配；保存的协议和端口必须一致。可在项目内调整。','Unspecified rules use base-domain matching, with matching scheme and port. Edit rules in the item.'],
   unsupportedTotp: ['部分验证码密钥格式尚不支持生成；原始密钥已保留。','Some TOTP formats cannot generate codes yet; their original keys are preserved.'],
@@ -2728,6 +2734,7 @@ function migrationHelp() {
   const help = {
     bitwarden: localized('在 Bitwarden 中导出未加密 JSON，然后选择文件预览。原文件不变；导入的秘密会加密存入本地库。', 'Export unencrypted JSON from Bitwarden, then choose the file to preview. Imported secrets are encrypted locally.'),
     chrome: localized('选择 Chrome 或 Edge 导出的密码 CSV。支持带引号、逗号和多行备注的文件。', 'Choose a password CSV exported by Chrome or Edge. Quoted fields, commas and multiline notes are supported.'),
+    keepass: localized('选择 KeePass 导出的 2.x XML 文件。本机预览，确认后加密保存。内容相同的项目会跳过，同名但内容不同的项目会另存。', 'Choose a KeePass 2.x XML export. Preview it locally and confirm to save it encrypted. Identical items are skipped. Different items with the same name are saved separately.'),
     ssh: localized('选取一个 OpenSSH 配置文件。预览显式主机及路由。需同时选中可用的直连跳板，导入后再配置认证和主机指纹。', 'Choose one OpenSSH config file to preview explicit hosts and routes. Select the direct jump host as well, then configure credentials and host fingerprints after import.'),
     env: localized('只预览变量名。每个选中的变量会在 Env 文件夹中建立一个加密项目。同名项目会跳过。macOS 可按 ⌘⇧. 显示隐藏文件。', 'Preview variable names. Each selected variable becomes an encrypted item in the Env folder. Items with existing names are skipped. On macOS, press ⌘⇧. to show hidden files.'),
     curl: localized('粘贴一条使用 Bearer 或 Basic 认证的 HTTPS cURL 命令。确认后保存服务根地址，凭据会在本机加密保存。', 'Paste one HTTPS cURL command with Bearer or Basic authentication. Confirm to save the service origin and encrypted credentials.'),
@@ -2895,7 +2902,8 @@ $('#migration-select').onclick = async () => {
     if (!result || sequence !== migrationSequence) return;
     migrationId = result.id;
     const p = result.preview;
-    const lines = [localized(`可导入 ${p.total} 项 · Passkey ${p.passkeys} 个`, `${p.total} items · ${p.passkeys} passkeys`),
+    const lines = [format === 'keepass' ? localized(`可导入 ${p.total} 项`, `${p.total} items ready to import`)
+      : localized(`可导入 ${p.total} 项 · Passkey ${p.passkeys} 个`, `${p.total} items · ${p.passkeys} passkeys`),
       ...Object.entries(p.types).map(([type,count]) => `${itemTypeLabel(type)}: ${count}`),
       ...(p.skippedDeleted ? [localized(`跳过回收站项目 ${p.skippedDeleted} 项`, `Skipped ${p.skippedDeleted} deleted items`)] : []),
       ...p.warnings.map(key => migrationWarnings[key] ? localized(...migrationWarnings[key]) : key)];

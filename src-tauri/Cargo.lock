@@ -3874,6 +3874,7 @@ dependencies = [
  "pkcs8 0.11.0",
  "portable-pty",
  "psl",
+ "quick-xml",
  "rcgen",
  "regex",
  "reqwest 0.12.28",

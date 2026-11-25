@@ -57,7 +57,13 @@ try {
       ],trash:[{index:0,name:"Synthetic deleted item",itemType:"login"}]}};
       if(command==="commit_backup_restore") { (fixture.restores ??= []).push(args.selection); return {added:2,merged:0}; }
       if(command==="cancel_backup_restore") { (fixture.restoreCancels ??= []).push(args.id); return; }
-      if(command==="prepare_import") return {id:"fixture-import",preview:{total:4,types:{login:1,card:1,identity:1,secureNote:1},passkeys:1,skippedDeleted:1,warnings:["defaultDomainMatch","passwordHistory"]}};
+      if(command==="prepare_import") {
+        if(args.format==="keepass") {
+          fixture.pendingKeepass="fixture-keepass";
+          return {id:fixture.pendingKeepass,preview:{total:2,types:{login:2},passkeys:0,skippedDeleted:1,warnings:["keepassHistory","keepassProtected"]}};
+        }
+        return {id:"fixture-import",preview:{total:4,types:{login:1,card:1,identity:1,secureNote:1},passkeys:1,skippedDeleted:1,warnings:["defaultDomainMatch","passwordHistory"]}};
+      }
       if(command==="prepare_curl_import") {
         if(args.command.includes("--data")) throw Error("CURL_IMPORT_UNSUPPORTED");
         const authentication=args.command.includes("Bearer")?"bearer":"basic";
@@ -65,7 +71,7 @@ try {
         fixture.pendingCurl=id;
         return {id,preview:{target:"https://api.example.test",authentication}};
       }
-      if(command==="cancel_import") {delete fixture.pendingCurl;return;}
+      if(command==="cancel_import") {delete fixture.pendingCurl;delete fixture.pendingKeepass;return;}
       if(command==="commit_import") {fixture.imports.push(args.id);return {added:4,merged:0};}
       if(command==="prepare_env_import") return {id:args.id,empty:1,multiline:2,rows:[
         {index:0,name:"API_KEY",conflict:false},
@@ -521,6 +527,24 @@ try {
   await page.locator("#migration-modal").waitFor({state:"hidden"});
   assert.deepEqual(await page.evaluate(()=>fixture.imports),["fixture-import"]);
   await page.locator("#migration-open").click();
+  await page.locator("#migration-format").selectOption("keepass");
+  await page.locator("#migration-select").click();
+  const keepassPreview = page.locator("#migration-preview");
+  await keepassPreview.waitFor();
+  assert.match(await keepassPreview.innerText(),/可导入 2 项/);
+  assert.match(await keepassPreview.innerText(),/跳过回收站项目 1 项/);
+  assert.match(await keepassPreview.innerText(),/跳过历史版本/);
+  assert.match(await keepassPreview.innerText(),/受保护字段已跳过/);
+  assert.doesNotMatch(await keepassPreview.innerText(),/Passkey/);
+  await page.locator("#migration-close").click();
+  await page.waitForFunction(()=>!fixture.pendingKeepass);
+  assert.deepEqual(await page.evaluate(()=>fixture.imports),["fixture-import"]);
+  await page.locator("#migration-open").click();
+  await page.locator("#migration-select").click();
+  await page.locator("#migration-confirm").click();
+  await page.locator("#migration-modal").waitFor({state:"hidden"});
+  assert.deepEqual(await page.evaluate(()=>fixture.imports),["fixture-import","fixture-keepass"]);
+  await page.locator("#migration-open").click();
   await page.locator("#migration-format").selectOption("env");
   await page.locator("#migration-select").click();
   const envPreview = page.locator("#migration-preview");
@@ -684,5 +708,5 @@ try {
   await page.screenshot({path:path.join(artifacts,"narrow-card-editor.png")});
   assert.ok(await page.evaluate(()=>document.querySelector("#connection-modal .modal-card").getBoundingClientRect().bottom<=innerHeight));
   assert.deepEqual(errors,[]);
-  console.log(JSON.stringify({ok:true,checks:["combined add/draft selector","draft preservation and recovery","card editor","encrypted field payload","one header search and filter panel with Ctrl/Cmd+F and independent page queries","multiple host and URL addresses, default switching, removal, drafts, failed save and address search","combined keyword, type, exact folder and enabled status filters","unsaved edits survive filtering and are saved as drafts","460px filter controls","multiline secure note","generator inserts password","browser address copy, pairing, launch failures and recovery","backup password flow","multiple website rules","migration preview/cancel/commit","offline cURL preview, cancel, rejection and confirmation","AWS profile preview, cancel, selective import and undo","password history","trash restore and purge from settings","narrow layout"],artifacts},null,2));
+  console.log(JSON.stringify({ok:true,checks:["combined add/draft selector","draft preservation and recovery","card editor","encrypted field payload","one header search and filter panel with Ctrl/Cmd+F and independent page queries","multiple host and URL addresses, default switching, removal, drafts, failed save and address search","combined keyword, type, exact folder and enabled status filters","unsaved edits survive filtering and are saved as drafts","460px filter controls","multiline secure note","generator inserts password","browser address copy, pairing, launch failures and recovery","backup password flow","multiple website rules","migration preview/cancel/commit","KeePass XML preview, cancel and confirmation","offline cURL preview, cancel, rejection and confirmation","AWS profile preview, cancel, selective import and undo","password history","trash restore and purge from settings","narrow layout"],artifacts},null,2));
 } finally {await browser.close();server.close();}

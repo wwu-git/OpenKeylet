@@ -22,7 +22,14 @@ async fn main() -> anyhow::Result<()> {
     let website = args.get(3).expect("test origin");
     let vault = Vault::open(root.join("vault"))?;
     vault.set_owner_pin("123456")?;
-    vault.save_browser_login(&json!({"origin":website,"name":"Fixture login","username":"alice","password":"fixture-initial-password"}))?;
+    let keepass = root.join("keepass.xml");
+    if keepass.is_file() {
+        let parsed = mcp_vault::migration::read(&keepass, "keepass")?;
+        let summary = vault.merge_connections(parsed.entries)?;
+        anyhow::ensure!(summary.added == 1, "Expected one KeePass login");
+    } else {
+        vault.save_browser_login(&json!({"origin":website,"name":"Fixture login","username":"alice","password":"fixture-initial-password"}))?;
+    }
     vault.update_settings_patch(SettingsPatch {
         browser_enabled: Some(true),
         browser_port: Some(port),
