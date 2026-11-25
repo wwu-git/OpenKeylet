@@ -14,7 +14,14 @@ use std::{
 use tokio::{process::Command, time::timeout};
 use toml_edit::{Array, DocumentMut, Item, Table, value};
 
-const CLIENT_IDS: [&str; 5] = ["codex", "claude-code", "cursor", "opencode", "openclaw"];
+const CLIENT_IDS: [&str; 6] = [
+    "codex",
+    "claude-code",
+    "cursor",
+    "opencode",
+    "openclaw",
+    "antigravity",
+];
 const STATUS_CLI_TIMEOUT: Duration = Duration::from_secs(3);
 const ACTION_CLI_TIMEOUT: Duration = Duration::from_secs(20);
 const OPENKEYLET_INSTRUCTION_START: &str = "<!-- OPENKEYLET MANAGED INSTRUCTION START -->";
@@ -61,6 +68,7 @@ pub struct AgentRegistry {
     opencode_config_explicit: bool,
     opencode_instruction_dir: PathBuf,
     openclaw_config: PathBuf,
+    antigravity_config: PathBuf,
     path_dirs: Vec<PathBuf>,
     app_data: PathBuf,
     local_app_data: PathBuf,
@@ -93,6 +101,8 @@ impl AgentRegistry {
                 .join("opencode")
         });
         let openclaw_config = resolve_openclaw_config(&home, env_path("OPENCLAW_CONFIG_PATH"));
+        let antigravity_config =
+            resolve_antigravity_config(&home, env_path("ANTIGRAVITY_CONFIG_DIR"));
         Ok(Self {
             executable: normalize_path(executable),
             home,
@@ -103,6 +113,7 @@ impl AgentRegistry {
             opencode_config_explicit,
             opencode_instruction_dir,
             openclaw_config,
+            antigravity_config,
             path_dirs,
             app_data,
             local_app_data,
@@ -137,6 +148,7 @@ impl AgentRegistry {
             opencode_config_explicit,
             opencode_instruction_dir: home.join(".config").join("opencode"),
             openclaw_config: resolve_openclaw_config(&home, None),
+            antigravity_config: resolve_antigravity_config(&home, None),
             home,
             path_dirs,
         }
@@ -145,14 +157,15 @@ impl AgentRegistry {
     pub async fn list(&self) -> Vec<AgentClientStatus> {
         // CLI-backed clients may need to start a Node process. Scan every client
         // concurrently so a slow or broken CLI cannot serially stall the settings page.
-        let (codex, claude, cursor, opencode, openclaw) = tokio::join!(
+        let (codex, claude, cursor, opencode, openclaw, antigravity) = tokio::join!(
             self.status(CLIENT_IDS[0]),
             self.status(CLIENT_IDS[1]),
             self.status(CLIENT_IDS[2]),
             self.status(CLIENT_IDS[3]),
             self.status(CLIENT_IDS[4]),
+            self.status(CLIENT_IDS[5]),
         );
-        vec![codex, claude, cursor, opencode, openclaw]
+        vec![codex, claude, cursor, opencode, openclaw, antigravity]
     }
 
     pub async fn register(&self, client_ids: &[String]) -> Vec<AgentActionResult> {
@@ -235,7 +248,9 @@ impl AgentRegistry {
     async fn mutate_mcp_client(&self, client_id: &str, action: &str) -> Result<()> {
         match client_id {
             "codex" => self.mutate_codex(action),
-            "claude-code" | "cursor" | "opencode" => self.mutate_json_client(client_id, action),
+            "claude-code" | "cursor" | "opencode" | "antigravity" => {
+                self.mutate_json_client(client_id, action)
+            }
             "openclaw" => self.mutate_cli_client(client_id, action).await,
             _ => unreachable!(),
         }
@@ -278,7 +293,9 @@ impl AgentRegistry {
             "codex" => self.inspect_codex(),
             // Claude's `mcp get` performs a health check and may fetch remote
             // connectors. Inspect the user scope we manage without starting it.
-            "claude-code" | "cursor" | "opencode" => self.inspect_json_client(client_id),
+            "claude-code" | "cursor" | "opencode" | "antigravity" => {
+                self.inspect_json_client(client_id)
+            }
             "openclaw" => {
                 let Some(executable) = executable else {
                     status.state = "error".to_owned();
@@ -506,10 +523,16 @@ impl AgentRegistry {
             if client_id == "claude-code" && entry.get("type").is_some_and(|kind| kind != "stdio") {
                 return Ok(EntryState::Conflict);
             }
-            return Ok(with_legacy_state(
-                classify_command(&command, &args, &self.executable),
-                has_legacy,
-            ));
+            let state = classify_command(&command, &args, &self.executable);
+            if client_id == "antigravity" && state != EntryState::Conflict {
+                if entry.get("serverUrl").is_some() || entry.get("url").is_some() {
+                    bail!("Antigravity's OpenKeylet entry mixes local and remote transports");
+                }
+                if entry.get("disabled").and_then(JsonValue::as_bool) == Some(true) {
+                    return Ok(EntryState::Disabled);
+                }
+            }
+            return Ok(with_legacy_state(state, has_legacy));
         }
 
         let current = document.pointer("/mcp/servers/openkeylet");
@@ -909,6 +932,7 @@ impl AgentRegistry {
             "cursor" => self.home.join(".cursor").join("mcp.json"),
             "opencode" => self.opencode_config_path(),
             "openclaw" => self.openclaw_config.clone(),
+            "antigravity" => self.antigravity_config.clone(),
             _ => self.home.join(".openkeylet").join("unsupported"),
         }
     }
@@ -937,6 +961,7 @@ impl AgentRegistry {
         let names: &[&str] = match client_id {
             "claude-code" => &["claude"],
             "cursor" => &["cursor-agent", "cursor"],
+            "antigravity" => &["agy", "antigravity"],
             _ => &[client_id],
         };
         self.find_named_command(names)
@@ -1036,6 +1061,12 @@ impl AgentRegistry {
                 PathBuf::from("/Applications/OpenCode.app"),
                 self.home.join("Applications/OpenCode.app"),
             ],
+            ("antigravity", "macos") => vec![
+                PathBuf::from("/Applications/Antigravity.app"),
+                PathBuf::from("/Applications/Antigravity IDE.app"),
+                self.home.join("Applications/Antigravity.app"),
+                self.home.join("Applications/Antigravity IDE.app"),
+            ],
             _ => Vec::new(),
         };
         candidates.into_iter().any(|path| path.exists())
@@ -1065,6 +1096,7 @@ impl AgentRegistry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EntryState {
     Available,
+    Disabled,
     Registered,
     Stale,
     Conflict,
@@ -1087,6 +1119,12 @@ fn apply_entry_state(status: &mut AgentClientStatus, state: EntryState) {
             status.state = "available".to_owned();
             status.can_register = true;
             status.message = "Can connect to OpenKeylet".to_owned();
+        }
+        EntryState::Disabled => {
+            status.state = "DISABLED".to_owned();
+            status.can_register = false;
+            status.can_remove = true;
+            status.message = "OpenKeylet is disabled in Antigravity".to_owned();
         }
         EntryState::Registered => {
             status.state = "registered".to_owned();
@@ -1150,7 +1188,7 @@ fn legacy_json_paths(client_id: &str) -> &'static [&'static str] {
 }
 
 fn uses_mcp_servers(client_id: &str) -> bool {
-    matches!(client_id, "claude-code" | "cursor")
+    matches!(client_id, "claude-code" | "cursor" | "antigravity")
 }
 
 fn validate_json_client_config(client_id: &str, document: &JsonValue) -> Result<()> {
@@ -1332,6 +1370,12 @@ fn resolve_openclaw_config(home: &Path, configured: Option<PathBuf>) -> PathBuf 
         .unwrap_or_else(|| home.join(".openclaw").join("openclaw.json"))
 }
 
+fn resolve_antigravity_config(home: &Path, configured: Option<PathBuf>) -> PathBuf {
+    configured
+        .unwrap_or_else(|| home.join(".gemini").join("config"))
+        .join("mcp_config.json")
+}
+
 fn toml_array_strings(array: &Array) -> Vec<String> {
     array
         .iter()
@@ -1508,6 +1552,7 @@ fn display_name(client_id: &str) -> &str {
         "cursor" => "Cursor",
         "opencode" => "OpenCode",
         "openclaw" => "OpenClaw",
+        "antigravity" => "Antigravity",
         _ => "Unknown Agent",
     }
 }
@@ -1947,6 +1992,84 @@ mod tests {
         assert!(removed.contains("// keep"));
         assert!(removed.contains("\"other\""));
         assert!(!removed.contains("\"openkeylet\""));
+    }
+
+    #[tokio::test]
+    async fn antigravity_register_repair_remove_uses_documented_config_and_preserves_other_servers()
+    {
+        let (_temp, registry) = registry();
+        let path = registry.home.join(".gemini/config/mcp_config.json");
+        assert_eq!(registry.config_path("antigravity"), path);
+        let alternate = registry.home.join(".gemini/antigravity/mcp_config.json");
+        for path in [&path, &alternate] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+        }
+        let original = r#"{
+  // keep this
+  "theme": "dark",
+  "mcpServers": { "other": { "command": "other" } }
+}
+"#;
+        fs::write(&path, original).unwrap();
+        fs::write(&alternate, "{}").unwrap();
+        assert_eq!(registry.status("antigravity").await.state, "available");
+
+        let result = registry
+            .register(&["antigravity".to_owned()])
+            .await
+            .remove(0);
+        assert!(result.ok);
+        assert_eq!(result.client.state, "registered");
+        let registered = fs::read_to_string(&path).unwrap();
+        assert!(registered.contains("// keep this"));
+        let mut config: JsonValue =
+            parse_to_serde_value(&registered, &ParseOptions::default()).unwrap();
+        let entry = &mut config["mcpServers"]["openkeylet"];
+        assert_eq!(
+            entry["command"],
+            registry.executable.to_string_lossy().as_ref()
+        );
+        assert_eq!(entry["args"], serde_json::json!(["mcp", "stdio"]));
+        entry["args"] = serde_json::json!(["old-arguments"]);
+        entry["env"] = serde_json::json!({"KEEP": "value"});
+        fs::write(&path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+        assert_eq!(registry.status("antigravity").await.state, "stale");
+
+        assert!(registry.repair("antigravity").await.ok);
+        let repaired: JsonValue =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            repaired["mcpServers"]["openkeylet"]["args"],
+            serde_json::json!(["mcp", "stdio"])
+        );
+        assert_eq!(
+            repaired["mcpServers"]["openkeylet"]["env"],
+            serde_json::json!({"KEEP": "value"})
+        );
+
+        let mut disabled = repaired;
+        disabled["mcpServers"]["openkeylet"]["disabled"] = serde_json::json!(true);
+        fs::write(&path, serde_json::to_string_pretty(&disabled).unwrap()).unwrap();
+        let status = registry.status("antigravity").await;
+        assert_eq!(status.state, "DISABLED");
+        assert!(!status.can_repair);
+        assert!(registry.remove("antigravity").await.ok);
+        let removed: JsonValue = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            removed,
+            serde_json::json!({"theme":"dark","mcpServers":{"other":{"command":"other"}}})
+        );
+        assert_eq!(fs::read_to_string(alternate).unwrap(), "{}");
+    }
+
+    #[test]
+    fn antigravity_config_override_is_used_instead_of_default() {
+        let (_temp, registry) = registry();
+        let override_dir = registry.home.join("antigravity-custom");
+        assert_eq!(
+            resolve_antigravity_config(&registry.home, Some(override_dir.clone())),
+            override_dir.join("mcp_config.json")
+        );
     }
 
     #[tokio::test]
