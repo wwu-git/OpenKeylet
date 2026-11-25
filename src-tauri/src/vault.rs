@@ -809,14 +809,7 @@ impl Vault {
             {
                 bail!("This item changed; refresh before moving it to trash");
             }
-            let connection = document.connections.remove(index);
-            document.trash.insert(
-                0,
-                crate::model::StoredTrashItem {
-                    deleted_at: Utc::now().to_rfc3339(),
-                    connection,
-                },
-            );
+            move_connection_to_trash(document, index);
             Ok(())
         })
     }
@@ -1885,8 +1878,19 @@ where
     }
 }
 
-fn same_item_name(left: &str, right: &str) -> bool {
+pub(crate) fn same_item_name(left: &str, right: &str) -> bool {
     left.trim().to_lowercase() == right.trim().to_lowercase()
+}
+
+pub(crate) fn move_connection_to_trash(document: &mut VaultDocument, index: usize) {
+    let connection = document.connections.remove(index);
+    document.trash.insert(
+        0,
+        crate::model::StoredTrashItem {
+            deleted_at: Utc::now().to_rfc3339(),
+            connection,
+        },
+    );
 }
 
 fn empty_envelope() -> crate::model::SecretEnvelope {

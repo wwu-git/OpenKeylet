@@ -1,3 +1,5 @@
+#[path = "env_import.rs"]
+mod env_import;
 #[path = "owner_session.rs"]
 mod owner_session;
 
@@ -55,12 +57,12 @@ struct PendingImport {
     encrypted: crate::model::SecretEnvelope,
 }
 
-enum BackupRestoreState {
+enum SelectableImportState {
     Preparing(Uuid),
     Ready(PendingImport),
 }
 
-impl BackupRestoreState {
+impl SelectableImportState {
     fn matches(&self, id: Uuid) -> bool {
         match self {
             Self::Preparing(current) => *current == id,
@@ -75,7 +77,9 @@ struct OwnerState {
     pending_private_key: Option<PendingPrivateKey>,
     pending_oci_key: Option<(Uuid, zeroize::Zeroizing<String>)>,
     pending_import: Option<PendingImport>,
-    pending_backup: Option<BackupRestoreState>,
+    pending_backup: Option<SelectableImportState>,
+    pending_env: Option<SelectableImportState>,
+    env_undo: Option<env_import::UndoBatch>,
 }
 
 impl OwnerState {
@@ -85,6 +89,8 @@ impl OwnerState {
         self.pending_oci_key = None;
         self.pending_import = None;
         self.pending_backup = None;
+        self.pending_env = None;
+        self.env_undo = None;
         runtime.clipboard.clear_on_lock(&runtime.app);
     }
 }
@@ -1321,7 +1327,7 @@ async fn prepare_backup_restore(
 ) -> Result<Option<serde_json::Value>, String> {
     let epoch = {
         let mut owner = runtime.authorized_owner().await?;
-        owner.pending_backup = Some(BackupRestoreState::Preparing(id));
+        owner.pending_backup = Some(SelectableImportState::Preparing(id));
         owner.session.epoch()
     };
     let password = zeroize::Zeroizing::new(password);
@@ -1340,11 +1346,11 @@ async fn prepare_backup_restore(
         .map_err(command_error)?
         .map_err(command_error)?;
     let mut owner = runtime.same_owner(epoch).await?;
-    if !matches!(owner.pending_backup, Some(BackupRestoreState::Preparing(current)) if current == id) {
+    if !matches!(owner.pending_backup, Some(SelectableImportState::Preparing(current)) if current == id) {
         return Err("Backup preview changed; choose the file again".into());
     }
     let preview = prepared.preview(&runtime.vault).map_err(command_error)?;
-    owner.pending_backup = Some(BackupRestoreState::Ready(PendingImport {
+    owner.pending_backup = Some(SelectableImportState::Ready(PendingImport {
         id: id.to_string(),
         created: Instant::now(),
         encrypted: runtime.vault.protect_local_state(&prepared).map_err(command_error)?,
@@ -1361,7 +1367,7 @@ async fn commit_backup_restore(
 ) -> Result<ImportSummary, String> {
     let mut owner = runtime.authorized_owner().await?;
     let slot = &mut owner.pending_backup;
-    let Some(BackupRestoreState::Ready(pending)) = slot.as_ref().filter(|state| state.matches(id)) else {
+    let Some(SelectableImportState::Ready(pending)) = slot.as_ref().filter(|state| state.matches(id)) else {
         return Err("Backup preview changed; choose the file again".into());
     };
     if pending.created.elapsed().as_secs() >= 300 {
@@ -1459,6 +1465,103 @@ async fn commit_import(
 async fn cancel_import(runtime: State<'_, AppRuntime>) -> Result<(), String> {
     runtime.owner.lock().await.pending_import = None;
     Ok(())
+}
+
+#[tauri::command]
+async fn prepare_env_import(
+    app: AppHandle,
+    runtime: State<'_, AppRuntime>,
+    id: Uuid,
+) -> Result<Option<env_import::Preview>, String> {
+    let epoch = {
+        let mut owner = runtime.authorized_owner().await?;
+        owner.pending_env = Some(SelectableImportState::Preparing(id));
+        owner.session.epoch()
+    };
+    let result = async {
+        let selected = app.dialog().file().blocking_pick_file();
+        let Some(path) = selected else {
+            return Ok(None);
+        };
+        drop(runtime.same_owner(epoch).await?);
+        let path = path.into_path().map_err(command_error)?;
+        let import = tauri::async_runtime::spawn_blocking(move || env_import::EnvImport::read(&path))
+            .await
+            .map_err(command_error)?
+            .map_err(command_error)?;
+        let mut owner = runtime.same_owner(epoch).await?;
+        if !matches!(owner.pending_env, Some(SelectableImportState::Preparing(current)) if current == id) {
+            return Err("Import preview changed; choose the file again".to_owned());
+        }
+        let preview = import.preview(&runtime.vault, id).map_err(command_error)?;
+        owner.pending_env = Some(SelectableImportState::Ready(PendingImport {
+            id: id.to_string(),
+            created: Instant::now(),
+            encrypted: runtime.vault.protect_local_state(&import).map_err(command_error)?,
+        }));
+        Ok(Some(preview))
+    }
+    .await;
+    if !matches!(result, Ok(Some(_))) {
+        cancel_env_import(runtime, id).await?;
+    }
+    result
+}
+
+#[tauri::command]
+async fn commit_env_import(
+    app: AppHandle,
+    runtime: State<'_, AppRuntime>,
+    id: Uuid,
+    selection: Vec<usize>,
+) -> Result<env_import::CommitSummary, String> {
+    let mut owner = runtime.authorized_owner().await?;
+    let Some(SelectableImportState::Ready(pending)) =
+        owner.pending_env.as_ref().filter(|state| state.matches(id))
+    else {
+        return Err("Import preview changed; choose the file again".into());
+    };
+    if pending.created.elapsed().as_secs() >= 300 {
+        owner.pending_env = None;
+        return Err("Import preview expired; choose the file again".into());
+    }
+    let import: env_import::EnvImport = runtime
+        .vault
+        .unprotect_local_state(&pending.encrypted)
+        .map_err(command_error)?;
+    let (summary, undo) = import.commit(&runtime.vault, selection).map_err(command_error)?;
+    owner.pending_env = None;
+    if undo.is_some() {
+        owner.env_undo = undo;
+        emit_changed(&app);
+    }
+    Ok(summary)
+}
+
+#[tauri::command]
+async fn cancel_env_import(runtime: State<'_, AppRuntime>, id: Uuid) -> Result<(), String> {
+    let mut owner = runtime.owner.lock().await;
+    if owner.pending_env.as_ref().is_some_and(|state| state.matches(id)) {
+        owner.pending_env = None;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn undo_env_import(
+    app: AppHandle,
+    runtime: State<'_, AppRuntime>,
+    id: Uuid,
+) -> Result<env_import::UndoSummary, String> {
+    let mut owner = runtime.authorized_owner().await?;
+    let receipt = owner.env_undo.as_ref().filter(|receipt| receipt.id == id)
+        .ok_or("This import can no longer be undone")?;
+    let summary = receipt.undo(&runtime.vault).map_err(command_error)?;
+    owner.env_undo = None;
+    if summary.removed != 0 {
+        emit_changed(&app);
+    }
+    Ok(summary)
 }
 
 #[tauri::command]
@@ -1802,6 +1905,10 @@ pub fn run_gui() -> Result<()> {
             prepare_import,
             commit_import,
             cancel_import,
+            prepare_env_import,
+            commit_env_import,
+            cancel_env_import,
+            undo_env_import,
             github_backup_status,
             github_backup_account,
             github_backup_generate_key,

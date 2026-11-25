@@ -59,6 +59,14 @@ try {
       if(command==="cancel_backup_restore") { (fixture.restoreCancels ??= []).push(args.id); return; }
       if(command==="prepare_import") return {id:"fixture-import",preview:{total:4,types:{login:1,card:1,identity:1,secureNote:1},passkeys:1,skippedDeleted:1,warnings:["defaultDomainMatch","passwordHistory"]}};
       if(command==="commit_import") {fixture.imports.push(args.id);return {added:4,merged:0};}
+      if(command==="prepare_env_import") return {id:args.id,empty:1,multiline:2,rows:[
+        {index:0,name:"API_KEY",conflict:false},
+        {index:1,name:"KEEP_EXISTING",conflict:true},
+        {index:2,name:"OTHER_KEY",conflict:false},
+      ]};
+      if(command==="cancel_env_import") { (fixture.envCancels ??= []).push(args.id); return; }
+      if(command==="commit_env_import") { (fixture.envImports ??= []).push(args.selection); return {added:1,skipped:0,undoId:"env-undo-fixture"}; }
+      if(command==="undo_env_import") { fixture.envUndo = args.id; return {removed:1,skipped:0}; }
       if(command==="owner_secret_view") return {fields:[]};
       if(command==="delete_connection") {
         const item=state.connections.find(i=>i.id===args.id);
@@ -487,6 +495,28 @@ try {
   await page.locator("#migration-confirm").click();
   await page.locator("#migration-modal").waitFor({state:"hidden"});
   assert.deepEqual(await page.evaluate(()=>fixture.imports),["fixture-import"]);
+  await page.locator("#migration-open").click();
+  await page.locator("#migration-format").selectOption("env");
+  await page.locator("#migration-select").click();
+  const envPreview = page.locator("#migration-preview");
+  const conflict = envPreview.getByRole("checkbox",{name:/KEEP_EXISTING/});
+  await conflict.waitFor();
+  assert.ok(await conflict.isDisabled());
+  assert.equal(await conflict.isChecked(),false);
+  assert.match(await page.locator("#migration-env-status").textContent(), /1/);
+  assert.match(await page.locator("#migration-env-status").textContent(), /2/);
+  assert.equal(await page.evaluate(()=>fixture.envImports?.length ?? 0),0);
+  await page.locator("#migration-close").click();
+  assert.equal(await page.evaluate(()=>fixture.envCancels.length),1);
+  await page.locator("#migration-open").click();
+  await page.locator("#migration-select").click();
+  await envPreview.getByRole("checkbox",{name:/OTHER_KEY/}).uncheck();
+  await page.locator("#migration-confirm").click();
+  await page.locator("#migration-env-undo").click();
+  await page.locator("#migration-env-undo").waitFor({state:"hidden"});
+  assert.deepEqual(await page.evaluate(()=>fixture.envImports),[[0]]);
+  assert.equal(await page.evaluate(()=>fixture.envUndo),"env-undo-fixture");
+  await page.locator("#migration-close").click();
   await page.locator('[data-page="connections"]').click();
   await page.setViewportSize({width:460,height:690});
   await fillItemSearch("");

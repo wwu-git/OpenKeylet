@@ -103,6 +103,7 @@ const staticCopy = [
   ['#reset-pairing-button', 'text', '重置', 'RESET'],
   ['[data-module="SAFE / 05"] .settings-heading h2', 'text', '本地数据', 'LOCAL DATA'],
   ['#migration-open', 'text', '迁入密码库', 'IMPORT VAULT'],
+  ['#migration-format option[value="env"]', 'text', '环境变量 · .env', 'Environment variables · .env'],
   ['[data-module="SAFE / 05"] .settings-heading p', 'text', '用独立备份密码加密导出全部项目与 Passkey，也可恢复旧版备份。', 'Export all items and passkeys encrypted with a separate backup password, or restore an existing backup.'],
   ['#open-data-button', 'text', '打开数据目录', 'OPEN DATA FOLDER'],
   ['#owner-lock-description', 'text', 'PIN 保护明文查看、浏览器密码库访问和 Passkey 验证；模块值默认对 Agent 隐藏。', 'The PIN protects plaintext viewing, browser vault access and passkey verification. Module values are hidden from agents by default.'],
@@ -290,6 +291,10 @@ const api = {
   commitBackupRestore: (id, selection) => invoke('commit_backup_restore', { id, selection }),
   cancelBackupRestore: (id) => invoke('cancel_backup_restore', { id }),
   prepareImport: (format) => invoke('prepare_import', { format }),
+  prepareEnvImport: (id) => invoke('prepare_env_import', { id }),
+  commitEnvImport: (id, selection) => invoke('commit_env_import', { id, selection }),
+  cancelEnvImport: (id) => invoke('cancel_env_import', { id }),
+  undoEnvImport: (id) => invoke('undo_env_import', { id }),
   commitImport: (id) => invoke('commit_import', { id }),
   cancelImport: () => invoke('cancel_import'),
   dataFolder: () => invoke('open_data_folder'),
@@ -477,6 +482,7 @@ function renderOwnerLock() {
   $('#owner-lock-code').textContent = configured ? 'LOCK' : 'INIT';
   $('#owner-unlock-action').textContent = configured ? 'UNLOCK' : 'SET PIN';
   if (locked) {
+    envImportUndoId = null;
     if (!$('#vault-management-modal').classList.contains('hidden')) closeVaultManagement();
     if (!$('#migration-modal').classList.contains('hidden')) closeMigration();
     closeGenerator();
@@ -2694,6 +2700,9 @@ $('#login-uri-list').onclick = event => event.target.closest('[data-remove-uri]'
 
 let migrationId = null;
 let migrationSequence = 0;
+let envImportId = null;
+let envImportUndoId = null;
+let migrationBusy = false;
 const migrationWarnings = {
   nonWebUris: ['非网页地址已保留，设为“不匹配”。','Non-web addresses are preserved with matching disabled.'],
   defaultDomainMatch: ['未指定规则的网址使用主域名匹配；保存的协议和端口必须一致。可在项目内调整。','Unspecified rules use base-domain matching, with matching scheme and port. Edit rules in the item.'],
@@ -2706,15 +2715,70 @@ const migrationWarnings = {
   organization: ['组织项目将成为本地个人项目，不保留共享权限。','Organization items become local personal items without sharing permissions.'],
 };
 function migrationHelp() {
-  $('#migration-help').textContent = $('#migration-format').value === 'bitwarden'
-    ? localized('在 Bitwarden 中导出未加密 JSON，然后选择文件预览。原文件不变；导入的秘密会加密存入本地库。', 'Export unencrypted JSON from Bitwarden, then choose the file to preview. The source is unchanged; imported secrets are encrypted locally.')
-    : localized('选择 Chrome 或 Edge 导出的密码 CSV。支持带引号、逗号和多行备注的文件。', 'Choose a password CSV exported by Chrome or Edge. Quoted fields, commas and multiline notes are supported.');
+  const format = $('#migration-format').value;
+  const help = {
+    bitwarden: localized('在 Bitwarden 中导出未加密 JSON，然后选择文件预览。原文件不变；导入的秘密会加密存入本地库。', 'Export unencrypted JSON from Bitwarden, then choose the file to preview. Imported secrets are encrypted locally.'),
+    chrome: localized('选择 Chrome 或 Edge 导出的密码 CSV。支持带引号、逗号和多行备注的文件。', 'Choose a password CSV exported by Chrome or Edge. Quoted fields, commas and multiline notes are supported.'),
+    env: localized('只预览变量名。每个选中的变量会在 Env 文件夹中建立一个加密项目。同名项目会跳过。macOS 可按 ⌘⇧. 显示隐藏文件。', 'Preview variable names. Each selected variable becomes an encrypted item in the Env folder. Items with existing names are skipped. On macOS, press ⌘⇧. to show hidden files.'),
+  };
+  $('#migration-help').textContent = help[format];
+  $('#migration-preview').setAttribute('role', format === 'env' ? 'group' : 'status');
+  $('#migration-preview').setAttribute('aria-label', localized('导入预览', 'Import preview'));
+  $('#migration-env-undo').textContent = localized('撤销本批新增', 'Undo added items');
+  $('#migration-env-undo').title = localized('本次解锁期间可撤销最近一次导入。', 'Undo the latest import during this unlocked session.');
+  $('#migration-env-undo').classList.toggle('hidden', format !== 'env' || !envImportUndoId);
 }
 function resetMigration() {
   migrationSequence++; migrationId = null;
+  if (envImportId) api.cancelEnvImport(envImportId).catch(() => {});
+  envImportId = null;
   $('#migration-preview').replaceChildren(); $('#migration-preview').classList.add('hidden');
   $('#migration-confirm').classList.add('hidden');
   $('#migration-error').classList.add('hidden');
+  $('#migration-env-status').classList.add('hidden');
+}
+function setMigrationBusy(busy) {
+  migrationBusy = busy;
+  $('#migration-preview').inert = busy;
+  for (const key of ['select', 'format', 'close', 'env-undo']) $(`#migration-${key}`).disabled = busy;
+  updateEnvSelection();
+}
+function updateEnvSelection() {
+  const env = $('#migration-format').value === 'env';
+  $('#migration-confirm').disabled = migrationBusy || (env && !$('#migration-preview input:checked'));
+}
+function renderEnvImport({ rows, empty, multiline }) {
+  const preview = $('#migration-preview');
+  for (const row of rows) {
+    const label = document.createElement('label');
+    label.className = 'backup-restore-row';
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.value = row.index;
+    box.disabled = row.conflict;
+    box.checked = !box.disabled;
+    const name = document.createElement('span');
+    name.textContent = row.name;
+    if (row.conflict) {
+      const status = document.createElement('small');
+      status.textContent = localized('名称重复，跳过', 'Duplicate name, skipped');
+      name.append(status);
+    }
+    label.append(box, name);
+    preview.append(label);
+  }
+  preview.classList.remove('hidden');
+  $('#migration-confirm').classList.toggle('hidden', !rows.some(row => !row.conflict));
+  updateEnvSelection();
+  const notices = [];
+  if (empty) notices.push(localized(`跳过 ${empty} 个空值变量。`, `Skipped ${empty} empty variables.`));
+  if (multiline) notices.push(localized(`跳过 ${multiline} 个多行值变量。`, `Skipped ${multiline} variables with multiline values.`));
+  if (notices.length) showEnvImportStatus(notices.join(' '));
+}
+function showEnvImportStatus(message) {
+  const status = $('#migration-env-status');
+  status.textContent = message;
+  status.classList.remove('hidden');
 }
 function closeMigration() {
   resetMigration(); $('#migration-modal').classList.add('hidden');
@@ -2727,11 +2791,21 @@ $('#migration-open').onclick = async () => {
 };
 $('#migration-close').onclick = closeMigration;
 $('#migration-format').onchange = () => { resetMigration(); api.cancelImport().catch(() => {}); migrationHelp(); };
+$('#migration-preview').onchange = updateEnvSelection;
 $('#migration-select').onclick = async () => {
   resetMigration(); const sequence = migrationSequence;
-  $('#migration-select').disabled = true;
+  const format = $('#migration-format').value;
+  setMigrationBusy(true);
   try {
-    const result = await api.prepareImport($('#migration-format').value);
+    if (format === 'env') {
+      const id = crypto.randomUUID();
+      envImportId = id;
+      const result = await api.prepareEnvImport(id);
+      if (!result || sequence !== migrationSequence) return;
+      renderEnvImport(result);
+      return;
+    }
+    const result = await api.prepareImport(format);
     if (!result || sequence !== migrationSequence) return;
     migrationId = result.id;
     const p = result.preview;
@@ -2743,14 +2817,49 @@ $('#migration-select').onclick = async () => {
     preview.classList.remove('hidden'); $('#migration-confirm').classList.toggle('hidden', p.total === 0);
   } catch(error) {
     if (sequence === migrationSequence) { $('#migration-error').textContent=cleanError(error); $('#migration-error').classList.remove('hidden'); }
-  } finally { $('#migration-select').disabled = false; }
+  } finally { setMigrationBusy(false); }
 };
 $('#migration-confirm').onclick = async () => {
-  if (!migrationId) return;
-  $('#migration-confirm').disabled = true;
-  try { const result = await api.commitImport(migrationId); closeMigration(); toastImportSummary(result); await refresh(); }
-  catch(error) { $('#migration-error').textContent=cleanError(error); $('#migration-error').classList.remove('hidden'); }
-  finally { $('#migration-confirm').disabled = false; }
+  if (migrationBusy || (!migrationId && !envImportId)) return;
+  const sequence = migrationSequence;
+  setMigrationBusy(true);
+  try {
+    if (envImportId) {
+      const selection = $$('#migration-preview input:checked').map(box => Number(box.value));
+      const previewConflicts = $$('#migration-preview input:disabled').length;
+      const result = await api.commitEnvImport(envImportId, selection);
+      if (sequence === migrationSequence) {
+        envImportId = null;
+        if (result.undoId) envImportUndoId = result.undoId;
+        resetMigration();
+        migrationHelp();
+        const skipped = result.skipped + previewConflicts;
+        showEnvImportStatus(localized(`已导入 ${result.added} 项，跳过 ${skipped} 个同名项。`, `Imported ${result.added} items. Skipped ${skipped} name conflicts.`));
+      }
+      await refresh();
+      return;
+    }
+    const result = await api.commitImport(migrationId); closeMigration(); toastImportSummary(result); await refresh();
+  }
+  catch(error) { if (sequence === migrationSequence) { $('#migration-error').textContent=cleanError(error); $('#migration-error').classList.remove('hidden'); } }
+  finally { setMigrationBusy(false); }
+};
+$('#migration-env-undo').onclick = async () => {
+  if (!envImportUndoId || migrationBusy) return;
+  const sequence = migrationSequence;
+  setMigrationBusy(true);
+  try {
+    const result = await api.undoEnvImport(envImportUndoId);
+    envImportUndoId = null;
+    if (sequence === migrationSequence) {
+      resetMigration();
+      migrationHelp();
+      showEnvImportStatus(localized(`已移入回收站 ${result.removed} 项，保留 ${result.skipped} 项。`, `Moved ${result.removed} items to Trash. Kept ${result.skipped} items.`));
+    }
+    await refresh();
+  } catch (error) {
+    if (sequence === migrationSequence) { $('#migration-error').textContent=cleanError(error); $('#migration-error').classList.remove('hidden'); }
+  } finally { setMigrationBusy(false); }
 };
 
 document.addEventListener('click', async (event) => {
