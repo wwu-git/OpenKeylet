@@ -139,6 +139,13 @@ const staticCopy = [
   ['[data-item-template="aws"] > span', 'html', 'AWS API<small>SigV4 本地签名，操作由 Agent 决定</small>', 'AWS API<small>Local SigV4 signing; the agent chooses operations</small>'],
   ['[data-item-template="oci"] > span', 'html', 'OCI API<small>本地签名代执行，接口和操作由 Agent 决定</small>', 'OCI API<small>Local signing; the agent chooses API operations</small>'],
   ['#api-service-title', 'text', '选择服务', 'Choose a service'],
+  ['#totp-qr-title', 'text', '导入 2FA 二维码', 'Import 2FA QR image'],
+  ['#totp-qr-choose', 'text', '选取图片', 'Choose image'],
+  ['#totp-qr-paste-label', 'text', '在此粘贴剪贴板图片', 'Paste a clipboard image here'],
+  ['#totp-qr-issuer-label', 'text', '发行方', 'Issuer'],
+  ['#totp-qr-account-label', 'text', '账户', 'Account'],
+  ['#totp-qr-cancel', 'text', '取消', 'Cancel'],
+  ['#totp-qr-confirm', 'text', '使用此密钥', 'Use setup key'],
   ['#api-service-modal [data-close-service-picker]', 'aria-label', '关闭', 'Close'],
   ['#api-service-list', 'aria-label', '服务目录', 'Services'],
   ['#api-service-search-label', 'text', '搜索服务', 'Search services'],
@@ -305,6 +312,7 @@ let creationMode = 'add';
 let currentModules = [];
 let apiServiceCatalog;
 let apiServicePicker = null;
+let totpQrImport = null;
 let itemEditorGeneration = 0;
 let editorDrafts = [];
 let currentDraftId = '';
@@ -1414,6 +1422,7 @@ function renderModules() {
         : `<div class="secret-input-control module-secret-control"><input class="input" data-secret-value type="password" autocomplete="off" value="${escapeHtml(module.secretValue || '')}" placeholder="${placeholder}" /></div>`;
       actions = `${secretActionButton('reveal')}${secretActionButton('copy')}`;
       if (module.kind === 'password') control += `<button class="small-button" type="button" data-generate-password>${localized('生成密码', 'GENERATE')}</button>`;
+      if (module.kind === 'totp') control += `<button class="small-button" type="button" data-import-totp-qr>${localized('导入二维码图片', 'Import QR image')}</button>`;
     } else if (module.kind === 'host' || module.kind === 'url') {
       const addresses = [module.value || '', ...(module.alternateValues || [])];
       const placeholder = module.kind === 'url' ? 'https://api.example.com/v1/' : 'host.example.com';
@@ -1449,6 +1458,104 @@ const API_SERVICE_CATEGORIES = [
   ['', '全部服务', 'All services'], ['ai', 'AI 服务', 'AI services'],
   ['developer', '开发工具', 'Developer tools'], ['cloud', '云服务', 'Cloud services'], ['payments', '支付', 'Payments'],
 ];
+
+function totpQrTarget(importer) {
+  if (!ownerLockState.unlocked || importer.generation !== itemEditorGeneration) return null;
+  return $$('.module-row[data-kind="totp"]', $('#module-list')).find(row => row.dataset.moduleId === importer.moduleId);
+}
+
+function resetTotpQrPreview() {
+  $('#totp-qr-status').textContent = '';
+  $('#totp-qr-issuer').textContent = '';
+  $('#totp-qr-account').textContent = '';
+  $('#totp-qr-preview').hidden = true;
+  $('#totp-qr-confirm').disabled = true;
+}
+
+function closeTotpQrImport(restoreFocus = true) {
+  const importer = totpQrImport;
+  if (!importer) return;
+  totpQrImport = null;
+  $('#totp-qr-dialog').close();
+  $('#totp-qr-image').value = '';
+  $('#totp-qr-paste').value = '';
+  resetTotpQrPreview();
+  if (restoreFocus) totpQrTarget(importer)?.querySelector('[data-import-totp-qr]')?.focus({ preventScroll: true });
+}
+
+async function importTotpQrImage(file) {
+  if (!file || !totpQrImport) return;
+  const importer = { ...totpQrImport, uri: null };
+  totpQrImport = importer;
+  resetTotpQrPreview();
+  const status = $('#totp-qr-status');
+  status.textContent = localized('正在识别图片…', 'Reading image…');
+  let uri;
+  try {
+    uri = await decodeTotpQrImage(file);
+  } catch {
+    uri = null;
+  }
+  if (totpQrImport !== importer) return;
+  if (!uri) {
+    status.textContent = localized('未找到二维码。请选择清晰的图片，大小不超过 10 MB。', 'No QR code found. Choose a clear image up to 10 MB.');
+    return;
+  }
+  try {
+    const { issuer, account } = await invoke('preview_totp_uri', { uri });
+    if (totpQrImport !== importer) return;
+    const row = totpQrTarget(importer);
+    if (!row) { closeTotpQrImport(false); return; }
+    importer.uri = uri;
+    $('#totp-qr-issuer').textContent = issuer || localized('未提供', 'Not provided');
+    $('#totp-qr-account').textContent = account || localized('未提供', 'Not provided');
+    $('#totp-qr-preview').hidden = false;
+    $('#totp-qr-confirm').disabled = false;
+    status.textContent = $('[data-secret-value]', row).value
+      ? localized('保存项目后，此密钥将替换原有密钥。', 'Saving the item will replace its existing setup key.')
+      : localized('确认后保存项目即可使用验证码。', 'Confirm, then save the item to use the code.');
+  } catch {
+    if (totpQrImport === importer) {
+      status.textContent = localized('此二维码不包含受支持的 TOTP 设置密钥。', 'This QR code does not contain a supported TOTP setup key.');
+    }
+  }
+}
+
+$('#totp-qr-choose').addEventListener('click', () => $('#totp-qr-image').click());
+$('#totp-qr-image').addEventListener('change', ({ target }) => {
+  const file = target.files[0];
+  target.value = '';
+  void importTotpQrImage(file);
+});
+$('#totp-qr-dialog').addEventListener('paste', event => {
+  if (!totpQrImport) return;
+  event.preventDefault();
+  const clipboard = event.clipboardData;
+  const file = [...(clipboard?.files || [])].find(file => file.type.startsWith('image/'))
+    || [...(clipboard?.items || [])].find(item => item.type.startsWith('image/'))?.getAsFile();
+  if (file) void importTotpQrImage(file);
+  else {
+    resetTotpQrPreview();
+    totpQrImport = { ...totpQrImport, uri: null };
+    $('#totp-qr-status').textContent = localized('剪贴板里没有图片。', 'The clipboard contains no image.');
+  }
+});
+$('#totp-qr-paste').addEventListener('beforeinput', event => event.preventDefault());
+$('#totp-qr-cancel').addEventListener('click', () => closeTotpQrImport());
+$('#totp-qr-dialog').addEventListener('cancel', event => {
+  event.preventDefault();
+  closeTotpQrImport();
+});
+$('#totp-qr-confirm').addEventListener('click', () => {
+  const importer = totpQrImport;
+  if (!importer?.uri) return;
+  const row = totpQrTarget(importer);
+  if (!row) { closeTotpQrImport(false); return; }
+  $('[data-secret-value]', row).value = importer.uri;
+  syncModuleDraft();
+  renderModules();
+  closeTotpQrImport();
+});
 
 function moduleAddresses(module) {
   return [module.value || '', ...(module.alternateValues || [])];
@@ -2046,6 +2153,7 @@ async function openEditor(item = null, draft = null) {
 
 function closeEditor() {
   itemEditorGeneration++;
+  closeTotpQrImport(false);
   closeApiServicePicker(false);
   moduleKeyInput = null;
   if (moduleKeyStaging) moduleKeyStaging.cancelled = true;
@@ -2700,6 +2808,13 @@ document.addEventListener('click', async (event) => {
     const input = copyInput ? $(`#${copyInput.dataset.copyInput}`) : $('[data-secret-value], [data-module-value]', copyModule.closest('.module-row'));
     try { await api.copyOwnerValue(input.value); toast(localized('已复制', 'Copied')); } catch (error) { toast(cleanError(error), 'error'); }
   }
+  const totpQrButton = event.target.closest('[data-import-totp-qr]');
+  if (totpQrButton && ownerLockState.unlocked && !totpQrImport) {
+    totpQrImport = { moduleId: totpQrButton.closest('.module-row').dataset.moduleId, generation: itemEditorGeneration, uri: null };
+    $('#totp-qr-dialog').showModal();
+    $('#totp-qr-paste').focus();
+    return;
+  }
   const serviceButton = event.target.closest('[data-select-api-service]');
   if (serviceButton) { await openApiServicePicker(serviceButton); return; }
   if (event.target.closest('[data-close-service-picker]') || event.target === $('#api-service-modal')) { closeApiServicePicker(); return; }
@@ -3270,6 +3385,7 @@ document.addEventListener('paste', (event) => {
 });
 
 document.addEventListener('keydown', (event) => {
+  if (totpQrImport) return;
   if (apiServicePicker) {
     if (event.key === 'Escape') { event.preventDefault(); closeApiServicePicker(); return; }
     if (event.key === 'Tab') {

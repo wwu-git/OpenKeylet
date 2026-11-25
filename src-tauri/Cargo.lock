@@ -3870,6 +3870,7 @@ dependencies = [
  "jsonc-parser",
  "keyring",
  "p256 0.13.2",
+ "percent-encoding",
  "pkcs8 0.11.0",
  "portable-pty",
  "psl",

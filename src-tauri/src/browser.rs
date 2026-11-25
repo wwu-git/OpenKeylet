@@ -774,6 +774,48 @@ fn unix_millis() -> u64 {
         .as_millis() as u64
 }
 
+#[cfg(any(feature = "gui", test))]
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct TotpUriPreview {
+    issuer: String,
+    account: String,
+}
+
+#[cfg(any(feature = "gui", test))]
+pub(crate) fn preview_totp_uri(uri: &str) -> Result<TotpUriPreview> {
+    let uri = uri.trim();
+    anyhow::ensure!(
+        uri.len() <= 4096 && uri.starts_with("otpauth://totp/"),
+        "Expected a TOTP setup URI"
+    );
+    let parsed = url::Url::parse(uri).context("Invalid TOTP setup URI")?;
+    let label = percent_encoding::percent_decode_str(parsed.path().trim_start_matches('/'))
+        .decode_utf8()
+        .context("Invalid TOTP account label")?;
+    let (label_issuer, account) = label.split_once(':').unwrap_or(("", &label));
+    let issuer_parameter = parsed
+        .query_pairs()
+        .find_map(|(name, value)| (name == "issuer").then(|| value.into_owned()));
+    let issuer = issuer_parameter
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(label_issuer.trim());
+    let account = account.trim();
+    anyhow::ensure!(
+        !account.is_empty()
+            && account.chars().count() <= 255
+            && issuer.chars().count() <= 255
+            && !account.chars().chain(issuer.chars()).any(char::is_control),
+        "Invalid TOTP account or issuer"
+    );
+    let _ = totp_at(uri, 0)?;
+    Ok(TotpUriPreview {
+        issuer: issuer.to_owned(),
+        account: account.to_owned(),
+    })
+}
+
 pub fn current_totp(secret: &str) -> Result<String> {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -874,6 +916,23 @@ fn decode_base32(value: &str) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn totp_import_previews_account_and_uses_the_autofill_validation() {
+        let uri = "otpauth://totp/Test%3Aalice%2Bdemo%40example.test?secret=JBSWY3DPEHPK3PXP&issuer=Test&digits=8&period=60&algorithm=SHA256";
+        let preview = preview_totp_uri(uri).unwrap();
+        assert_eq!(preview.issuer, "Test");
+        assert_eq!(preview.account, "alice+demo@example.test");
+        assert_eq!(totp_at(uri, 0).unwrap().len(), 8);
+        for invalid in [
+            uri.replace("totp/", "hotp/"),
+            uri.replace("digits=8", "digits=9"),
+            uri.replace("issuer=Test", "issuer=Test&secret=JBSWY3DPEHPK3PXP"),
+            uri.replace("Test%3Aalice", "Test%3A%00alice"),
+        ] {
+            assert!(preview_totp_uri(&invalid).is_err());
+        }
+    }
 
     #[test]
     fn otpauth_uses_rfc6238_algorithms_digits_and_period() {

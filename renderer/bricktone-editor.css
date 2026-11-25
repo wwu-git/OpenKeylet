@@ -156,7 +156,8 @@
 #connection-modal .module-control { gap: 4px; }
 #connection-modal .secret-input-control, #connection-modal .module-key-control { min-height: 28px; }
 #connection-modal .module-key-control { height: 28px; background: var(--ui-well-face); box-shadow: var(--ui-well-shadow); }
-#connection-modal .module-control > [data-generate-password] { height: var(--module-action-size); min-height: var(--module-action-size); font-size: 8px; }
+#connection-modal .module-control > :is([data-generate-password], [data-import-totp-qr]) { height: var(--module-action-size); min-height: var(--module-action-size); font-size: 8px; }
+#connection-modal .module-control > [data-import-totp-qr] { width: auto; padding: 0 8px; white-space: nowrap; }
 #connection-modal .module-empty { min-height: 40px; padding: 8px; background: transparent; }
 #connection-modal .module-empty :is(b, span) { font-size: 9px; }
 #connection-modal .login-websites { margin: 12px 0; padding: 0 8px; border-radius: var(--radius); box-shadow: var(--ui-workbench-well-shadow); font-size: 10px; }

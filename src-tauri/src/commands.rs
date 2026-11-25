@@ -341,6 +341,16 @@ async fn copy_owner_value(
 }
 
 #[tauri::command]
+async fn preview_totp_uri(
+    runtime: State<'_, AppRuntime>,
+    uri: String,
+) -> Result<crate::browser::TotpUriPreview, String> {
+    let _owner = runtime.authorized_owner().await?;
+    let uri = zeroize::Zeroizing::new(uri);
+    crate::browser::preview_totp_uri(&uri).map_err(|_| "invalid_totp_uri".to_owned())
+}
+
+#[tauri::command]
 fn api_service_catalog() -> Vec<crate::api_catalog::ApiService> {
     crate::api_catalog::service_catalog()
 }
@@ -1741,6 +1751,7 @@ pub fn run_gui() -> Result<()> {
             save_editor_draft,
             delete_editor_draft,
             copy_owner_value,
+            preview_totp_uri,
             save_connection,
             ssh_host_trust,
             set_ssh_host_trust,

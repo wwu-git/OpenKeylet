@@ -1454,6 +1454,15 @@ html.platform-macos .nav-item small { line-height: 7px; }
 
 .modal-footer { display: flex; flex: 0 0 auto; min-height: 48px; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 10px; background: var(--chassis); border-top: 0; }
 .modal-footer .button { min-height: 32px; }
+
+#totp-qr-dialog { width: min(420px, calc(100% - 24px)); margin: auto; padding: 0; color: var(--ink); }
+#totp-qr-dialog:not([open]) { display: none; }
+#totp-qr-dialog::backdrop { background: rgb(15 15 15 / 76%); }
+#totp-qr-dialog .field { display: block; margin-top: 12px; }
+#totp-qr-dialog .textarea { display: block; width: 100%; min-height: 36px; resize: none; }
+#totp-qr-status:empty { display: none; }
+#totp-qr-preview:not([hidden]) { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 12px; margin: 10px 0 0; }
+#totp-qr-preview dd { margin: 0; overflow-wrap: anywhere; }
 .secret-hint { display: flex; max-width: 250px; align-items: center; gap: 6px; color: var(--muted); font-size: 9px; }
 .secret-hint svg { flex: 0 0 auto; width: 13px; height: 13px; color: var(--orange-dark); }
 

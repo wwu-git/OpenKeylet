@@ -303,6 +303,27 @@
       </div>
     </div>
 
+    <dialog class="modal-card" id="totp-qr-dialog" aria-labelledby="totp-qr-title">
+      <div class="modal-header"><h2 id="totp-qr-title">Import TOTP QR image</h2></div>
+      <div class="form-scroll">
+        <button class="button quiet" id="totp-qr-choose" type="button">Choose image</button>
+        <input id="totp-qr-image" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/tiff" hidden />
+        <label class="field">
+          <span id="totp-qr-paste-label">Paste an image from the clipboard</span>
+          <textarea class="input textarea" id="totp-qr-paste" rows="1" autocomplete="off" spellcheck="false" autofocus></textarea>
+        </label>
+        <p id="totp-qr-status" role="status"></p>
+        <dl id="totp-qr-preview" hidden>
+          <dt id="totp-qr-issuer-label">Issuer</dt><dd id="totp-qr-issuer"></dd>
+          <dt id="totp-qr-account-label">Account</dt><dd id="totp-qr-account"></dd>
+        </dl>
+      </div>
+      <div class="modal-footer">
+        <button class="button quiet" id="totp-qr-cancel" type="button">Cancel</button>
+        <button class="button primary" id="totp-qr-confirm" type="button" disabled>Use setup key</button>
+      </div>
+    </dialog>
+
     <div class="modal-backdrop hidden api-service-modal" id="api-service-modal" role="dialog" aria-modal="true" aria-labelledby="api-service-title">
       <div class="modal-card">
         <div class="modal-header"><h2 id="api-service-title">Choose a service</h2><button type="button" class="icon-button" data-close-service-picker aria-label="Close">×</button></div>
@@ -426,6 +447,8 @@
     <script src="lettering.js"></script>
     <script src="github-backup.js"></script>
     <script src="certificates.js"></script>
+    <script src="qr-decoder.js"></script>
+    <script src="totp-qr.js"></script>
     <script src="app.js"></script>
   </body>
 </html>
