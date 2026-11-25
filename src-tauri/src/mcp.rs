@@ -1,4 +1,8 @@
 use crate::{
+    action_workflow::{
+        ActionCapabilitiesInput, ActionResponse, MissingInput, ProjectCandidate, SelectedProject,
+        SelectionReason, UnavailableCode,
+    },
     browser::{BrowserBridge, current_totp},
     desktop,
     executor::{
@@ -39,6 +43,13 @@ pub struct VaultMcp {
     terminal_items: Arc<RwLock<HashMap<Uuid, Uuid>>>,
     client_name: Arc<RwLock<String>>,
     tool_router: ToolRouter<Self>,
+}
+
+enum ProjectMatch {
+    Selected(DecryptedConnection, SelectionReason),
+    Ambiguous(Vec<ProjectCandidate>),
+    NotFound(Vec<ProjectCandidate>),
+    NoCompatibleProject,
 }
 
 impl std::fmt::Debug for VaultMcp {
@@ -359,66 +370,118 @@ impl VaultMcp {
         query: &str,
         capability: Option<&str>,
     ) -> Result<DecryptedConnection, String> {
+        self.resolve_action_project(query, None, capability)
+    }
+
+    fn match_action_project(
+        &self,
+        query: &str,
+        item_id: Option<Uuid>,
+        capability: Option<&str>,
+    ) -> Result<ProjectMatch, String> {
+        self.match_action_project_where(query, item_id, capability, |_| true)
+    }
+
+    fn match_action_project_where(
+        &self,
+        query: &str,
+        item_id: Option<Uuid>,
+        capability: Option<&str>,
+        eligible: impl Fn(&DecryptedConnection) -> bool,
+    ) -> Result<ProjectMatch, String> {
         let query = query.trim();
-        if query.is_empty()
-            && let Some(connection) = self.active_connection_for_action(capability)
-        {
-            return Ok(connection);
+        if item_id.is_some() && !query.is_empty() {
+            return Err("Provide item or itemId, not both".to_owned());
         }
-        let connections = self
+        if query.is_empty() && item_id.is_none()
+            && let Some(connection) = self.active_connection_for_action(capability)
+            && eligible(&connection)
+        {
+            return Ok(ProjectMatch::Selected(connection, SelectionReason::Session));
+        }
+        let mut connections = self
             .vault
             .list_decrypted_connections()
             .map_err(|error| error.to_string())?
             .into_iter()
             .filter(|connection| {
-                connection.stored.enabled && connection_supports_action(connection, capability)
+                connection.stored.enabled
+                    && connection_supports_action(connection, capability)
+                    && eligible(connection)
             })
             .collect::<Vec<_>>();
-        if query.is_empty() {
-            return match connections.len() {
-                0 => Err(match capability {
-                    Some(capability) => {
-                        format!(
-                            "No enabled and supported {} action-capable OpenKeylet project",
-                            action_label(capability)
-                        )
-                    }
-                    None => "No OpenKeylet project is available for Agent use".to_owned(),
-                }),
-                1 => {
-                    let connection = connections.into_iter().next().expect("length checked");
-                    self.bind_active_item(connection.stored.id);
-                    Ok(connection)
-                }
-                _ => Err(format!(
-                    "Multiple OpenKeylet projects are available:{}; specify item",
-                    connections
-                        .iter()
-                        .map(|connection| connection.stored.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join("、")
+        if let Some(item_id) = item_id {
+            return match connections
+                .iter()
+                .position(|connection| connection.stored.id == item_id)
+            {
+                Some(index) => Ok(ProjectMatch::Selected(
+                    connections.remove(index),
+                    SelectionReason::Explicit,
                 )),
+                None => Ok(ProjectMatch::NotFound(project_candidates(&connections))),
             };
         }
+        if query.is_empty() {
+            return match connections.len() {
+                0 => Ok(ProjectMatch::NoCompatibleProject),
+                1 => Ok(ProjectMatch::Selected(connections.remove(0), SelectionReason::Unique)),
+                _ => Ok(ProjectMatch::Ambiguous(project_candidates(&connections))),
+            };
+        }
+        let candidates = project_candidates(&connections);
         let mut matches = filter_connections_by_query(connections, query);
-        if matches.len() != 1 {
+        match matches.len() {
+            0 => Ok(ProjectMatch::NotFound(candidates)),
+            1 => Ok(ProjectMatch::Selected(matches.remove(0), SelectionReason::Explicit)),
+            _ => Ok(ProjectMatch::Ambiguous(project_candidates(&matches))),
+        }
+    }
+
+    fn resolve_action_project(
+        &self,
+        query: &str,
+        item_id: Option<Uuid>,
+        capability: Option<&str>,
+    ) -> Result<DecryptedConnection, String> {
+        let query = query.trim();
+        let matched = self.match_action_project(query, item_id, capability)?;
+        if (!query.is_empty() || item_id.is_some()) && !matches!(matched, ProjectMatch::Selected(..))
+        {
             self.clear_active_item();
         }
-        match matches.len() {
-            0 => Err(format!("No enabled OpenKeylet project found:{query}")),
-            1 => {
-                let connection = matches.remove(0);
-                self.bind_active_item(connection.stored.id);
+        match matched {
+            ProjectMatch::Selected(connection, reason) => {
+                if !matches!(reason, SelectionReason::Session) {
+                    self.bind_active_item(connection.stored.id);
+                }
                 Ok(connection)
             }
-            _ => Err(format!(
-                "The project name matches multiple results:{}; use a more complete name",
-                matches
+            ProjectMatch::NoCompatibleProject => Err(match capability {
+                Some(capability) => {
+                    format!(
+                        "No enabled and supported {} action-capable OpenKeylet project",
+                        action_label(capability)
+                    )
+                }
+                None => "No OpenKeylet project is available for Agent use".to_owned(),
+            }),
+            ProjectMatch::NotFound(_) if item_id.is_some() => {
+                Err("No enabled and compatible OpenKeylet project matches itemId".to_owned())
+            }
+            ProjectMatch::NotFound(_) => Err(format!("No enabled OpenKeylet project found:{query}")),
+            ProjectMatch::Ambiguous(candidates) => {
+                let names = candidates
                     .iter()
-                    .map(|connection| connection.stored.name.as_str())
+                    .map(|item| item.name.as_str())
                     .collect::<Vec<_>>()
-                    .join("、")
-            )),
+                    .join("、");
+                if query.is_empty() {
+                    Err(format!("Multiple OpenKeylet projects are available:{names}; specify item"))
+                } else {
+                    Err(format!("The project name matches multiple results:{names}; use a more complete name"))
+                }
+            }
         }
     }
 
@@ -520,6 +583,13 @@ impl VaultMcp {
         interpolate_http_input(input, &replacements)?;
         Ok(())
     }
+}
+
+fn project_candidates(connections: &[DecryptedConnection]) -> Vec<ProjectCandidate> {
+    connections
+        .iter()
+        .map(|connection| (&connection.stored).into())
+        .collect()
 }
 
 fn connection_supports_action(connection: &DecryptedConnection, capability: Option<&str>) -> bool {
@@ -1100,6 +1170,8 @@ struct HttpSendInput {
         description = "Optional OpenKeylet project name, or an unambiguous natural-language phrase containing it. Omit it after this MCP session has selected a compatible project, or when exactly one compatible project exists."
     )]
     item: String,
+    #[schemars(description = "Stable project UUID for exact selection. Omit item when providing itemId.")]
+    item_id: Option<Uuid>,
     #[serde(default)]
     #[schemars(
         description = "Optional absolute URL or path relative to the project's saved service URL. OCI relative paths use the default Compute base URL; use an absolute OCI regional URL for other services. OCI requires HTTPS on port 443 and a regional oraclecloud.com endpoint matching ociContext.region. Omit to request the saved service URL itself. An item without a saved service URL requires an absolute URL."
@@ -1217,6 +1289,8 @@ struct CredentialFillInput {
         description = "Optional OpenKeylet project name, or an unambiguous natural-language phrase containing it. Omit it after this MCP session or terminal has selected a compatible project, or when exactly one project supports credential filling."
     )]
     item: String,
+    #[schemars(description = "Stable project UUID for exact selection. Omit item when providing itemId.")]
+    item_id: Option<Uuid>,
     #[serde(default)]
     #[schemars(
         description = "Optional module name or common phrase such as password, API key, private key, or verification code. Omit it when the project has one configured secret, or mention the module in the item phrase."
@@ -1412,6 +1486,46 @@ struct ApiServiceCapabilitiesInput {
 
 #[tool_router(router = tool_router)]
 impl VaultMcp {
+    #[tool(
+        name = "action_capabilities",
+        description = "Preview project selection for an action. Reports the selected project and reason, or eligible candidates and missing inputs. Accepts an exact itemId or a project name in item. Does not change the current selection or run the action.",
+        output_schema = rmcp::handler::server::tool::schema_for_type::<ActionResponse>(),
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn action_capabilities(
+        &self,
+        Parameters(input): Parameters<ActionCapabilitiesInput>,
+    ) -> CallToolResult {
+        let ActionCapabilitiesInput::SelectProject {
+            capability,
+            item,
+            item_id,
+        } = input;
+        let result = self
+            .match_action_project(&item, item_id, Some(capability.as_str()))
+            .map(|matched| match matched {
+                ProjectMatch::Selected(connection, reason) => ActionResponse::Selected {
+                    project: SelectedProject::new(&connection.stored, reason),
+                },
+                ProjectMatch::Ambiguous(candidates) => ActionResponse::ChooseProject {
+                    candidates,
+                    missing_inputs: vec![MissingInput {
+                        name: "item",
+                        source: "caller",
+                    }],
+                },
+                ProjectMatch::NotFound(candidates) => ActionResponse::Unavailable {
+                    code: UnavailableCode::ProjectNotFound,
+                    candidates,
+                },
+                ProjectMatch::NoCompatibleProject => ActionResponse::Unavailable {
+                    code: UnavailableCode::NoCompatibleProject,
+                    candidates: Vec::new(),
+                },
+            });
+        into_tool_result(result)
+    }
+
     #[tool(name = "api_service_capabilities", description = "Identify the concrete API service and supported authentication from a URL, or inspect a selected item's native configuration. Returns required role names, readiness, official documentation and protocol/pagination guidance without credentials. URL-only discovery does not authorize sending stored secrets or claim configuration is ready. Supports AWS standard SigV4 endpoint subset, existing OCI RSA signing, GitHub REST, Cloudflare control plane, DigitalOcean control plane and Hetzner Cloud. S3, OAuth token acquisition and other vendor signers are not implied. Call http_send with the documented operation; OpenKeylet signs/authenticates locally but does not choose operations or enumerate pages.", output_schema = rmcp::handler::server::tool::schema_for_type::<crate::api_provider::ServiceCapability>(), annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false))]
     async fn api_service_capabilities(
         &self,
@@ -1562,14 +1676,14 @@ impl VaultMcp {
             } else {
                 None
             };
-            let connection = if input.item.trim().is_empty() {
+            let connection = if input.item.trim().is_empty() && input.item_id.is_none() {
                 if let Some(session_id) = terminal_session_id {
                     self.resolve_terminal_item(session_id, "")?
                 } else {
                     self.resolve_item_for_action("", Some("fill"))?
                 }
             } else {
-                self.resolve_item_for_action(&input.item, Some("fill"))?
+                self.resolve_action_project(&input.item, input.item_id, Some("fill"))?
             };
             let item_id = connection.stored.id;
             let target = match requested_target.as_str() {
@@ -2222,7 +2336,7 @@ impl VaultMcp {
                     .or_insert(module);
             }
             let has_secret_bindings = !input.secret_bindings.is_empty();
-            let mut connection = self.resolve_item_for_action(&input.item, Some("http"))?;
+            let mut connection = self.resolve_action_project(&input.item, input.item_id, Some("http"))?;
             self.vault.guard_agent_secret_use(connection.stored.id).map_err(|error| error.to_string())?;
             let item_id = connection.stored.id;
             self.prepare_http_secret_bindings(&mut connection, &mut input)?;
@@ -2559,6 +2673,50 @@ mod tests {
             )
             .unwrap();
         (project.id, project.modules[0].id)
+    }
+
+    #[tokio::test]
+    async fn action_capabilities_previews_shared_selection_without_changing_session() {
+        let directory = tempdir().unwrap();
+        let vault = Vault::open(directory.path().join("vault")).unwrap();
+        let (first, _) = env_template_project(&vault, "First project", "first-secret");
+        let mcp = VaultMcp::new(vault.clone());
+        let tool = mcp.tool_router.get("action_capabilities").unwrap();
+        assert_eq!(tool.input_schema["type"], "object");
+        assert_eq!(tool.output_schema.as_ref().unwrap()["type"], "object");
+        let mcp_ref = &mcp;
+        let preview = |input| async move {
+            let input = serde_json::from_value(input).unwrap();
+            structured_value(&mcp_ref.action_capabilities(Parameters(input)).await)
+        };
+
+        let unique = preview(json!({ "action": "selectProject", "capability": "fill" })).await;
+        assert_eq!(unique["project"], json!({ "id": first, "name": "First project", "selection": "unique" }));
+        assert_eq!(unique["status"], "selected");
+
+        let (second, _) = env_template_project(&vault, "Second project", "second-secret");
+        let choose = preview(json!({ "action": "selectProject", "capability": "fill" })).await;
+        assert_eq!(choose["status"], "chooseProject");
+        assert_eq!(choose["candidates"].as_array().unwrap().len(), 2);
+        assert_eq!(choose["missingInputs"][0]["name"], "item");
+        assert!(!choose.to_string().contains("-secret"));
+
+        mcp.resolve_action_project("", Some(second), Some("fill")).unwrap();
+        let explicit = preview(json!({ "action": "selectProject", "capability": "fill", "itemId": first })).await;
+        assert_eq!(explicit["project"]["id"], json!(first));
+        assert_eq!(explicit["project"]["selection"], "explicit");
+        let session = preview(json!({ "action": "selectProject", "capability": "fill" })).await;
+        assert_eq!(session["project"]["id"], json!(second));
+        assert_eq!(session["project"]["selection"], "session");
+
+        vault.set_connection_enabled(first, false).unwrap();
+        let stale = preview(json!({ "action": "selectProject", "capability": "fill", "itemId": first })).await;
+        assert_eq!(stale["status"], "unavailable");
+        assert_eq!(stale["code"], "projectNotFound");
+        assert_eq!(stale["candidates"], json!([{ "id": second, "name": "Second project" }]));
+        assert!(mcp.resolve_action_project("", Some(first), Some("fill")).is_err());
+        let no_http = preview(json!({ "action": "selectProject", "capability": "http" })).await;
+        assert_eq!(no_http["code"], "noCompatibleProject");
     }
 
     #[tokio::test]
@@ -3298,6 +3456,7 @@ mod tests {
         let output = mcp
             .credential_fill(Parameters(CredentialFillInput {
                 item: String::new(),
+                item_id: None,
                 module: String::new(),
                 target: String::new(),
                 session_id: None,
@@ -3387,6 +3546,7 @@ mod tests {
         let output = mcp
             .credential_fill(Parameters(CredentialFillInput {
                 item: "use the password from multi login in OpenKeylet MCP".into(),
+                item_id: None,
                 module: String::new(),
                 target: "PTY".into(),
                 session_id: Some(terminal.session_id.to_string()),
