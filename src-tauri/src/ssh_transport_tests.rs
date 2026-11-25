@@ -160,6 +160,24 @@ impl server::Handler for TestHandler {
         session: &mut server::Session,
     ) -> Result<()> {
         session.channel_success(channel)?;
+        if command == b"cut-before-exit" {
+            session.data(channel, b"accepted\n".to_vec())?;
+            session.extended_data(channel, 1, b"partial jump-simulated-password\n".to_vec())?;
+            let handle = session.handle();
+            self.tasks.push(tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let _ = handle
+                    .disconnect(russh::Disconnect::ByApplication, "test disconnect".into(), "en".into())
+                    .await;
+            }));
+            return Ok(());
+        }
+        if command == b"exit-by-signal" {
+            session.exit_signal_request(channel, russh::Sig::TERM, false, "", "en")?;
+            session.eof(channel)?;
+            session.close(channel)?;
+            return Ok(());
+        }
         if command != b"hold" {
             let output = if command == b"echo mcp-vault-ok" {
                 b"mcp-vault-ok\r\n".to_vec()
@@ -171,7 +189,7 @@ impl server::Handler for TestHandler {
                 b"target-B jump-simulated-password".to_vec()
             };
             session.data(channel, output)?;
-            session.exit_status_request(channel, 0)?;
+            session.exit_status_request(channel, if command == b"exit-nonzero" { 7 } else { 0 })?;
             session.eof(channel)?;
             session.close(channel)?;
         }
@@ -841,6 +859,85 @@ async fn timeout_and_cancellation_close_both_ssh_sessions() {
         tokio::select! { result=&mut pending=>panic!("hold unexpectedly returned {result:?}"), _=tokio::time::sleep(Duration::from_millis(300))=>{} }
     }
     fixture.closed().await;
+}
+
+#[tokio::test]
+async fn mcp_reports_unknown_ssh_outcome_and_preserves_partial_output() {
+    use rmcp::ServiceExt;
+    use serde_json::{Value, json};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let fixture = Fixture::new(true).await;
+    let (server_io, client_io) = tokio::io::duplex(16 * 1024);
+    let mcp = crate::mcp::VaultMcp::new(fixture.vault.clone());
+    let server = tokio::spawn(async move {
+        mcp.serve(server_io).await.unwrap().waiting().await.unwrap();
+    });
+    let (reader, mut writer) = tokio::io::split(client_io);
+    let mut reader = BufReader::new(reader).lines();
+    async fn send(writer: &mut tokio::io::WriteHalf<tokio::io::DuplexStream>, value: Value) {
+        writer.write_all(format!("{value}\n").as_bytes()).await.unwrap();
+    }
+    async fn receive(reader: &mut tokio::io::Lines<BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>>, id: u32) -> Value {
+        let line = tokio::time::timeout(Duration::from_secs(10), reader.next_line())
+            .await.unwrap().unwrap().unwrap();
+        let message: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(message["id"], id, "{message}");
+        message["result"].clone()
+    }
+    send(&mut writer, json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+        "protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"ssh-outcome-test","version":"1"}
+    }})).await;
+    assert!(!receive(&mut reader, 1).await.is_null());
+    send(&mut writer, json!({"jsonrpc":"2.0","method":"notifications/initialized"})).await;
+
+    for (id, command, username) in [
+        (2, "cut-before-exit", None),
+        (3, "exit-nonzero", None),
+        (4, "exit-by-signal", None),
+        (5, "exit-nonzero", Some("wrong-user")),
+    ] {
+        send(&mut writer, json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{
+            "name":"ssh_run","arguments":{"item":"A","command":command,"username":username,"timeoutSeconds":5}
+        }})).await;
+        let result = receive(&mut reader, id).await;
+        let output = &result["structuredContent"];
+        match id {
+            2 => {
+                assert_eq!(result["isError"], true, "{result}");
+                assert_eq!(output["code"], "sshRemoteOutcomeUnknown");
+                assert!(output["exitCode"].is_null() && output["signal"].is_null());
+                assert!(result["content"][0]["text"].as_str().unwrap().starts_with("SSH remote outcome unknown"));
+                assert_eq!(output["stdout"], "accepted\n");
+                assert_eq!(output["stderr"], "partial [REDACTED]\n");
+                assert_eq!(output["stdoutTruncated"], false);
+                assert_eq!(output["stderrTruncated"], false);
+                assert!(!result.to_string().contains("jump-simulated-password"));
+            }
+            3 => {
+                assert_eq!(result["isError"], false, "{result}");
+                assert_eq!(output["exitCode"], 7);
+                assert!(output.get("code").is_none());
+            }
+            4 => {
+                assert_eq!(result["isError"], false, "{result}");
+                assert!(output["signal"].is_string());
+                assert!(output.get("code").is_none());
+            }
+            _ => {
+                assert_eq!(result["isError"], true, "{result}");
+                assert!(output.is_null());
+                assert!(result.to_string().contains("SSH authentication failed"));
+            }
+        }
+    }
+    drop(writer);
+    drop(reader);
+    tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
+    fixture.closed().await;
+    assert!(fixture.vault.activities().unwrap().iter().any(|activity| {
+        activity.status == "error" && activity.error.starts_with("SSH remote outcome unknown")
+    }));
 }
 
 #[tokio::test]

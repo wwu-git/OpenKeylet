@@ -232,6 +232,20 @@ impl VaultMcp {
     where
         F: std::future::Future<Output = Result<T>>,
     {
+        self.track_with_activity_error(item_id, action, future, |_| None)
+            .await
+    }
+
+    async fn track_with_activity_error<T, F>(
+        &self,
+        item_id: Uuid,
+        action: String,
+        future: F,
+        activity_error: impl FnOnce(&T) -> Option<&'static str>,
+    ) -> Result<T, String>
+    where
+        F: std::future::Future<Output = Result<T>>,
+    {
         let started = Instant::now();
         let decrypted = self.vault.get_connection(item_id).ok();
         let item_name = decrypted
@@ -241,40 +255,26 @@ impl VaultMcp {
         let action = decrypted.as_ref().map_or(action.clone(), |connection| {
             crate::policy::redact(action, &connection.stored, &connection.secrets)
         });
-        match future.await {
-            Ok(value) => {
-                let _ = self.vault.add_activity(NewActivity {
-                    status: "success".to_owned(),
-                    source: self.activity_source(),
-                    connection_name: item_name,
-                    action,
-                    duration_ms: started.elapsed().as_millis() as u64,
-                    error: String::new(),
-                });
-                Ok(value)
+        let redact_message = |message| match decrypted.as_ref() {
+            Some(connection) => {
+                crate::policy::redact(message, &connection.stored, &connection.secrets)
             }
-            Err(error) => {
-                let message = decrypted.as_ref().map_or_else(
-                    || error.to_string(),
-                    |connection| {
-                        crate::policy::redact(
-                            error.to_string(),
-                            &connection.stored,
-                            &connection.secrets,
-                        )
-                    },
-                );
-                let _ = self.vault.add_activity(NewActivity {
-                    status: "error".to_owned(),
-                    source: self.activity_source(),
-                    connection_name: item_name,
-                    action,
-                    duration_ms: started.elapsed().as_millis() as u64,
-                    error: message.clone(),
-                });
-                Err(message)
-            }
-        }
+            None => message,
+        };
+        let result = future.await.map_err(|error| redact_message(error.to_string()));
+        let problem = match &result {
+            Ok(value) => activity_error(value).map(|message| redact_message(message.to_owned())),
+            Err(message) => Some(message.clone()),
+        };
+        let _ = self.vault.add_activity(NewActivity {
+            status: if problem.is_some() { "error" } else { "success" }.to_owned(),
+            source: self.activity_source(),
+            connection_name: item_name,
+            action,
+            duration_ms: started.elapsed().as_millis() as u64,
+            error: problem.unwrap_or_default(),
+        });
+        result
     }
 
     fn search_items(&self, input: ItemsSearchInput) -> Result<ItemsSearchOutput, String> {
@@ -1391,6 +1391,38 @@ struct SshRunInput {
         description = "Optional environment-variable mapping from variable name to any secret module in item. OpenKeylet injects each value into the remote command environment and redacts it from output without returning it to the caller. The command can reference variables such as $OPENKEYLET_PASSWORD."
     )]
     secret_env: HashMap<String, String>,
+}
+
+const SSH_REMOTE_OUTCOME_UNKNOWN_MESSAGE: &str = "SSH remote outcome unknown: the channel closed without an exit code or signal. Check the remote task status before retrying.";
+
+#[derive(Clone, Copy, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+enum SshRunErrorCode {
+    SshRemoteOutcomeUnknown,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct SshRunOutput {
+    #[serde(flatten)]
+    response: SshResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<SshRunErrorCode>,
+}
+
+impl From<SshResponse> for SshRunOutput {
+    fn from(response: SshResponse) -> Self {
+        let code = (response.exit_code.is_none() && response.signal.is_none())
+            .then_some(SshRunErrorCode::SshRemoteOutcomeUnknown);
+        Self { response, code }
+    }
+}
+
+impl SshRunOutput {
+    fn error_message(&self) -> Option<&'static str> {
+        self.code.map(|code| match code {
+            SshRunErrorCode::SshRemoteOutcomeUnknown => SSH_REMOTE_OUTCOME_UNKNOWN_MESSAGE,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2570,12 +2602,12 @@ impl VaultMcp {
 
     #[tool(
         name = "ssh_run",
-        description = "Execute the requested command through OpenKeylet SSH. The project only needs a saved password, private key or matching SSH user certificate: host, port, and username may be supplied at runtime, with saved values as defaults and port 22 as the fallback. stdin sends text directly to the remote command without shell escaping or temporary files. Omit item after selecting a compatible project or when exactly one project stores SSH authentication. command, stdin, and cwd may use {{openkeylet:module}} placeholders; OpenKeylet substitutes and redacts them locally. Use secretEnv only when the remote program needs an environment variable. This grants full command authority and has no observation, diagnostic, restricted, or execution mode. For a saved jump route, call this tool with target project B directly. OpenKeylet automatically routes through jump project A and authenticates A and B with their own credentials. If a plain-key fingerprint or explicitly trusted host CA is missing or mismatched, stop and ask the user to verify it against a trusted source and confirm it through the OpenKeylet client or local ssh-trust CLI before retrying. Never auto-trust keys or bypass the route with a direct or nested ssh connection.",
-        output_schema = rmcp::handler::server::tool::schema_for_type::<SshResponse>(),
+        description = "Execute the requested command through OpenKeylet SSH. The project only needs a saved password, private key or matching SSH user certificate: host, port, and username may be supplied at runtime, with saved values as defaults and port 22 as the fallback. stdin sends text directly to the remote command without shell escaping or temporary files. Omit item after selecting a compatible project or when exactly one project stores SSH authentication. command, stdin, and cwd may use {{openkeylet:module}} placeholders. OpenKeylet substitutes and redacts them locally. Use secretEnv only when the remote program needs an environment variable. If the channel closes without an exit code or signal, code sshRemoteOutcomeUnknown indicates that the remote result is unknown. Check the remote task status before retrying. This grants full command authority and has no observation, diagnostic, restricted, or execution mode. For a saved jump route, call this tool with target project B directly. OpenKeylet automatically routes through jump project A and authenticates A and B with their own credentials. If a plain-key fingerprint or explicitly trusted host CA is missing or mismatched, stop and ask the user to verify it against a trusted source and confirm it through the OpenKeylet client or local ssh-trust CLI before retrying. Never auto-trust keys or bypass the route with a direct or nested ssh connection.",
+        output_schema = rmcp::handler::server::tool::schema_for_type::<SshRunOutput>(),
         annotations(title = "Execute an SSH command", read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = true)
     )]
     async fn ssh_run(&self, Parameters(input): Parameters<SshRunInput>) -> CallToolResult {
-        let result: Result<SshResponse, String> = async {
+        let result: Result<SshRunOutput, String> = async {
             let mut input = input;
             let mut placeholder_names = HashSet::new();
             collect_secret_placeholders_text(&input.command, &mut placeholder_names)?;
@@ -2615,23 +2647,39 @@ impl VaultMcp {
             }
             let secret_env =
                 self.resolve_secret_bindings(&mut connection, &input.secret_env, &input.item)?;
-            self.track(
+            self.track_with_activity_error(
                 item_id,
                 "Run SSH command".to_owned(),
-                execute_ssh(
-                    &self.vault,
-                    &connection,
-                    &input.command,
-                    input.cwd.as_deref(),
-                    input.timeout_seconds,
-                    &secret_env,
-                    input.stdin.as_deref(),
-                ),
+                async {
+                    execute_ssh(
+                        &self.vault,
+                        &connection,
+                        &input.command,
+                        input.cwd.as_deref(),
+                        input.timeout_seconds,
+                        &secret_env,
+                        input.stdin.as_deref(),
+                    )
+                    .await
+                    .map(SshRunOutput::from)
+                },
+                SshRunOutput::error_message,
             )
             .await
         }
         .await;
-        into_tool_result(result)
+        match result {
+            Ok(output) => {
+                let error_message = output.error_message();
+                let mut result = tool_success(output);
+                if let Some(message) = error_message {
+                    result.is_error = Some(true);
+                    result.content.insert(0, ContentBlock::text(message));
+                }
+                result
+            }
+            Err(message) => tool_error(message),
+        }
     }
 
     #[tool(
