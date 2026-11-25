@@ -4,6 +4,7 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
+use std::fmt::Write;
 use std::{collections::HashSet, fs::File, io::Read, path::Path};
 use uuid::Uuid;
 use zeroize::{ZeroizeOnDrop, Zeroizing};
@@ -52,6 +53,8 @@ pub(crate) struct CommitSummary {
     pub added: usize,
     skipped: usize,
     undo_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    env_template: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -200,8 +203,9 @@ impl EnvImport {
             "Invalid .env import selection"
         );
 
-        let created = vault.update_document_with_result(|document| {
+        let (created, template) = vault.update_document_with_result(|document| {
             let mut created = Vec::with_capacity(selected.len());
+            let mut template = String::new();
             let mut seen = HashSet::new();
             for (index, var) in self.variables.iter().enumerate() {
                 if !seen.insert(var.name.to_ascii_lowercase())
@@ -215,11 +219,24 @@ impl EnvImport {
                 }
                 let saved =
                     vault.save_connection_in_document(document, var.to_project(), None, None)?;
+                let module = saved
+                    .modules
+                    .iter()
+                    .find(|module| {
+                        module.kind == "customSecret"
+                            && module.name == VALUE_FIELD
+                            && module.configured
+                    })
+                    .context("Imported variable has no configured value module")?;
+                let placeholder = crate::env_template::placeholder(saved.id, module.id);
+                writeln!(template, "{}={placeholder}", var.name)?;
                 created.push((saved.id, saved.revision));
             }
-            Ok(created)
+            Ok((created, template))
         })?;
-        Ok(CommitSummary::from_created(selection.len(), created))
+        let (mut summary, undo) = CommitSummary::from_created(selection.len(), created);
+        summary.env_template = (!template.is_empty()).then_some(template);
+        Ok((summary, undo))
     }
 }
 
@@ -278,6 +295,7 @@ impl CommitSummary {
                 added,
                 skipped: requested - added,
                 undo_id: batch.as_ref().map(|batch| batch.id),
+                env_template: None,
             },
             batch,
         )
@@ -400,19 +418,20 @@ mod tests {
         );
     }
 
-    #[test]
-    fn preview_selection_conflicts_and_undo_use_the_real_vault() {
+    #[tokio::test]
+    async fn preview_selection_conflicts_and_undo_use_the_real_vault() {
         let root = tempfile::tempdir().unwrap();
         let data_dir = root.path().join("vault");
         let vault = Vault::open(data_dir.clone()).unwrap();
         let path = root.path().join(".env");
         std::fs::write(
             &path,
-            "API_KEY=fixture-primary-key\napi_key=fixture-duplicate\nUNCHOSEN=no\nKEPT=fixture-keep\nRACE=fresh",
+            "# fixture-comment\nAPI_KEY=fixture-primary-key\napi_key=fixture-duplicate\nUNCHOSEN=no\nKEPT=fixture-keep\nRACE=fresh\nMULTI=\"fixture-first\nfixture-second\"",
         )
         .unwrap();
         let import = EnvImport::read(&path).unwrap();
         let preview = import.preview(&vault, Uuid::new_v4()).unwrap();
+        assert_eq!(preview.multiline, 1);
         assert_eq!(
             preview
                 .rows
@@ -434,7 +453,7 @@ mod tests {
             .unwrap()
             .commit(&vault, vec![0])
             .unwrap();
-        let (summary, undo) = import.commit(&vault, vec![0, 1, 3, 4]).unwrap();
+        let (summary, undo) = import.commit(&vault, vec![4, 3, 1, 0]).unwrap();
         assert_eq!((summary.added, summary.skipped), (2, 2));
         let undo = undo.unwrap();
         assert_eq!(summary.undo_id, Some(undo.id));
@@ -443,6 +462,32 @@ mod tests {
         let vault = Vault::open(data_dir.clone()).unwrap();
         let projects = vault.list_connections().unwrap();
         let api_key = projects.iter().find(|item| item.name == "API_KEY").unwrap();
+        let kept = projects.iter().find(|item| item.name == "KEPT").unwrap();
+        let template = format!(
+            "API_KEY={{{{openkeylet:{}/{}}}}}\nKEPT={{{{openkeylet:{}/{}}}}}\n",
+            api_key.id, api_key.modules[0].id, kept.id, kept.modules[0].id,
+        );
+        assert_eq!(summary.env_template.as_deref(), Some(template.as_str()));
+        assert_eq!(
+            serde_json::to_value(&summary).unwrap()["envTemplate"],
+            template
+        );
+        #[cfg(windows)]
+        let command = "if ($env:API_KEY -ne 'fixture-primary-key' -or $env:KEPT -ne 'fixture-keep') { exit 1 }";
+        #[cfg(not(windows))]
+        let command = "test \"$API_KEY\" = fixture-primary-key && test \"$KEPT\" = fixture-keep";
+        let environment =
+            crate::env_template::resolve(&vault, summary.env_template.as_deref().unwrap()).unwrap();
+        let result = crate::env_template::execute(
+            &environment,
+            command,
+            root.path().to_str(),
+            Some(10),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.exit_code, Some(0));
         assert_eq!(api_key.folder, "Env");
         assert_eq!(api_key.modules[0].agent_visible, Some(false));
         assert_eq!(
@@ -476,7 +521,15 @@ mod tests {
                 .collect::<Vec<_>>(),
             [true, true, false, true, true]
         );
-        let kept = projects.iter().find(|item| item.name == "KEPT").unwrap();
+        let (empty, no_undo) = import.commit(&vault, vec![0, 1, 3, 4]).unwrap();
+        assert_eq!((empty.added, empty.skipped), (0, 4));
+        assert!(
+            serde_json::to_value(empty)
+                .unwrap()
+                .get("envTemplate")
+                .is_none()
+        );
+        assert!(no_undo.is_none());
         vault.set_connection_enabled(kept.id, false).unwrap();
         let summary = undo.undo(&vault).unwrap();
         assert_eq!((summary.removed, summary.skipped), (1, 1));

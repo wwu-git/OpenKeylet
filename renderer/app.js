@@ -2709,6 +2709,7 @@ let migrationId = null;
 let migrationSequence = 0;
 let migrationCancellation = Promise.resolve();
 let batchImport = null;
+let envImportTemplate = '';
 const importUndoIds = new Map();
 const selectableImportFormats = new Set(['env', 'ssh', 'aws']);
 let migrationBusy = false;
@@ -2754,9 +2755,14 @@ function migrationHelp() {
   $('#migration-batch-undo').textContent = localized('撤销本批新增', 'Undo added items');
   $('#migration-batch-undo').title = localized('本次解锁期间可撤销最近一次导入。', 'Undo the latest import during this unlocked session.');
   $('#migration-batch-undo').classList.toggle('hidden', !importUndoIds.has(format));
+  $('#migration-copy-env-template').textContent = localized('复制 .env 脱敏模板', 'Copy redacted .env template');
+  $('#migration-copy-env-template').title = localized('将模板用于本地 terminal_run 的 envTemplate 参数。', 'Pass this template to envTemplate in a local terminal_run call.');
+  $('#migration-copy-env-template').classList.toggle('hidden', format !== 'env' || !envImportTemplate);
 }
 function resetMigration() {
   migrationSequence++; migrationId = null;
+  envImportTemplate = '';
+  $('#migration-copy-env-template').classList.add('hidden');
   $('#migration-curl').value = '';
   if (batchImport) invoke(`cancel_${batchImport.format}_import`, { id: batchImport.id }).catch(() => {});
   batchImport = null;
@@ -2768,7 +2774,7 @@ function resetMigration() {
 function setMigrationBusy(busy) {
   migrationBusy = busy;
   $('#migration-preview').inert = busy;
-  for (const key of ['curl', 'format', 'close', 'batch-undo']) $(`#migration-${key}`).disabled = busy;
+  for (const key of ['curl', 'format', 'close', 'batch-undo', 'copy-env-template']) $(`#migration-${key}`).disabled = busy;
   updateImportSelection();
 }
 function updateImportSelection() {
@@ -2947,6 +2953,7 @@ $('#migration-confirm').onclick = async () => {
         batchImport = null;
         if (result.undoId) importUndoIds.set(format, result.undoId);
         resetMigration();
+        if (format === 'env') envImportTemplate = result.envTemplate || '';
         migrationHelp();
         const skipped = result.skipped + previewConflicts;
         showBatchImportStatus(localized(`已导入 ${result.added} 项，跳过 ${skipped} 个同名项。`, `Imported ${result.added} items. Skipped ${skipped} name conflicts.`));
@@ -2958,6 +2965,13 @@ $('#migration-confirm').onclick = async () => {
   }
   catch(error) { if (sequence === migrationSequence) { $('#migration-error').textContent=cleanError(error); $('#migration-error').classList.remove('hidden'); } }
   finally { setMigrationBusy(false); }
+};
+$('#migration-copy-env-template').onclick = async () => {
+  if (migrationBusy || !envImportTemplate || !ownerLockState.unlocked) return;
+  try {
+    await api.copyOwnerValue(envImportTemplate);
+    toast(localized('已复制 .env 脱敏模板', 'Redacted .env template copied'));
+  } catch (error) { toast(cleanError(error), 'error'); }
 };
 $('#migration-batch-undo').onclick = async () => {
   const format = $('#migration-format').value;

@@ -88,6 +88,7 @@ async fn mcp_ca_search_and_all_generic_secret_paths_are_protected() {
             cwd: None,
             timeout_seconds: Some(1),
             secret_env: HashMap::new(),
+            env_template: None,
         }))
         .await;
     assert!(is_error(&result));

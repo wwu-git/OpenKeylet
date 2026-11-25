@@ -6,6 +6,7 @@ pub mod browser;
 pub mod browser_vault;
 pub mod crypto;
 pub mod certificates;
+mod env_template;
 pub mod executor;
 pub mod generator;
 pub mod github_backup;

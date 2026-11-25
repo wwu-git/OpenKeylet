@@ -1306,6 +1306,11 @@ struct TerminalRunInput {
         description = "Optional environment-variable mapping from variable name to a secret module. OpenKeylet injects and redacts each value locally."
     )]
     secret_env: HashMap<String, String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Optional redacted .env import template copied from OpenKeylet. Each line binds one environment variable to exact project and module IDs. Values are resolved locally and redacted from output. Use this independently of item, secretEnv, and inline placeholders."
+    )]
+    env_template: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1658,7 +1663,7 @@ impl VaultMcp {
 
     #[tool(
         name = "terminal_run",
-        description = "Run one local shell command to completion and return stdout, stderr, and exit status in the same call. Use this for ordinary non-interactive local work; use PTY tools only when the process must stay interactive. stdin sends text directly without shell escaping or temporary files. command, stdin, and cwd may contain {{openkeylet:module}} placeholders, and secretEnv may inject a stored module when a child program needs an environment variable. OpenKeylet substitutes locally and redacts known values from output. Omit item when the session selected a compatible project or no hidden module is used. There is no sandbox, output limit, or default timeout.",
+        description = "Run one local shell command to completion and return stdout, stderr, and exit status in the same call. Use this for ordinary non-interactive local work; use PTY tools only when the process must stay interactive. stdin sends text directly without shell escaping or temporary files. command, stdin, and cwd may contain {{openkeylet:module}} placeholders, and secretEnv may inject a stored module when a child program needs an environment variable. For a redacted .env import template, pass envTemplate on its own so its project and module IDs can be resolved locally. OpenKeylet substitutes locally and redacts known values from output. Omit item when the session selected a compatible project or no hidden module is used. There is no sandbox, output limit, or default timeout.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<SshResponse>(),
         annotations(title = "Run a local command", read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = true)
     )]
@@ -1675,6 +1680,38 @@ impl VaultMcp {
             }
             if let Some(cwd) = input.cwd.as_deref() {
                 collect_secret_placeholders_text(cwd, &mut placeholder_names)?;
+            }
+            if let Some(template) = input.env_template.as_deref() {
+                if !input.item.trim().is_empty()
+                    || !placeholder_names.is_empty()
+                    || !input.secret_env.is_empty()
+                {
+                    return Err(
+                        "envTemplate cannot be combined with item, secretEnv, or inline placeholders"
+                            .to_owned(),
+                    );
+                }
+                let environment = crate::env_template::resolve(&self.vault, template)
+                    .map_err(|error| error.to_string())?;
+                let started = Instant::now();
+                let result = crate::env_template::execute(
+                    &environment,
+                    &input.command,
+                    input.cwd.as_deref(),
+                    input.timeout_seconds,
+                    input.stdin.as_deref(),
+                )
+                .await;
+                let success = result.is_ok();
+                let _ = self.vault.add_activity(NewActivity {
+                    status: if success { "success" } else { "error" }.to_owned(),
+                    source: self.activity_source(),
+                    connection_name: ".env template".to_owned(),
+                    action: "Run local command with .env template".to_owned(),
+                    duration_ms: started.elapsed().as_millis() as u64,
+                    error: if success { "" } else { "Local command failed" }.to_owned(),
+                });
+                return result.map_err(|error| error.to_string());
             }
             let uses_project = !input.item.trim().is_empty()
                 || !placeholder_names.is_empty()
@@ -2507,6 +2544,87 @@ mod tests {
             structured
         );
         structured
+    }
+
+    fn env_template_project(vault: &Vault, name: &str, value: &str) -> (Uuid, Uuid) {
+        let project = vault
+            .save_connection(
+                serde_json::from_value(json!({
+                    "name": name,
+                    "itemType": "custom",
+                    "modules": [{ "kind": "customSecret", "name": "Value", "agentVisible": false }],
+                    "secrets": { "namedSecrets": { "Value": value } },
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        (project.id, project.modules[0].id)
+    }
+
+    #[tokio::test]
+    async fn terminal_run_env_template_injects_exact_project_bindings_and_redacts_output() {
+        let directory = tempdir().unwrap();
+        let vault = Vault::open(directory.path().join("vault")).unwrap();
+        let (first_id, first_module) =
+            env_template_project(&vault, "Named differently", "synthetic-alpha\nsynthetic-beta");
+        let (second_id, second_module) =
+            env_template_project(&vault, "Other project", "synthetic-gamma");
+        env_template_project(&vault, "FIXTURE_ALPHA", "synthetic-decoy");
+        let template = format!(
+            "FIXTURE_ALPHA={}\nFIXTURE_BETA={}\n",
+            crate::env_template::placeholder(first_id, first_module),
+            crate::env_template::placeholder(second_id, second_module),
+        );
+        #[cfg(windows)]
+        let command = "if ($env:FIXTURE_ALPHA -ne ('synthetic-' + 'alpha' + [char]10 + 'synthetic-beta') -or $env:FIXTURE_BETA -ne ('synthetic-' + 'gamma')) { exit 11 }; [Console]::Write($env:FIXTURE_ALPHA); [Console]::Error.Write($env:FIXTURE_BETA)";
+        #[cfg(not(windows))]
+        let command = "test \"$FIXTURE_ALPHA\" = \"$(printf 'synthetic-%s\\nsynthetic-beta' alpha)\" && test \"$FIXTURE_BETA\" = \"$(printf 'synthetic-%s' gamma)\" || exit 11; printf '%s' \"$FIXTURE_ALPHA\"; printf '%s' \"$FIXTURE_BETA\" >&2";
+        let mcp = VaultMcp::new(vault.clone());
+        let input = serde_json::from_value(json!({
+            "command": command, "envTemplate": template, "timeoutSeconds": 10,
+        }))
+        .unwrap();
+        let result = structured_value(&mcp.terminal_run(Parameters(input)).await);
+        assert_eq!(result["exitCode"], 0);
+        assert_eq!(result["stdout"], "[REDACTED]");
+        assert_eq!(result["stderr"], "[REDACTED]");
+        let activities = vault.activities().unwrap();
+        assert_eq!(activities.len(), 1);
+        assert_eq!(activities[0].action, "Run local command with .env template");
+        assert!(!serde_json::to_string(&activities).unwrap().contains("synthetic"));
+    }
+
+    #[tokio::test]
+    async fn terminal_run_env_template_rejects_invalid_or_duplicate_bindings_before_spawning() {
+        let directory = tempdir().unwrap();
+        let vault = Vault::open(directory.path().join("vault")).unwrap();
+        let (id, module) = env_template_project(&vault, "Valid project", "synthetic-allowed");
+        let (disabled_id, disabled_module) =
+            env_template_project(&vault, "Disabled project", "synthetic-disabled");
+        vault.set_connection_enabled(disabled_id, false).unwrap();
+        let reference = crate::env_template::placeholder(id, module);
+        let stale_module = crate::env_template::placeholder(id, Uuid::new_v4());
+        let disabled = crate::env_template::placeholder(disabled_id, disabled_module);
+        let mcp = VaultMcp::new(vault.clone());
+        for template in [
+            format!("FIXTURE_ALPHA={reference}\nFIXTURE_BETA={stale_module}"),
+            format!("FIXTURE_ALPHA={reference}\nfixture_alpha={reference}"),
+            format!("FIXTURE_ALPHA={reference}\nFIXTURE_BETA={disabled}"),
+            format!("FIXTURE_ALPHA={reference}\nFIXTURE_BETA=synthetic-raw"),
+        ] {
+            let input = serde_json::from_value(json!({
+                "command": "echo ran > marker.txt",
+                "cwd": directory.path().to_string_lossy(),
+                "envTemplate": template,
+                "timeoutSeconds": 10,
+            }))
+            .unwrap();
+            let result = mcp.terminal_run(Parameters(input)).await;
+            assert_eq!(result.is_error, Some(true));
+            assert!(!directory.path().join("marker.txt").exists());
+            assert!(!serde_json::to_string(&result).unwrap().contains("synthetic-"));
+        }
+        assert!(vault.activities().unwrap().is_empty());
     }
 
     #[test]
@@ -3457,6 +3575,7 @@ mod tests {
                 cwd: None,
                 timeout_seconds: Some(10),
                 secret_env: HashMap::from([("OPENKEYLET_HIDDEN_ENV".into(), "password".into())]),
+                env_template: None,
             }))
             .await,
         );

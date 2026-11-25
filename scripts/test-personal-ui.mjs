@@ -87,7 +87,10 @@ try {
         {index:2,name:"OTHER_KEY",conflict:false},
       ]};
       if(command==="cancel_env_import") { (fixture.envCancels ??= []).push(args.id); return; }
-      if(command==="commit_env_import") { (fixture.envImports ??= []).push(args.selection); return {added:1,skipped:0,undoId:"env-undo-fixture"}; }
+      if(command==="commit_env_import") {
+        (fixture.envImports ??= []).push(args.selection);
+        return {added:1,skipped:0,undoId:"env-undo-fixture",envTemplate:"API_KEY={{openkeylet:00000000-0000-4000-8000-000000000001/00000000-0000-4000-8000-000000000002}}\n"};
+      }
       if(command==="undo_env_import") { fixture.envUndo = args.id; return {removed:1,skipped:0}; }
       if(command==="prepare_ssh_import") return {id:args.id,rows:[
         {index:0,name:"test-jump",host:"jump.example.test",port:22,user:"alice",route:"direct",conflict:false},
@@ -595,6 +598,8 @@ try {
   assert.equal(await conflict.isChecked(),false);
   assert.match(await page.locator("#migration-batch-status").textContent(), /1/);
   assert.match(await page.locator("#migration-batch-status").textContent(), /2/);
+  const copyEnvTemplate=page.locator("#migration-copy-env-template");
+  assert.ok(await copyEnvTemplate.isHidden());
   assert.equal(await page.evaluate(()=>fixture.envImports?.length ?? 0),0);
   await page.locator("#migration-close").click();
   assert.equal(await page.evaluate(()=>fixture.envCancels.length),1);
@@ -602,8 +607,11 @@ try {
   await page.locator("#migration-select").click();
   await envPreview.getByRole("checkbox",{name:/OTHER_KEY/}).uncheck();
   await page.locator("#migration-confirm").click();
+  await copyEnvTemplate.click();
+  assert.equal(await page.evaluate(()=>fixture.copies.at(-1)),"API_KEY={{openkeylet:00000000-0000-4000-8000-000000000001/00000000-0000-4000-8000-000000000002}}\n");
   await page.locator("#migration-batch-undo").click();
   await page.locator("#migration-batch-undo").waitFor({state:"hidden"});
+  assert.ok(await copyEnvTemplate.isHidden());
   assert.deepEqual(await page.evaluate(()=>fixture.envImports),[[0]]);
   assert.equal(await page.evaluate(()=>fixture.envUndo),"env-undo-fixture");
   await page.locator("#migration-close").click();
@@ -749,5 +757,5 @@ try {
   await page.screenshot({path:path.join(artifacts,"narrow-card-editor.png")});
   assert.ok(await page.evaluate(()=>document.querySelector("#connection-modal .modal-card").getBoundingClientRect().bottom<=innerHeight));
   assert.deepEqual(errors,[]);
-  console.log(JSON.stringify({ok:true,checks:["combined add/draft selector","draft preservation and recovery","card editor","encrypted field payload","one header search and filter panel with Ctrl/Cmd+F and independent page queries","multiple host and URL addresses, default switching, removal, drafts, failed save and address search","combined keyword, type, exact folder and enabled status filters","unsaved edits survive filtering and are saved as drafts","460px filter controls","multiline secure note","generator inserts password","browser address copy, pairing, launch failures and recovery","backup password flow","multiple website rules","migration preview/cancel/commit","KeePass XML preview, cancel and confirmation","1Password 1PUX preview, cancel and confirmation","1Password CSV preview, cancel and confirmation","offline cURL preview, cancel, rejection and confirmation","AWS profile preview, cancel, selective import and undo","password history","trash restore and purge from settings","narrow layout"],artifacts},null,2));
+  console.log(JSON.stringify({ok:true,checks:["combined add/draft selector","draft preservation and recovery","card editor","encrypted field payload","one header search and filter panel with Ctrl/Cmd+F and independent page queries","multiple host and URL addresses, default switching, removal, drafts, failed save and address search","combined keyword, type, exact folder and enabled status filters","unsaved edits survive filtering and are saved as drafts","460px filter controls","multiline secure note","generator inserts password","browser address copy, pairing, launch failures and recovery","backup password flow","multiple website rules","migration preview/cancel/commit","committed .env template copy and undo","KeePass XML preview, cancel and confirmation","1Password 1PUX preview, cancel and confirmation","1Password CSV preview, cancel and confirmation","offline cURL preview, cancel, rejection and confirmation","AWS profile preview, cancel, selective import and undo","password history","trash restore and purge from settings","narrow layout"],artifacts},null,2));
 } finally {await browser.close();server.close();}
