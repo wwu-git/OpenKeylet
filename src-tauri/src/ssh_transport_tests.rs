@@ -399,6 +399,126 @@ async fn direct_untrusted_host_stops_before_authentication() {
     fixture.closed().await;
 }
 
+#[cfg(feature = "gui")]
+#[tokio::test]
+async fn imported_routes_require_explicit_trust_and_never_fall_back_to_direct() {
+    use crate::commands::ssh_config_import::SshConfigImport;
+
+    let fixture = Fixture::new(true).await;
+    let folder = tempfile::tempdir().unwrap();
+    let data_dir = folder.path().join("vault");
+    let vault = Vault::open(data_dir.clone()).unwrap();
+    let source = format!(
+        "Host import-jump\n HostName 127.0.0.1\n Port {}\n User jump-user\n\
+         Host import-target\n HostName private.test.invalid\n Port {}\n User target-user\n ProxyJump import-jump\n\
+         Host import-missing\n HostName 127.0.0.1\n Port {}\n User jump-user\n ProxyJump not-selected\n",
+        fixture.a_port, fixture.b_port, fixture.a_port
+    );
+    let parsed = SshConfigImport::parse(&source).unwrap();
+    let (summary, _) = parsed.commit(&vault, vec![0, 1, 2]).unwrap();
+    assert_eq!(summary.added, 3);
+    drop(vault);
+    let vault = Vault::open(data_dir).unwrap();
+    let items = vault.list_connections().unwrap();
+    let id = |name: &str| items.iter().find(|item| item.name == name).unwrap().id;
+    let (jump, target, missing) = (id("import-jump"), id("import-target"), id("import-missing"));
+    assert!(vault.ssh_host_trust().unwrap().is_empty());
+    let missing = vault.get_connection(missing).unwrap();
+    assert!(
+        connect(&vault, &missing)
+            .await
+            .err()
+            .expect("unresolved import must block transport")
+            .to_string()
+            .contains("jump reference is unresolved")
+    );
+    let direct = vault.get_connection(jump).unwrap();
+    assert!(
+        connect(&vault, &direct)
+            .await
+            .err()
+            .expect("untrusted import must block transport")
+            .to_string()
+            .contains("host key is not trusted")
+    );
+    assert_eq!(fixture.a.auth.load(Ordering::SeqCst), 0);
+    assert!(fixture.a.forwards.lock().unwrap().is_empty());
+
+    let mut jump_input = input("import-jump", "127.0.0.1", fixture.a_port, "jump-user");
+    jump_input.id = Some(jump);
+    vault.save_connection(jump_input).unwrap();
+    let mut target_input = input(
+        "import-target",
+        "private.test.invalid",
+        fixture.b_port,
+        "target-user",
+    );
+    target_input.id = Some(target);
+    let saved_target = vault.get_connection(target).unwrap();
+    assert_eq!(saved_target.stored.ssh_jump_item_id, Some(jump));
+    target_input.ssh_jump_item_id = saved_target.stored.ssh_jump_item_id;
+    target_input.secrets.password = Some("target-simulated-password".into());
+    vault.save_connection(target_input).unwrap();
+    let fingerprint = |seed| {
+        key(seed)
+            .public_key()
+            .fingerprint(ssh_key::HashAlg::Sha256)
+            .to_string()
+    };
+    vault
+        .set_ssh_host_trust(jump, "127.0.0.1", fixture.a_port, Some(&fingerprint(9)))
+        .unwrap();
+    let direct = vault.get_connection(jump).unwrap();
+    assert!(
+        executor::test_connection(&vault, &direct)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("host key mismatch")
+    );
+    assert_eq!(fixture.a.auth.load(Ordering::SeqCst), 0);
+    vault
+        .set_ssh_host_trust(jump, "127.0.0.1", fixture.a_port, Some(&fingerprint(1)))
+        .unwrap();
+    vault
+        .set_ssh_host_trust(
+            target,
+            "private.test.invalid",
+            fixture.b_port,
+            Some(&fingerprint(9)),
+        )
+        .unwrap();
+    let target_item = vault.get_connection(target).unwrap();
+    assert!(
+        executor::test_connection(&vault, &target_item)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("host key mismatch")
+    );
+    assert_eq!(fixture.b.auth.load(Ordering::SeqCst), 0);
+    vault
+        .set_ssh_host_trust(
+            target,
+            "private.test.invalid",
+            fixture.b_port,
+            Some(&fingerprint(2)),
+        )
+        .unwrap();
+    assert_eq!(
+        executor::test_connection(&vault, &target_item)
+            .await
+            .unwrap(),
+        "SSH connection successful"
+    );
+    assert!(fixture.b.auth.load(Ordering::SeqCst) > 0);
+    assert_eq!(
+        *fixture.a.forwards.lock().unwrap(),
+        vec![("private.test.invalid".into(), u32::from(fixture.b_port)); 2]
+    );
+    fixture.closed().await;
+}
+
 #[tokio::test]
 async fn direct_key_mismatch_stops_before_authentication() {
     let fixture = Fixture::new(true).await;

@@ -103,6 +103,7 @@ const staticCopy = [
   ['#reset-pairing-button', 'text', '重置', 'RESET'],
   ['[data-module="SAFE / 05"] .settings-heading h2', 'text', '本地数据', 'LOCAL DATA'],
   ['#migration-open', 'text', '迁入密码库', 'IMPORT VAULT'],
+  ['#migration-format option[value="ssh"]', 'text', 'SSH 配置 · OpenSSH', 'SSH config · OpenSSH'],
   ['#migration-format option[value="env"]', 'text', '环境变量 · .env', 'Environment variables · .env'],
   ['[data-module="SAFE / 05"] .settings-heading p', 'text', '用独立备份密码加密导出全部项目与 Passkey，也可恢复旧版备份。', 'Export all items and passkeys encrypted with a separate backup password, or restore an existing backup.'],
   ['#open-data-button', 'text', '打开数据目录', 'OPEN DATA FOLDER'],
@@ -291,10 +292,6 @@ const api = {
   commitBackupRestore: (id, selection) => invoke('commit_backup_restore', { id, selection }),
   cancelBackupRestore: (id) => invoke('cancel_backup_restore', { id }),
   prepareImport: (format) => invoke('prepare_import', { format }),
-  prepareEnvImport: (id) => invoke('prepare_env_import', { id }),
-  commitEnvImport: (id, selection) => invoke('commit_env_import', { id, selection }),
-  cancelEnvImport: (id) => invoke('cancel_env_import', { id }),
-  undoEnvImport: (id) => invoke('undo_env_import', { id }),
   commitImport: (id) => invoke('commit_import', { id }),
   cancelImport: () => invoke('cancel_import'),
   dataFolder: () => invoke('open_data_folder'),
@@ -482,7 +479,7 @@ function renderOwnerLock() {
   $('#owner-lock-code').textContent = configured ? 'LOCK' : 'INIT';
   $('#owner-unlock-action').textContent = configured ? 'UNLOCK' : 'SET PIN';
   if (locked) {
-    envImportUndoId = null;
+    importUndoIds.clear();
     if (!$('#vault-management-modal').classList.contains('hidden')) closeVaultManagement();
     if (!$('#migration-modal').classList.contains('hidden')) closeMigration();
     closeGenerator();
@@ -2700,8 +2697,9 @@ $('#login-uri-list').onclick = event => event.target.closest('[data-remove-uri]'
 
 let migrationId = null;
 let migrationSequence = 0;
-let envImportId = null;
-let envImportUndoId = null;
+let batchImport = null;
+const importUndoIds = new Map();
+const selectableImportFormats = new Set(['env', 'ssh']);
 let migrationBusy = false;
 const migrationWarnings = {
   nonWebUris: ['非网页地址已保留，设为“不匹配”。','Non-web addresses are preserved with matching disabled.'],
@@ -2719,35 +2717,51 @@ function migrationHelp() {
   const help = {
     bitwarden: localized('在 Bitwarden 中导出未加密 JSON，然后选择文件预览。原文件不变；导入的秘密会加密存入本地库。', 'Export unencrypted JSON from Bitwarden, then choose the file to preview. Imported secrets are encrypted locally.'),
     chrome: localized('选择 Chrome 或 Edge 导出的密码 CSV。支持带引号、逗号和多行备注的文件。', 'Choose a password CSV exported by Chrome or Edge. Quoted fields, commas and multiline notes are supported.'),
+    ssh: localized('选取一个 OpenSSH 配置文件。预览显式主机及路由。需同时选中可用的直连跳板，导入后再配置认证和主机指纹。', 'Choose one OpenSSH config file to preview explicit hosts and routes. Select the direct jump host as well, then configure credentials and host fingerprints after import.'),
     env: localized('只预览变量名。每个选中的变量会在 Env 文件夹中建立一个加密项目。同名项目会跳过。macOS 可按 ⌘⇧. 显示隐藏文件。', 'Preview variable names. Each selected variable becomes an encrypted item in the Env folder. Items with existing names are skipped. On macOS, press ⌘⇧. to show hidden files.'),
   };
   $('#migration-help').textContent = help[format];
-  $('#migration-preview').setAttribute('role', format === 'env' ? 'group' : 'status');
+  $('#migration-preview').setAttribute('role', selectableImportFormats.has(format) ? 'group' : 'status');
   $('#migration-preview').setAttribute('aria-label', localized('导入预览', 'Import preview'));
-  $('#migration-env-undo').textContent = localized('撤销本批新增', 'Undo added items');
-  $('#migration-env-undo').title = localized('本次解锁期间可撤销最近一次导入。', 'Undo the latest import during this unlocked session.');
-  $('#migration-env-undo').classList.toggle('hidden', format !== 'env' || !envImportUndoId);
+  $('#migration-batch-undo').textContent = localized('撤销本批新增', 'Undo added items');
+  $('#migration-batch-undo').title = localized('本次解锁期间可撤销最近一次导入。', 'Undo the latest import during this unlocked session.');
+  $('#migration-batch-undo').classList.toggle('hidden', !importUndoIds.has(format));
 }
 function resetMigration() {
   migrationSequence++; migrationId = null;
-  if (envImportId) api.cancelEnvImport(envImportId).catch(() => {});
-  envImportId = null;
+  if (batchImport) invoke(`cancel_${batchImport.format}_import`, { id: batchImport.id }).catch(() => {});
+  batchImport = null;
   $('#migration-preview').replaceChildren(); $('#migration-preview').classList.add('hidden');
   $('#migration-confirm').classList.add('hidden');
   $('#migration-error').classList.add('hidden');
-  $('#migration-env-status').classList.add('hidden');
+  $('#migration-batch-status').classList.add('hidden');
 }
 function setMigrationBusy(busy) {
   migrationBusy = busy;
   $('#migration-preview').inert = busy;
-  for (const key of ['select', 'format', 'close', 'env-undo']) $(`#migration-${key}`).disabled = busy;
-  updateEnvSelection();
+  for (const key of ['select', 'format', 'close', 'batch-undo']) $(`#migration-${key}`).disabled = busy;
+  updateImportSelection();
 }
-function updateEnvSelection() {
-  const env = $('#migration-format').value === 'env';
-  $('#migration-confirm').disabled = migrationBusy || (env && !$('#migration-preview input:checked'));
+function updateImportSelection() {
+  const selected = $$('#migration-preview input:checked');
+  $('#migration-confirm').disabled = migrationBusy || (selectableImportFormats.has($('#migration-format').value) && !selected.length);
+  if (batchImport?.format !== 'ssh') return;
+  const selectedIndices = new Set(selected.map(box => Number(box.value)));
+  for (const route of $$('[data-import-ssh-route]')) {
+    const row = batchImport.rows[Number(route.dataset.importSshRoute)];
+    route.textContent = sshImportRouteLabel(row, selectedIndices);
+  }
 }
-function renderEnvImport({ rows, empty, multiline }) {
+function sshImportRouteLabel(row, selectedIndices) {
+  if (row.route === 'direct') return localized('直连', 'Direct');
+  if (row.route === 'jump' && selectedIndices.has(row.jumpIndex)) {
+    return localized(`通过跳板 ${row.jump}`, `Via jump host ${row.jump}`);
+  }
+  return row.jump
+    ? localized(`跳板 ${row.jump} 未配置，连接受阻`, `Jump host ${row.jump} unresolved. Connection blocked.`)
+    : localized('路由待配置，连接受阻', 'Route unresolved. Connection blocked.');
+}
+function renderBatchImport({ rows, empty, multiline }) {
   const preview = $('#migration-preview');
   for (const row of rows) {
     const label = document.createElement('label');
@@ -2759,6 +2773,13 @@ function renderEnvImport({ rows, empty, multiline }) {
     box.checked = !box.disabled;
     const name = document.createElement('span');
     name.textContent = row.name;
+    if (batchImport.format === 'ssh') {
+      const endpoint = document.createElement('small');
+      endpoint.textContent = `${row.user ? `${row.user}@` : ''}${row.host} · ${row.port}`;
+      const route = document.createElement('small');
+      route.dataset.importSshRoute = row.index;
+      name.append(endpoint, route);
+    }
     if (row.conflict) {
       const status = document.createElement('small');
       status.textContent = localized('名称重复，跳过', 'Duplicate name, skipped');
@@ -2769,14 +2790,14 @@ function renderEnvImport({ rows, empty, multiline }) {
   }
   preview.classList.remove('hidden');
   $('#migration-confirm').classList.toggle('hidden', !rows.some(row => !row.conflict));
-  updateEnvSelection();
+  updateImportSelection();
   const notices = [];
   if (empty) notices.push(localized(`跳过 ${empty} 个空值变量。`, `Skipped ${empty} empty variables.`));
   if (multiline) notices.push(localized(`跳过 ${multiline} 个多行值变量。`, `Skipped ${multiline} variables with multiline values.`));
-  if (notices.length) showEnvImportStatus(notices.join(' '));
+  if (notices.length) showBatchImportStatus(notices.join(' '));
 }
-function showEnvImportStatus(message) {
-  const status = $('#migration-env-status');
+function showBatchImportStatus(message) {
+  const status = $('#migration-batch-status');
   status.textContent = message;
   status.classList.remove('hidden');
 }
@@ -2791,18 +2812,19 @@ $('#migration-open').onclick = async () => {
 };
 $('#migration-close').onclick = closeMigration;
 $('#migration-format').onchange = () => { resetMigration(); api.cancelImport().catch(() => {}); migrationHelp(); };
-$('#migration-preview').onchange = updateEnvSelection;
+$('#migration-preview').onchange = updateImportSelection;
 $('#migration-select').onclick = async () => {
   resetMigration(); const sequence = migrationSequence;
   const format = $('#migration-format').value;
   setMigrationBusy(true);
   try {
-    if (format === 'env') {
+    if (selectableImportFormats.has(format)) {
       const id = crypto.randomUUID();
-      envImportId = id;
-      const result = await api.prepareEnvImport(id);
+      batchImport = { id, format, rows: {} };
+      const result = await invoke(`prepare_${format}_import`, { id });
       if (!result || sequence !== migrationSequence) return;
-      renderEnvImport(result);
+      batchImport.rows = Object.fromEntries(result.rows.map(row => [row.index, row]));
+      renderBatchImport(result);
       return;
     }
     const result = await api.prepareImport(format);
@@ -2820,21 +2842,22 @@ $('#migration-select').onclick = async () => {
   } finally { setMigrationBusy(false); }
 };
 $('#migration-confirm').onclick = async () => {
-  if (migrationBusy || (!migrationId && !envImportId)) return;
+  if (migrationBusy || (!migrationId && !batchImport)) return;
   const sequence = migrationSequence;
   setMigrationBusy(true);
   try {
-    if (envImportId) {
+    if (batchImport) {
+      const { id, format } = batchImport;
       const selection = $$('#migration-preview input:checked').map(box => Number(box.value));
       const previewConflicts = $$('#migration-preview input:disabled').length;
-      const result = await api.commitEnvImport(envImportId, selection);
+      const result = await invoke(`commit_${format}_import`, { id, selection });
       if (sequence === migrationSequence) {
-        envImportId = null;
-        if (result.undoId) envImportUndoId = result.undoId;
+        batchImport = null;
+        if (result.undoId) importUndoIds.set(format, result.undoId);
         resetMigration();
         migrationHelp();
         const skipped = result.skipped + previewConflicts;
-        showEnvImportStatus(localized(`已导入 ${result.added} 项，跳过 ${skipped} 个同名项。`, `Imported ${result.added} items. Skipped ${skipped} name conflicts.`));
+        showBatchImportStatus(localized(`已导入 ${result.added} 项，跳过 ${skipped} 个同名项。`, `Imported ${result.added} items. Skipped ${skipped} name conflicts.`));
       }
       await refresh();
       return;
@@ -2844,17 +2867,19 @@ $('#migration-confirm').onclick = async () => {
   catch(error) { if (sequence === migrationSequence) { $('#migration-error').textContent=cleanError(error); $('#migration-error').classList.remove('hidden'); } }
   finally { setMigrationBusy(false); }
 };
-$('#migration-env-undo').onclick = async () => {
-  if (!envImportUndoId || migrationBusy) return;
+$('#migration-batch-undo').onclick = async () => {
+  const format = $('#migration-format').value;
+  const id = importUndoIds.get(format);
+  if (!id || migrationBusy) return;
   const sequence = migrationSequence;
   setMigrationBusy(true);
   try {
-    const result = await api.undoEnvImport(envImportUndoId);
-    envImportUndoId = null;
+    const result = await invoke(`undo_${format}_import`, { id });
+    importUndoIds.delete(format);
     if (sequence === migrationSequence) {
       resetMigration();
       migrationHelp();
-      showEnvImportStatus(localized(`已移入回收站 ${result.removed} 项，保留 ${result.skipped} 项。`, `Moved ${result.removed} items to Trash. Kept ${result.skipped} items.`));
+      showBatchImportStatus(localized(`已移入回收站 ${result.removed} 项，保留 ${result.skipped} 项。`, `Moved ${result.removed} items to Trash. Kept ${result.skipped} items.`));
     }
     await refresh();
   } catch (error) {

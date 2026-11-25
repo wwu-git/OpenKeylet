@@ -41,14 +41,14 @@ struct PreviewRow {
     conflict: bool,
 }
 
-pub(super) struct UndoBatch {
+pub(crate) struct UndoBatch {
     pub id: Uuid,
     created: Vec<(Uuid, u64)>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct CommitSummary {
+pub(crate) struct CommitSummary {
     pub added: usize,
     skipped: usize,
     undo_id: Option<Uuid>,
@@ -219,19 +219,7 @@ impl EnvImport {
             }
             Ok(created)
         })?;
-        let added = created.len();
-        let batch = (!created.is_empty()).then(|| UndoBatch {
-            id: Uuid::new_v4(),
-            created,
-        });
-        Ok((
-            CommitSummary {
-                added,
-                skipped: selection.len() - added,
-                undo_id: batch.as_ref().map(|batch| batch.id),
-            },
-            batch,
-        ))
+        Ok(CommitSummary::from_created(selection.len(), created))
     }
 }
 
@@ -275,16 +263,60 @@ impl Variable {
     }
 }
 
+impl CommitSummary {
+    pub(super) fn from_created(
+        requested: usize,
+        created: Vec<(Uuid, u64)>,
+    ) -> (Self, Option<UndoBatch>) {
+        let added = created.len();
+        let batch = (added != 0).then(|| UndoBatch {
+            id: Uuid::new_v4(),
+            created,
+        });
+        (
+            Self {
+                added,
+                skipped: requested - added,
+                undo_id: batch.as_ref().map(|batch| batch.id),
+            },
+            batch,
+        )
+    }
+}
+
 impl UndoBatch {
     pub(super) fn undo(&self, vault: &Vault) -> Result<UndoSummary> {
         vault.update_document_with_result(|document| {
+            let mut removable = self
+                .created
+                .iter()
+                .filter_map(|&(id, revision)| {
+                    document
+                        .connections
+                        .iter()
+                        .any(|item| item.id == id && item.revision == revision)
+                        .then_some(id)
+                })
+                .collect::<HashSet<_>>();
+            loop {
+                let before = removable.len();
+                for item in &document.connections {
+                    if !removable.contains(&item.id) {
+                        if let Some(jump) = item.ssh_jump_item_id {
+                            removable.remove(&jump);
+                        }
+                    }
+                }
+                if removable.len() == before {
+                    break;
+                }
+            }
             let mut removed = 0;
-            for &(id, revision) in &self.created {
-                if let Some(index) = document
-                    .connections
-                    .iter()
-                    .position(|item| item.id == id && item.revision == revision)
-                {
+            for &(id, _) in &self.created {
+                if !removable.contains(&id) {
+                    continue;
+                }
+                if let Some(index) = document.connections.iter().position(|item| item.id == id) {
                     move_connection_to_trash(document, index);
                     removed += 1;
                 }

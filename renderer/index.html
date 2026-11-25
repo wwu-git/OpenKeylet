@@ -425,14 +425,14 @@
       <div class="modal-card generator-card">
         <div class="modal-header"><h2 id="migration-title">迁入密码库 / Import vault</h2><button class="icon-button" id="migration-close" type="button" aria-label="Close">×</button></div>
         <div class="generator-body migration-body">
-          <label class="field"><span>来源 / Source</span><select class="input" id="migration-format"><option value="bitwarden">Bitwarden · JSON</option><option value="chrome">Chrome / Edge · CSV</option><option value="env">环境变量 / Environment · .env</option></select></label>
+          <label class="field"><span>来源 / Source</span><select class="input" id="migration-format"><option value="bitwarden">Bitwarden · JSON</option><option value="chrome">Chrome / Edge · CSV</option><option value="env">环境变量 / Environment · .env</option><option value="ssh">SSH 配置 · OpenSSH</option></select></label>
           <p id="migration-help"></p>
           <button class="button" id="migration-select" type="button">选择文件 / Choose file</button>
           <div id="migration-preview" class="hidden"></div>
-          <p id="migration-env-status" class="hidden" role="status"></p>
+          <p id="migration-batch-status" class="hidden" role="status"></p>
           <p id="migration-error" class="hidden" role="alert"></p>
           <button class="button primary hidden" id="migration-confirm" type="button">确认导入 / Import</button>
-          <button class="button hidden" id="migration-env-undo" type="button">撤销本批新增 / Undo added items</button>
+          <button class="button hidden" id="migration-batch-undo" type="button">撤销本批新增 / Undo added items</button>
         </div>
       </div>
     </div>

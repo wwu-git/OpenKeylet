@@ -1,5 +1,7 @@
 #[path = "env_import.rs"]
 mod env_import;
+#[path = "ssh_config_import.rs"]
+pub(crate) mod ssh_config_import;
 #[path = "owner_session.rs"]
 mod owner_session;
 
@@ -80,6 +82,8 @@ struct OwnerState {
     pending_backup: Option<SelectableImportState>,
     pending_env: Option<SelectableImportState>,
     env_undo: Option<env_import::UndoBatch>,
+    pending_ssh: Option<SelectableImportState>,
+    ssh_undo: Option<env_import::UndoBatch>,
 }
 
 impl OwnerState {
@@ -91,6 +95,8 @@ impl OwnerState {
         self.pending_backup = None;
         self.pending_env = None;
         self.env_undo = None;
+        self.pending_ssh = None;
+        self.ssh_undo = None;
         runtime.clipboard.clear_on_lock(&runtime.app);
     }
 }
@@ -1467,15 +1473,66 @@ async fn cancel_import(runtime: State<'_, AppRuntime>) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-async fn prepare_env_import(
-    app: AppHandle,
-    runtime: State<'_, AppRuntime>,
+#[derive(Clone, Copy)]
+enum LocalImportKind {
+    Env,
+    Ssh,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+enum LocalImport {
+    Env(env_import::EnvImport),
+    Ssh(ssh_config_import::SshConfigImport),
+}
+
+impl LocalImportKind {
+    fn pending(self, owner: &mut OwnerState) -> &mut Option<SelectableImportState> {
+        match self {
+            Self::Env => &mut owner.pending_env,
+            Self::Ssh => &mut owner.pending_ssh,
+        }
+    }
+
+    fn undo(self, owner: &mut OwnerState) -> &mut Option<env_import::UndoBatch> {
+        match self {
+            Self::Env => &mut owner.env_undo,
+            Self::Ssh => &mut owner.ssh_undo,
+        }
+    }
+
+    fn read(self, path: &Path) -> Result<LocalImport> {
+        Ok(match self {
+            Self::Env => LocalImport::Env(env_import::EnvImport::read(path)?),
+            Self::Ssh => LocalImport::Ssh(ssh_config_import::SshConfigImport::read(path)?),
+        })
+    }
+}
+
+impl LocalImport {
+    fn preview(&self, vault: &Vault, id: Uuid) -> Result<serde_json::Value> {
+        Ok(match self {
+            Self::Env(import) => serde_json::to_value(import.preview(vault, id)?)?,
+            Self::Ssh(import) => serde_json::to_value(import.preview(vault, id)?)?,
+        })
+    }
+
+    fn commit(&self, vault: &Vault, selection: Vec<usize>) -> Result<(env_import::CommitSummary, Option<env_import::UndoBatch>)> {
+        match self {
+            Self::Env(import) => import.commit(vault, selection),
+            Self::Ssh(import) => import.commit(vault, selection),
+        }
+    }
+}
+
+async fn prepare_local_import(
+    app: &AppHandle,
+    runtime: &AppRuntime,
+    kind: LocalImportKind,
     id: Uuid,
-) -> Result<Option<env_import::Preview>, String> {
+) -> Result<Option<serde_json::Value>, String> {
     let epoch = {
         let mut owner = runtime.authorized_owner().await?;
-        owner.pending_env = Some(SelectableImportState::Preparing(id));
+        *kind.pending(&mut owner) = Some(SelectableImportState::Preparing(id));
         owner.session.epoch()
     };
     let result = async {
@@ -1485,16 +1542,16 @@ async fn prepare_env_import(
         };
         drop(runtime.same_owner(epoch).await?);
         let path = path.into_path().map_err(command_error)?;
-        let import = tauri::async_runtime::spawn_blocking(move || env_import::EnvImport::read(&path))
+        let import = tauri::async_runtime::spawn_blocking(move || kind.read(&path))
             .await
             .map_err(command_error)?
             .map_err(command_error)?;
         let mut owner = runtime.same_owner(epoch).await?;
-        if !matches!(owner.pending_env, Some(SelectableImportState::Preparing(current)) if current == id) {
+        if !matches!(kind.pending(&mut owner), Some(SelectableImportState::Preparing(current)) if *current == id) {
             return Err("Import preview changed; choose the file again".to_owned());
         }
         let preview = import.preview(&runtime.vault, id).map_err(command_error)?;
-        owner.pending_env = Some(SelectableImportState::Ready(PendingImport {
+        *kind.pending(&mut owner) = Some(SelectableImportState::Ready(PendingImport {
             id: id.to_string(),
             created: Instant::now(),
             encrypted: runtime.vault.protect_local_state(&import).map_err(command_error)?,
@@ -1503,65 +1560,119 @@ async fn prepare_env_import(
     }
     .await;
     if !matches!(result, Ok(Some(_))) {
-        cancel_env_import(runtime, id).await?;
+        cancel_local_import(runtime, kind, id).await;
     }
     result
 }
 
-#[tauri::command]
-async fn commit_env_import(
-    app: AppHandle,
-    runtime: State<'_, AppRuntime>,
+async fn commit_local_import(
+    app: &AppHandle,
+    runtime: &AppRuntime,
+    kind: LocalImportKind,
     id: Uuid,
     selection: Vec<usize>,
 ) -> Result<env_import::CommitSummary, String> {
     let mut owner = runtime.authorized_owner().await?;
+    let slot = kind.pending(&mut owner);
     let Some(SelectableImportState::Ready(pending)) =
-        owner.pending_env.as_ref().filter(|state| state.matches(id))
+        slot.as_ref().filter(|state| state.matches(id))
     else {
         return Err("Import preview changed; choose the file again".into());
     };
     if pending.created.elapsed().as_secs() >= 300 {
-        owner.pending_env = None;
+        *slot = None;
         return Err("Import preview expired; choose the file again".into());
     }
-    let import: env_import::EnvImport = runtime
-        .vault
+    let import: LocalImport = runtime.vault
         .unprotect_local_state(&pending.encrypted)
         .map_err(command_error)?;
     let (summary, undo) = import.commit(&runtime.vault, selection).map_err(command_error)?;
-    owner.pending_env = None;
+    *slot = None;
     if undo.is_some() {
-        owner.env_undo = undo;
-        emit_changed(&app);
+        *kind.undo(&mut owner) = undo;
+        emit_changed(app);
+    }
+    Ok(summary)
+}
+
+async fn cancel_local_import(runtime: &AppRuntime, kind: LocalImportKind, id: Uuid) {
+    let mut owner = runtime.owner.lock().await;
+    let slot = kind.pending(&mut owner);
+    if slot.as_ref().is_some_and(|state| state.matches(id)) {
+        *slot = None;
+    }
+}
+
+async fn undo_local_import(
+    app: &AppHandle,
+    runtime: &AppRuntime,
+    kind: LocalImportKind,
+    id: Uuid,
+) -> Result<env_import::UndoSummary, String> {
+    let mut owner = runtime.authorized_owner().await?;
+    let undo = kind.undo(&mut owner);
+    let receipt = undo.as_ref().filter(|receipt| receipt.id == id)
+        .ok_or("This import can no longer be undone")?;
+    let summary = receipt.undo(&runtime.vault).map_err(command_error)?;
+    *undo = None;
+    if summary.removed != 0 {
+        emit_changed(app);
     }
     Ok(summary)
 }
 
 #[tauri::command]
+async fn prepare_env_import(
+    app: AppHandle, runtime: State<'_, AppRuntime>, id: Uuid,
+) -> Result<Option<serde_json::Value>, String> {
+    prepare_local_import(&app, &runtime, LocalImportKind::Env, id).await
+}
+
+#[tauri::command]
+async fn commit_env_import(
+    app: AppHandle, runtime: State<'_, AppRuntime>, id: Uuid, selection: Vec<usize>,
+) -> Result<env_import::CommitSummary, String> {
+    commit_local_import(&app, &runtime, LocalImportKind::Env, id, selection).await
+}
+
+#[tauri::command]
 async fn cancel_env_import(runtime: State<'_, AppRuntime>, id: Uuid) -> Result<(), String> {
-    let mut owner = runtime.owner.lock().await;
-    if owner.pending_env.as_ref().is_some_and(|state| state.matches(id)) {
-        owner.pending_env = None;
-    }
+    cancel_local_import(&runtime, LocalImportKind::Env, id).await;
     Ok(())
 }
 
 #[tauri::command]
 async fn undo_env_import(
-    app: AppHandle,
-    runtime: State<'_, AppRuntime>,
-    id: Uuid,
+    app: AppHandle, runtime: State<'_, AppRuntime>, id: Uuid,
 ) -> Result<env_import::UndoSummary, String> {
-    let mut owner = runtime.authorized_owner().await?;
-    let receipt = owner.env_undo.as_ref().filter(|receipt| receipt.id == id)
-        .ok_or("This import can no longer be undone")?;
-    let summary = receipt.undo(&runtime.vault).map_err(command_error)?;
-    owner.env_undo = None;
-    if summary.removed != 0 {
-        emit_changed(&app);
-    }
-    Ok(summary)
+    undo_local_import(&app, &runtime, LocalImportKind::Env, id).await
+}
+
+#[tauri::command]
+async fn prepare_ssh_import(
+    app: AppHandle, runtime: State<'_, AppRuntime>, id: Uuid,
+) -> Result<Option<serde_json::Value>, String> {
+    prepare_local_import(&app, &runtime, LocalImportKind::Ssh, id).await
+}
+
+#[tauri::command]
+async fn commit_ssh_import(
+    app: AppHandle, runtime: State<'_, AppRuntime>, id: Uuid, selection: Vec<usize>,
+) -> Result<env_import::CommitSummary, String> {
+    commit_local_import(&app, &runtime, LocalImportKind::Ssh, id, selection).await
+}
+
+#[tauri::command]
+async fn cancel_ssh_import(runtime: State<'_, AppRuntime>, id: Uuid) -> Result<(), String> {
+    cancel_local_import(&runtime, LocalImportKind::Ssh, id).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn undo_ssh_import(
+    app: AppHandle, runtime: State<'_, AppRuntime>, id: Uuid,
+) -> Result<env_import::UndoSummary, String> {
+    undo_local_import(&app, &runtime, LocalImportKind::Ssh, id).await
 }
 
 #[tauri::command]
@@ -1909,6 +2020,10 @@ pub fn run_gui() -> Result<()> {
             commit_env_import,
             cancel_env_import,
             undo_env_import,
+            prepare_ssh_import,
+            commit_ssh_import,
+            cancel_ssh_import,
+            undo_ssh_import,
             github_backup_status,
             github_backup_account,
             github_backup_generate_key,

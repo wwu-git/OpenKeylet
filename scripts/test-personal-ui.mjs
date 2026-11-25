@@ -67,6 +67,15 @@ try {
       if(command==="cancel_env_import") { (fixture.envCancels ??= []).push(args.id); return; }
       if(command==="commit_env_import") { (fixture.envImports ??= []).push(args.selection); return {added:1,skipped:0,undoId:"env-undo-fixture"}; }
       if(command==="undo_env_import") { fixture.envUndo = args.id; return {removed:1,skipped:0}; }
+      if(command==="prepare_ssh_import") return {id:args.id,rows:[
+        {index:0,name:"test-jump",host:"jump.example.test",port:22,user:"alice",route:"direct",conflict:false},
+        {index:1,name:"test-target",host:"target.example.test",port:2200,user:"bob",route:"jump",jump:"test-jump",jumpIndex:0,conflict:false},
+        {index:2,name:"test-missing",host:"missing.example.test",port:22,user:"",route:"unresolved",jump:"unknown",conflict:false},
+        {index:3,name:"existing",host:"old.example.test",port:22,user:"",route:"direct",conflict:true},
+      ]};
+      if(command==="cancel_ssh_import") return;
+      if(command==="commit_ssh_import") { fixture.sshImport=args.selection; return {added:2,skipped:0,undoId:"ssh-undo-fixture"}; }
+      if(command==="undo_ssh_import") { fixture.sshUndo=args.id; return {removed:2,skipped:0}; }
       if(command==="owner_secret_view") return {fields:[]};
       if(command==="delete_connection") {
         const item=state.connections.find(i=>i.id===args.id);
@@ -503,8 +512,8 @@ try {
   await conflict.waitFor();
   assert.ok(await conflict.isDisabled());
   assert.equal(await conflict.isChecked(),false);
-  assert.match(await page.locator("#migration-env-status").textContent(), /1/);
-  assert.match(await page.locator("#migration-env-status").textContent(), /2/);
+  assert.match(await page.locator("#migration-batch-status").textContent(), /1/);
+  assert.match(await page.locator("#migration-batch-status").textContent(), /2/);
   assert.equal(await page.evaluate(()=>fixture.envImports?.length ?? 0),0);
   await page.locator("#migration-close").click();
   assert.equal(await page.evaluate(()=>fixture.envCancels.length),1);
@@ -512,10 +521,27 @@ try {
   await page.locator("#migration-select").click();
   await envPreview.getByRole("checkbox",{name:/OTHER_KEY/}).uncheck();
   await page.locator("#migration-confirm").click();
-  await page.locator("#migration-env-undo").click();
-  await page.locator("#migration-env-undo").waitFor({state:"hidden"});
+  await page.locator("#migration-batch-undo").click();
+  await page.locator("#migration-batch-undo").waitFor({state:"hidden"});
   assert.deepEqual(await page.evaluate(()=>fixture.envImports),[[0]]);
   assert.equal(await page.evaluate(()=>fixture.envUndo),"env-undo-fixture");
+  await page.locator("#migration-close").click();
+  await page.locator("#migration-open").click();
+  await page.locator("#migration-format").selectOption("ssh");
+  await page.locator("#migration-select").click();
+  const sshTarget = envPreview.locator("label").filter({hasText:"test-target"});
+  await sshTarget.waitFor();
+  assert.match(await sshTarget.innerText(), /bob@target\.example\.test · 2200/);
+  assert.match(await sshTarget.innerText(), /通过跳板 test-jump/);
+  await envPreview.locator("label").filter({hasText:"test-jump"}).filter({hasText:"jump.example.test"}).getByRole("checkbox").uncheck();
+  assert.match(await sshTarget.innerText(), /连接受阻/);
+  assert.ok(await envPreview.getByRole("checkbox",{name:/existing/}).isDisabled());
+  assert.equal(await page.evaluate(()=>fixture.sshImport),undefined);
+  await page.locator("#migration-confirm").click();
+  await page.locator("#migration-batch-undo").click();
+  await page.locator("#migration-batch-undo").waitFor({state:"hidden"});
+  assert.deepEqual(await page.evaluate(()=>fixture.sshImport),[1,2]);
+  assert.equal(await page.evaluate(()=>fixture.sshUndo),"ssh-undo-fixture");
   await page.locator("#migration-close").click();
   await page.locator('[data-page="connections"]').click();
   await page.setViewportSize({width:460,height:690});
