@@ -498,35 +498,6 @@ impl Vault {
         port: u16,
         fingerprint: Option<&str>,
     ) -> Result<()> {
-        let host = ssh_endpoint_host(host)?;
-        anyhow::ensure!(port > 0, "Invalid SSH port");
-        if let Some(value) = fingerprint {
-            use base64::Engine;
-            let decoded = base64::engine::general_purpose::STANDARD_NO_PAD.decode(
-                value
-                    .strip_prefix("SHA256:")
-                    .context("Expected SHA256 SSH fingerprint")?,
-            )?;
-            anyhow::ensure!(decoded.len() == 32, "Invalid SHA256 SSH fingerprint");
-        }
-        self.update_document(|document| {
-            anyhow::ensure!(
-                document.connections.iter().any(|i| i.id == item_id),
-                "SSH project unavailable"
-            );
-            document
-                .ssh_host_trust
-                .retain(|e| e.item_id != item_id || e.host != host || e.port != port);
-            if let Some(fingerprint) = fingerprint {
-                document.ssh_host_trust.push(crate::model::SshHostTrust {
-                    kind: crate::model::SshHostTrustKind::CertificateAuthority,
-                    item_id,
-                    host,
-                    port,
-                    fingerprint: fingerprint.into(),
-                });
-            }
-            Ok(())
-        })
+        self.set_ssh_trust(item_id, host, port, SshHostTrustKind::CertificateAuthority, fingerprint)
     }
 }

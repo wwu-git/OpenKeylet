@@ -17,6 +17,10 @@ fn key(seed: u8) -> russh::keys::PrivateKey {
     russh::keys::PrivateKey::from(ssh_key::private::Ed25519Keypair::from_seed(&[seed; 32]))
 }
 
+fn fingerprint(seed: u8) -> String {
+    key(seed).public_key().fingerprint(ssh_key::HashAlg::Sha256).to_string()
+}
+
 #[derive(Clone)]
 struct TestServer {
     auth: Arc<AtomicUsize>,
@@ -379,6 +383,73 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn draft_direct_probe_and_save_bind_trust_to_the_new_private_key_project() {
+    let (port, server, task) = start(2, None, false).await;
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open(dir.path().join("vault")).unwrap();
+    let observed = probe_draft(&vault, "127.0.0.1", port, None, None).await.unwrap();
+    assert_eq!(observed.fingerprint, fingerprint(2));
+    assert_eq!(server.auth.load(Ordering::SeqCst), 0);
+    assert!(vault.list_connections().unwrap().is_empty());
+    assert!(vault.ssh_host_trust().unwrap().is_empty());
+
+    let mut draft = input("Draft", "127.0.0.1", port, "target-user");
+    draft.ssh_auth_type = "privateKey".into();
+    draft.modules.retain(|module| module.kind != "password");
+    draft.modules.push(serde_json::from_value(serde_json::json!({"kind":"privateKey"})).unwrap());
+    draft.secrets.password = None;
+    let private_key = key(3).to_openssh(ssh_key::LineEnding::LF).unwrap();
+    let pending = |port, fingerprint| crate::vault::PendingSshTrust {
+        host: observed.host.clone(),
+        port,
+        ssh_jump_item_id: None,
+        kind: SshHostTrustKind::HostKey,
+        fingerprint,
+    };
+    for trust in [pending(port, "invalid".into()), pending(if port == 22 { 23 } else { 22 }, observed.fingerprint.clone())] {
+        assert!(vault.save_connection_with_ssh_trust(
+            draft.clone(), None, Some((&private_key, "test key")), Some(trust),
+        ).is_err());
+        assert!(vault.list_connections().unwrap().is_empty());
+        assert!(vault.ssh_host_trust().unwrap().is_empty());
+    }
+    let saved = vault.save_connection_with_ssh_trust(
+        draft, None, Some((&private_key, "test key")), Some(pending(port, observed.fingerprint.clone())),
+    ).unwrap();
+    let trust = vault.ssh_host_trust().unwrap();
+    assert_eq!(trust.len(), 1);
+    assert_eq!(trust[0].item_id, saved.id);
+    assert_eq!(trust[0].fingerprint, observed.fingerprint);
+    let target = vault.get_connection(saved.id).unwrap();
+    executor::test_connection(&vault, &target).await.unwrap();
+    assert_eq!(server.auth.load(Ordering::SeqCst), 1);
+    task.abort();
+}
+
+#[tokio::test]
+async fn draft_jump_probe_needs_saved_jump_trust_and_never_authenticates_to_target() {
+    let fixture = Fixture::new(true).await;
+    let host = "private.test.invalid";
+    fixture.vault.set_ssh_host_trust(fixture.jump, "127.0.0.1", fixture.a_port, None).unwrap();
+    fixture.vault.update_settings_patch(SettingsPatch {
+        allow_untrusted_direct_ssh: Some(true),
+        ..Default::default()
+    }).unwrap();
+    let error = probe_draft(&fixture.vault, host, fixture.b_port, Some(fixture.jump), None)
+        .await.err().expect("draft probe must reject an untrusted jump");
+    assert!(error.to_string().contains("host key is not trusted"), "{error}");
+    assert_eq!(fixture.a.auth.load(Ordering::SeqCst), 0);
+    fixture.vault.set_ssh_host_trust(fixture.jump, "127.0.0.1", fixture.a_port, Some(&fingerprint(1))).unwrap();
+    let observed = probe_draft(&fixture.vault, host, fixture.b_port, Some(fixture.jump), None).await.unwrap();
+    assert_eq!(observed.fingerprint, fingerprint(2));
+    assert_eq!(fixture.a.auth.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.b.auth.load(Ordering::SeqCst), 0);
+    assert!(probe_draft(&fixture.vault, host, fixture.b_port, Some(fixture.jump), Some(fixture.jump)).await.is_err());
+    assert!(probe_draft(&fixture.vault, host, fixture.b_port, Some(fixture.target), None).await.is_err());
+    fixture.closed().await;
+}
+
+#[tokio::test]
 async fn pinned_plain_key_does_not_implicitly_trust_a_host_certificate() {
     let host = key(2);
     let mut builder = ssh_key::certificate::Builder::new(
@@ -547,12 +618,6 @@ async fn imported_routes_require_explicit_trust_and_never_fall_back_to_direct() 
     target_input.ssh_jump_item_id = saved_target.stored.ssh_jump_item_id;
     target_input.secrets.password = Some("target-simulated-password".into());
     vault.save_connection(target_input).unwrap();
-    let fingerprint = |seed| {
-        key(seed)
-            .public_key()
-            .fingerprint(ssh_key::HashAlg::Sha256)
-            .to_string()
-    };
     vault
         .set_ssh_host_trust(jump, "127.0.0.1", fixture.a_port, Some(&fingerprint(9)))
         .unwrap();

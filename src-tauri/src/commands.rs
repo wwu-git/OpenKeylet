@@ -468,6 +468,20 @@ async fn probe_ssh_host(runtime: State<'_, AppRuntime>, id: Uuid) -> Result<crat
 }
 
 #[tauri::command]
+async fn probe_ssh_host_draft(
+    runtime: State<'_, AppRuntime>,
+    host: String,
+    port: u16,
+    ssh_jump_item_id: Option<Uuid>,
+    item_id: Option<Uuid>,
+) -> Result<crate::ssh_transport::SshHostProbe, String> {
+    require_owner_unlocked(&runtime).await?;
+    crate::ssh_transport::probe_draft(&runtime.vault, &host, port, ssh_jump_item_id, item_id)
+        .await
+        .map_err(command_error)
+}
+
+#[tauri::command]
 async fn certificate_capabilities(
     runtime: State<'_, AppRuntime>,
 ) -> Result<crate::vault::CertificateCapabilities, String> {
@@ -587,6 +601,7 @@ async fn save_connection(
     expected_updated_at: Option<String>,
     pending_oci_key_id: Option<Uuid>,
     pending_oci_key_module_id: Option<Uuid>,
+    pending_ssh_trust: Option<crate::vault::PendingSshTrust>,
 ) -> Result<PublicConnection, String> {
     let mut owner = runtime.authorized_owner().await?;
     if let Some(id) = pending_oci_key_id {
@@ -617,7 +632,7 @@ async fn save_connection(
     let private_key = staged_ssh_key(&mut input, owner.pending_private_key.as_ref())?;
     let connection = runtime
         .vault
-        .save_connection_with_private_key(input, expected_updated_at.as_deref(), private_key)
+        .save_connection_with_ssh_trust(input, expected_updated_at.as_deref(), private_key, pending_ssh_trust)
         .map_err(command_error)?;
     if private_key.is_some() {
         owner.pending_private_key.take();
@@ -2062,6 +2077,7 @@ pub fn run_gui() -> Result<()> {
             ssh_host_trust,
             set_ssh_host_trust,
             probe_ssh_host,
+            probe_ssh_host_draft,
             set_ssh_host_ca_trust,
             certificate_capabilities,
             set_certificate_authority,

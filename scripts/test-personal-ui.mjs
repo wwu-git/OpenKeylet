@@ -33,6 +33,10 @@ try {
         fixture.sshTemplateKeySource = args.source;
         return {id:"fixture-ssh-private-key",name:"Synthetic SSH key",fingerprint:"SHA256:test"};
       }
+      if(command==="probe_ssh_host_draft") {
+        fixture.sshDraftProbe = structuredClone(args);
+        return {host:args.host,port:args.port,kind:"hostKey",fingerprint:"SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"};
+      }
       if(command==="save_editor_draft") {
         const draft={id:args.draftId||'fixture-draft',input:structuredClone(args.input)};
         fixture.drafts=[draft,...fixture.drafts.filter(d=>d.id!==draft.id)];return draft;
@@ -47,6 +51,7 @@ try {
       if(command==="save_connection") {
         if (fixture.failSave) throw Error("Synthetic save failure");
         fixture.saved.push(structuredClone(args.input));
+        if (args.pendingSshTrust) fixture.savedSshTrust = structuredClone(args.pendingSshTrust);
         const item = {...args.input,id:args.input.id || String(fixture.saved.length),updatedAt:new Date().toISOString(),capabilities:[],passkeys:[],secret:{fields:[]},host:args.input.modules.find(m=>m.kind==='host')?.value||'',port:Number(args.input.modules.find(m=>m.kind==='port')?.value||0),baseUrl:args.input.modules.find(m=>m.kind==='url')?.value||'',modules:args.input.modules.map(m=>({...m,secret:!['host','url','port'].includes(m.kind),configured:true,value:['host','url','port'].includes(m.kind)?m.value:""}))};
         const index = state.connections.findIndex(existing=>existing.id===item.id);
         if (index<0) state.connections.push(item); else state.connections[index]=item;
@@ -323,7 +328,9 @@ try {
   await hostModule.locator('[data-module-alternate-value]').last().fill('c.example');
   await hostModule.locator('[data-default-address="1"]').click();
   assert.deepEqual(await addressValues(hostModule), ['b.example','a.example','c.example']);
-  assert.equal(await page.locator('#ssh-trust-probe').isDisabled(), true, 'Changing the draft default disables trust actions for the saved host');
+  assert.equal(await page.locator('#ssh-trust-probe').isEnabled(), true);
+  assert.equal(await page.locator('#ssh-trust-remove').isDisabled(), true);
+  assert.match(await page.locator('#ssh-trust-note').textContent(), /b\.example:22/);
   await hostModule.locator('[data-remove-address="0"]').click();
   assert.deepEqual(await addressValues(hostModule), ['a.example','c.example']);
   await hostModule.locator('[data-default-address="1"]').click();
@@ -795,13 +802,31 @@ try {
   await page.locator('[data-kind="username"] [data-secret-value]').fill('fixture-user');
   await privateKeyRow.locator('.key-source-menu summary').click();
   await privateKeyRow.locator('[data-stage-key="file"]').click();
+  const savesBeforeSsh = await page.evaluate(() => fixture.saved.length);
+  const sshFingerprint = 'SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+  await page.locator('#ssh-trust-details summary').click();
+  await page.locator('#ssh-trust-probe').click();
+  await page.waitForFunction(fingerprint => document.querySelector('#ssh-trust-fingerprint').value === fingerprint, sshFingerprint);
+  assert.deepEqual(await page.evaluate(() => fixture.sshDraftProbe), {host:'ssh.example.test',port:22,sshJumpItemId:null,itemId:null});
+  assert.equal(await page.locator('#ssh-trust-verified').isChecked(), false);
+  await page.locator('#ssh-trust-verified').check();
+  await page.locator('#ssh-trust-save').click();
+  assert.deepEqual(await page.evaluate(() => [fixture.saved.length, fixture.savedSshTrust]), [savesBeforeSsh, undefined]);
+  await page.evaluate(() => { fixture.failSave = true; });
+  await page.locator('#save-connection-button').click();
+  await page.locator('#toast-region').getByText('Synthetic save failure').waitFor();
+  assert.deepEqual(await page.evaluate(() => [fixture.saved.length, fixture.savedSshTrust]), [savesBeforeSsh, undefined]);
+  await page.evaluate(() => { fixture.failSave = false; });
   await page.locator('#save-connection-button').click();
   await page.locator("#connection-modal").waitFor({state:"hidden"});
+  await page.locator('#toast-region').getByText('项目已加密保存，本机信任已更新。').waitFor();
   const keyProject = await page.evaluate(() => fixture.saved.at(-1));
   assert.equal(await page.evaluate(() => fixture.sshTemplateKeySource), 'file');
   assert.equal(keyProject.sshAuthType, 'privateKey');
   assert.equal(keyProject.privateKeyImportPath, 'fixture-ssh-private-key');
   assert.equal(keyProject.modules.find(module => module.kind === 'privateKey').agentVisible, false);
+  assert.deepEqual(await page.evaluate(() => fixture.savedSshTrust), {host:'ssh.example.test',port:22,sshJumpItemId:null,kind:'hostKey',fingerprint:sshFingerprint});
+  assert.equal(Object.hasOwn(keyProject, 'pendingSshTrust'), false);
   assert.deepEqual(errors,[]);
   console.log(JSON.stringify({ok:true,checks:["combined add/draft selector","draft preservation and recovery","card editor","encrypted field payload","one header search and filter panel with Ctrl/Cmd+F and independent page queries","multiple host and URL addresses, default switching, removal, drafts, failed save and address search","combined keyword, type, exact folder and enabled status filters","unsaved edits survive filtering and are saved as drafts","460px filter controls","multiline secure note","generator inserts password","browser address copy, pairing, launch failures and recovery","backup password flow","multiple website rules","migration preview/cancel/commit","committed .env template copy and undo","KeePass XML preview, cancel and confirmation","1Password 1PUX preview, cancel and confirmation","1Password CSV preview, cancel and confirmation","offline cURL preview, cancel, rejection and confirmation","AWS profile preview, cancel, selective import and undo","password history","trash restore and purge from settings","narrow layout"],artifacts},null,2));
 } finally {await browser.close();server.close();}

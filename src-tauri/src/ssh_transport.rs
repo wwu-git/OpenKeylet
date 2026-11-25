@@ -368,20 +368,54 @@ pub async fn probe(vault: &Vault, id: Uuid) -> Result<SshHostProbe> {
     let target = vault.get_connection(id)?;
     ensure!(target.stored.enabled, "SSH project disabled");
     let jump = vault.ssh_jump_connection(&target)?;
-    let result = tokio::time::timeout(CONNECT_TIMEOUT, async {
+    probe_endpoint(vault, &target.stored.host, target.stored.port, jump.as_ref())
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!(crate::policy::redact_values(
+                format!("{error:#}"),
+                &route_secrets(&target, jump.as_ref())
+            ))
+        })
+}
+
+pub(crate) async fn probe_draft(
+    vault: &Vault,
+    host: &str,
+    port: u16,
+    jump_id: Option<Uuid>,
+    item_id: Option<Uuid>,
+) -> Result<SshHostProbe> {
+    let jump = jump_id
+        .map(|id| vault.draft_ssh_jump_connection(id, item_id))
+        .transpose()?;
+    probe_endpoint(vault, host, port, jump.as_ref())
+        .await
+        .map_err(|error| {
+            let values = zeroize::Zeroizing::new(
+                jump.as_ref().map_or_else(Vec::new, |jump| jump.secrets.non_empty_values()),
+            );
+            anyhow::anyhow!(crate::policy::redact_values(format!("{error:#}"), &values))
+        })
+}
+
+async fn probe_endpoint(
+    vault: &Vault,
+    host: &str,
+    port: u16,
+    jump: Option<&DecryptedConnection>,
+) -> Result<SshHostProbe> {
+    let host = host.trim();
+    let endpoint_host = ssh_endpoint_host(host)?;
+    ensure!(port > 0, "Invalid SSH port");
+    tokio::time::timeout(CONNECT_TIMEOUT, async {
         let a;
         let observed = Arc::new(Mutex::new(None));
-        if let Some(jump) = &jump {
+        if let Some(jump) = jump {
             a = direct(jump, expected_policy(&vault.ssh_host_trust()?, jump, false)?)
                 .await
                 .context("Jump host A")?;
             let channel = a
-                .channel_open_direct_tcpip(
-                    target.stored.host.clone(),
-                    u32::from(target.stored.port),
-                    "127.0.0.1",
-                    0,
-                )
+                .channel_open_direct_tcpip(host, u32::from(port), "127.0.0.1", 0)
                 .await
                 .context("Jump forwarding failed")?;
             let _ = handshake(
@@ -391,10 +425,9 @@ pub async fn probe(vault: &Vault, id: Uuid) -> Result<SshHostProbe> {
             )
             .await;
         } else {
-            let stream =
-                tokio::net::TcpStream::connect((target.stored.host.as_str(), target.stored.port))
-                    .await
-                    .context("SSH TCP connection failed")?;
+            let stream = tokio::net::TcpStream::connect((host, port))
+                .await
+                .context("SSH TCP connection failed")?;
             let _ = handshake(stream, ServerKeyPolicy::Probe, observed.clone()).await;
         }
         let observation = observed
@@ -403,21 +436,15 @@ pub async fn probe(vault: &Vault, id: Uuid) -> Result<SshHostProbe> {
             .clone()
             .context("SSH host did not provide a public key")?;
         Ok(SshHostProbe {
-            host: ssh_endpoint_host(&target.stored.host)?,
-            port: target.stored.port,
+            host: endpoint_host,
+            port,
             fingerprint: observation.fingerprint,
             kind: if observation.ca_fingerprint.is_some() { SshHostTrustKind::CertificateAuthority } else { SshHostTrustKind::HostKey },
             ca_fingerprint: observation.ca_fingerprint,
         })
     })
     .await
-    .context("SSH host key probe timed out")?;
-    result.map_err(|error: anyhow::Error| {
-        anyhow::anyhow!(crate::policy::redact_values(
-            format!("{error:#}"),
-            &route_secrets(&target, jump.as_ref())
-        ))
-    })
+    .context("SSH host key probe timed out")?
 }
 
 #[cfg(test)]

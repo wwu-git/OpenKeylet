@@ -42,6 +42,11 @@ try {
       }
       if (command === 'ssh_host_trust') return structuredClone(fixture.trust);
       if (command === 'probe_ssh_host') { fixture.probes.push(args.id); return { host: state.connections.find(item => item.id === args.id).host, port: 22, fingerprint: 'SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', kind: 'certificateAuthority', caFingerprint: 'SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB' }; }
+      if (command === 'probe_ssh_host_draft') {
+        fixture.lastDraftProbe = structuredClone(args);
+        if (fixture.deferDraftProbe) await new Promise(resolve => { fixture.finishDraftProbe = resolve; });
+        return { host: args.host, port: args.port, fingerprint: 'SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', kind: 'hostKey' };
+      }
       if (command === 'set_ssh_host_trust' || command === 'set_ssh_host_ca_trust') {
         fixture.trustWrites.push({ ...structuredClone(args), kind: command === 'set_ssh_host_ca_trust' ? 'certificateAuthority' : 'hostKey' });
         fixture.trust = fixture.trust.filter(entry => entry.itemId !== args.id || entry.host !== args.host || entry.port !== args.port);
@@ -95,10 +100,28 @@ try {
   assert.equal(await page.evaluate(() => fixture.trust[0].kind), 'certificateAuthority');
 
   await page.locator('#ssh-route-mode').selectOption('direct');
-  assert.equal(await page.locator('#ssh-trust-save').isDisabled(), true);
+  assert.equal(await page.locator('#ssh-trust-probe').isEnabled(), true);
+  assert.equal(await page.locator('#ssh-trust-remove').isDisabled(), true);
+  const draftHost = page.locator('#module-list [data-kind="host"] [data-module-value]');
+  const trustFingerprint = page.locator('#ssh-trust-fingerprint');
+  await page.locator('#ssh-trust-kind').selectOption('hostKey');
+  await page.evaluate(() => { fixture.deferDraftProbe = true; });
+  await page.locator('#ssh-trust-probe').click();
+  await page.waitForFunction(() => typeof fixture.finishDraftProbe === 'function');
+  await draftHost.fill('other.test.invalid');
+  await draftHost.fill('private.test.invalid');
+  await page.evaluate(() => { fixture.deferDraftProbe = false; fixture.finishDraftProbe(); });
+  assert.equal(await trustFingerprint.inputValue(), '');
+  await page.locator('#ssh-trust-probe').click();
+  await page.waitForFunction(() => document.querySelector('#ssh-trust-fingerprint').value.startsWith('SHA256:'));
+  assert.deepEqual(await page.evaluate(() => fixture.lastDraftProbe), { host: 'private.test.invalid', port: 22, sshJumpItemId: null, itemId: 'b' });
+  await page.locator('#ssh-trust-verified').check();
+  await page.locator('#ssh-trust-save').click();
   await page.locator('#connection-form .modal-footer [data-close-modal]').click();
   await page.locator('#connection-modal').waitFor({ state: 'hidden' });
+  assert.equal(await page.evaluate(() => fixture.trustWrites.length), 2);
   assert.equal(await page.evaluate(() => fixture.trust.length), 1);
+  assert.equal(await page.evaluate(() => Object.hasOwn(fixture.drafts[0].input, 'pendingSshTrust')), false);
   await page.evaluate(() => sessionStorage.setItem('brokenJump', '1'));
   await page.reload(); await openB();
   assert.equal(await page.locator('#ssh-route-mode').inputValue(), 'jump');

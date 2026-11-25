@@ -5,7 +5,8 @@ use crate::{
         Activity, AppState, ConnectionInput, ImportSummary, ItemModule, McpState, NewActivity,
         OwnerEditorDraft, OwnerSecretField, OwnerSecretView, PortableConnection, PublicConnection,
         SecretBundle, SecretField, SecretProfile, SecurityState, Settings, SettingsPatch,
-        StoredConnection, StoredEditorDraft, VaultDocument, module_kind_has_plaintext_reveal,
+        SshHostTrust, SshHostTrustKind, StoredConnection, StoredEditorDraft, VaultDocument,
+        module_kind_has_plaintext_reveal,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -23,6 +24,17 @@ use uuid::Uuid;
 
 const MAX_ACTIVITIES: usize = 3_000;
 const VAULT_VERSION: u8 = 18;
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct PendingSshTrust {
+    pub(crate) host: String,
+    pub(crate) port: u16,
+    pub(crate) ssh_jump_item_id: Option<Uuid>,
+    pub(crate) kind: SshHostTrustKind,
+    pub(crate) fingerprint: String,
+}
+
 #[path = "vault_certificates.rs"]
 mod certificates;
 pub use certificates::{CertificateActor, CertificateCapabilities, CertificateAuthorityStatus, SigningPermissionChange};
@@ -131,50 +143,70 @@ impl Vault {
     }
 
     pub fn set_ssh_host_trust(&self, item_id: Uuid, host: &str, port: u16, fingerprint: Option<&str>) -> Result<()> {
-        let host = ssh_endpoint_host(host)?;
-        anyhow::ensure!(port > 0, "Invalid SSH port");
-        if let Some(value) = fingerprint {
-            use base64::Engine;
-            let encoded = value.strip_prefix("SHA256:").context("Expected SHA256 SSH fingerprint")?;
-            let decoded = base64::engine::general_purpose::STANDARD_NO_PAD.decode(encoded)
-                .context("Invalid SHA256 SSH fingerprint")?;
-            anyhow::ensure!(decoded.len() == 32, "Invalid SHA256 SSH fingerprint");
-        }
+        self.set_ssh_trust(item_id, host, port, SshHostTrustKind::HostKey, fingerprint)
+    }
+
+    fn set_ssh_trust(
+        &self,
+        item_id: Uuid,
+        host: &str,
+        port: u16,
+        kind: SshHostTrustKind,
+        fingerprint: Option<&str>,
+    ) -> Result<()> {
+        let host = ssh_trust_endpoint(host, port, fingerprint)?;
         self.update_document(|document| {
             anyhow::ensure!(document.connections.iter().any(|item| item.id == item_id), "SSH project unavailable");
-            document.ssh_host_trust.retain(|entry| entry.item_id != item_id || entry.host != host || entry.port != port);
-            if let Some(fingerprint) = fingerprint {
-                document.ssh_host_trust.push(crate::model::SshHostTrust { kind: crate::model::SshHostTrustKind::HostKey, item_id, host, port, fingerprint: fingerprint.to_owned() });
-            }
+            replace_ssh_trust(document, item_id, host, port, kind, fingerprint);
             Ok(())
         })
     }
 
-    pub(crate) fn validate_ssh_jump(&self, document: &VaultDocument, item: &StoredConnection, secrets: &SecretBundle) -> Result<()> {
+    fn validated_ssh_jump(
+        &self,
+        document: &VaultDocument,
+        item: &StoredConnection,
+        secrets: &SecretBundle,
+    ) -> Result<Option<DecryptedConnection>> {
         anyhow::ensure!(!item.ssh_jump_unresolved, "SSH jump reference is unresolved; select the jump project again");
-        if let Some(id) = item.ssh_jump_item_id {
-            anyhow::ensure!(id != item.id, "An SSH project cannot be its own jump host");
-            anyhow::ensure!(ssh_config_complete(item, secrets), "SSH target configuration is incomplete");
-            let jump = document.connections.iter().find(|candidate| candidate.id == id)
-                .context("SSH jump project is unavailable")?;
-            anyhow::ensure!(jump.enabled && jump.ssh_jump_item_id.is_none() && !jump.ssh_jump_unresolved, "SSH jump must be enabled and use a direct connection");
-            let jump_secrets = self.decrypt_stored(jump)?;
-            anyhow::ensure!(ssh_config_complete(jump, &jump_secrets), "SSH jump configuration is incomplete");
-        }
-        if item.ssh_jump_item_id.is_some() {
-            anyhow::ensure!(!document.connections.iter().any(|candidate| candidate.id != item.id && candidate.ssh_jump_item_id == Some(item.id)), "Multi-hop SSH is not supported");
-        }
-        Ok(())
+        let Some(id) = item.ssh_jump_item_id else { return Ok(None) };
+        anyhow::ensure!(ssh_config_complete(item, secrets), "SSH target configuration is incomplete");
+        self.direct_jump_in_document(document, id, Some(item.id)).map(Some)
     }
 
     pub fn ssh_jump_connection(&self, target: &DecryptedConnection) -> Result<Option<DecryptedConnection>> {
         let document = self.read_document()?;
-        self.validate_ssh_jump(&document, &target.stored, &target.secrets)?;
-        target.stored.ssh_jump_item_id.map(|id| {
-            let stored = document.connections.iter().find(|item| item.id == id).context("SSH jump project unavailable")?.clone();
-            let secrets = self.decrypt_stored(&stored)?;
-            Ok(DecryptedConnection { stored, secrets })
-        }).transpose()
+        self.validated_ssh_jump(&document, &target.stored, &target.secrets)
+    }
+
+    pub(crate) fn draft_ssh_jump_connection(
+        &self,
+        id: Uuid,
+        target_id: Option<Uuid>,
+    ) -> Result<DecryptedConnection> {
+        let document = self.read_document()?;
+        self.direct_jump_in_document(&document, id, target_id)
+    }
+
+    fn direct_jump_in_document(
+        &self,
+        document: &VaultDocument,
+        id: Uuid,
+        target_id: Option<Uuid>,
+    ) -> Result<DecryptedConnection> {
+        anyhow::ensure!(Some(id) != target_id, "An SSH project cannot be its own jump host");
+        let stored = document.connections.iter().find(|item| item.id == id)
+            .context("SSH jump project is unavailable")?;
+        anyhow::ensure!(stored.enabled && stored.ssh_jump_item_id.is_none() && !stored.ssh_jump_unresolved, "SSH jump must be enabled and use a direct connection");
+        let secrets = self.decrypt_stored(stored)?;
+        anyhow::ensure!(ssh_config_complete(stored, &secrets), "SSH jump configuration is incomplete");
+        anyhow::ensure!(
+            !target_id.is_some_and(|id| document.connections.iter().any(|item| {
+                item.id != id && item.ssh_jump_item_id == Some(id)
+            })),
+            "Multi-hop SSH is not supported"
+        );
+        Ok(DecryptedConnection { stored: stored.clone(), secrets })
     }
 
     pub fn data_dir(&self) -> &Path {
@@ -573,7 +605,38 @@ impl Vault {
         expected_updated_at: Option<&str>,
         private_key: Option<(&str, &str)>,
     ) -> Result<PublicConnection> {
-        self.save_connection_inner(input, expected_updated_at, private_key)
+        self.save_connection_with_ssh_trust(input, expected_updated_at, private_key, None)
+    }
+
+    pub(crate) fn save_connection_with_ssh_trust(
+        &self,
+        input: ConnectionInput,
+        expected_updated_at: Option<&str>,
+        private_key: Option<(&str, &str)>,
+        pending: Option<PendingSshTrust>,
+    ) -> Result<PublicConnection> {
+        let pending = pending
+            .map(|mut trust| {
+                trust.host = ssh_trust_endpoint(&trust.host, trust.port, Some(&trust.fingerprint))?;
+                Ok::<_, anyhow::Error>(trust)
+            })
+            .transpose()?;
+        self.update_document_with_result(|document| {
+            let saved = self.save_connection_in_document(
+                document, input, expected_updated_at, private_key,
+            )?;
+            if let Some(trust) = pending {
+                anyhow::ensure!(
+                    ssh_endpoint_host(&saved.host)? == trust.host && saved.port == trust.port
+                        && saved.ssh_jump_item_id == trust.ssh_jump_item_id && !saved.ssh_jump_unresolved,
+                    "Verified SSH fingerprint does not match the saved route"
+                );
+                replace_ssh_trust(
+                    document, saved.id, trust.host, trust.port, trust.kind, Some(&trust.fingerprint),
+                );
+            }
+            Ok(saved)
+        })
     }
 
     #[cfg(test)]
@@ -603,18 +666,7 @@ impl Vault {
         input.modules.retain(|module| module.kind != "url");
         push_module(&mut input.modules, "url", "", config.base_url()?.as_str());
         migrate_legacy_oci_input(&mut input)?;
-        self.save_connection_inner(input, expected, None)
-    }
-
-    fn save_connection_inner(
-        &self,
-        input: ConnectionInput,
-        expected_updated_at: Option<&str>,
-        private_key: Option<(&str, &str)>,
-    ) -> Result<PublicConnection> {
-        self.update_document_with_result(|document| {
-            self.save_connection_in_document(document, input, expected_updated_at, private_key)
-        })
+        self.save_connection_with_private_key(input, expected, None)
     }
     pub(crate) fn decrypt_stored(&self, item: &StoredConnection) -> Result<SecretBundle> {
         self.inner.key.decrypt(&item.encrypted_secrets)
@@ -770,7 +822,7 @@ impl Vault {
             let mut stored =
                 normalize_connection(input, existing.as_ref(), &secrets, imported_key_name, now)?;
             stored.encrypted_secrets = self.inner.key.encrypt(&secrets)?;
-            self.validate_ssh_jump(document, &stored, &secrets)?;
+            self.validated_ssh_jump(document, &stored, &secrets)?;
             let public = stored.public(Some(&secrets));
             if let Some(index) = existing_index {
                 document.connections[index] = stored;
@@ -3063,4 +3115,31 @@ pub fn ssh_endpoint_host(host: &str) -> Result<String> {
     let host = host.trim().trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
     anyhow::ensure!(!host.is_empty() && !host.chars().any(|ch| ch.is_control() || ch.is_whitespace()), "Invalid SSH host");
     Ok(host)
+}
+
+fn ssh_trust_endpoint(host: &str, port: u16, fingerprint: Option<&str>) -> Result<String> {
+    let host = ssh_endpoint_host(host)?;
+    anyhow::ensure!(port > 0, "Invalid SSH port");
+    if let Some(value) = fingerprint {
+        use base64::Engine;
+        let encoded = value.strip_prefix("SHA256:").context("Expected SHA256 SSH fingerprint")?;
+        let decoded = base64::engine::general_purpose::STANDARD_NO_PAD.decode(encoded)
+            .context("Invalid SHA256 SSH fingerprint")?;
+        anyhow::ensure!(decoded.len() == 32, "Invalid SHA256 SSH fingerprint");
+    }
+    Ok(host)
+}
+
+fn replace_ssh_trust(
+    document: &mut VaultDocument,
+    item_id: Uuid,
+    host: String,
+    port: u16,
+    kind: SshHostTrustKind,
+    fingerprint: Option<&str>,
+) {
+    document.ssh_host_trust.retain(|entry| entry.item_id != item_id || entry.host != host || entry.port != port);
+    if let Some(fingerprint) = fingerprint {
+        document.ssh_host_trust.push(SshHostTrust { kind, item_id, host, port, fingerprint: fingerprint.to_owned() });
+    }
 }
