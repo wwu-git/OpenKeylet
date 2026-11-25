@@ -29,6 +29,10 @@ try {
       if(command==="owner_status") return {pinConfigured:false,unlocked:true};
       if(command==="owner_editor_drafts") return structuredClone(fixture.drafts);
       if(command==="agent_mcp_status") return [];
+      if(command==="stage_private_key") {
+        fixture.sshTemplateKeySource = args.source;
+        return {id:"fixture-ssh-private-key",name:"Synthetic SSH key",fingerprint:"SHA256:test"};
+      }
       if(command==="save_editor_draft") {
         const draft={id:args.draftId||'fixture-draft',input:structuredClone(args.input)};
         fixture.drafts=[draft,...fixture.drafts.filter(d=>d.id!==draft.id)];return draft;
@@ -775,6 +779,29 @@ try {
   await page.locator('[data-item-template="card"]').click();
   await page.screenshot({path:path.join(artifacts,"narrow-card-editor.png")});
   assert.ok(await page.evaluate(()=>document.querySelector("#connection-modal .modal-card").getBoundingClientRect().bottom<=innerHeight));
+  await page.locator('#connection-modal .modal-header [data-close-modal]').click();
+  await page.locator("#connection-modal").waitFor({state:"hidden"});
+  await page.locator("#add-connection-button").click();
+  assert.ok(await page.locator('[data-item-template="ssh"]').isVisible());
+  await page.locator('[data-item-template="sshKey"]').click();
+  assert.equal(await page.locator('#connection-type').inputValue(), 'ssh');
+  assert.equal(await page.locator('#ssh-auth-type').inputValue(), 'privateKey');
+  assert.deepEqual(await page.locator('#module-list .module-row').evaluateAll(rows => rows.map(row => row.dataset.kind)), ['host','port','username','privateKey']);
+  assert.equal(await page.locator('[data-kind="port"] [data-module-value]').inputValue(), '22');
+  const privateKeyRow = page.locator('#module-list [data-kind="privateKey"]');
+  assert.equal(await privateKeyRow.locator('[data-module-agent-visible]').getAttribute('aria-pressed'), 'false');
+  await page.locator('#connection-name').fill('Synthetic SSH key project');
+  await page.locator('[data-kind="host"] [data-module-value]').fill('ssh.example.test');
+  await page.locator('[data-kind="username"] [data-secret-value]').fill('fixture-user');
+  await privateKeyRow.locator('.key-source-menu summary').click();
+  await privateKeyRow.locator('[data-stage-key="file"]').click();
+  await page.locator('#save-connection-button').click();
+  await page.locator("#connection-modal").waitFor({state:"hidden"});
+  const keyProject = await page.evaluate(() => fixture.saved.at(-1));
+  assert.equal(await page.evaluate(() => fixture.sshTemplateKeySource), 'file');
+  assert.equal(keyProject.sshAuthType, 'privateKey');
+  assert.equal(keyProject.privateKeyImportPath, 'fixture-ssh-private-key');
+  assert.equal(keyProject.modules.find(module => module.kind === 'privateKey').agentVisible, false);
   assert.deepEqual(errors,[]);
   console.log(JSON.stringify({ok:true,checks:["combined add/draft selector","draft preservation and recovery","card editor","encrypted field payload","one header search and filter panel with Ctrl/Cmd+F and independent page queries","multiple host and URL addresses, default switching, removal, drafts, failed save and address search","combined keyword, type, exact folder and enabled status filters","unsaved edits survive filtering and are saved as drafts","460px filter controls","multiline secure note","generator inserts password","browser address copy, pairing, launch failures and recovery","backup password flow","multiple website rules","migration preview/cancel/commit","committed .env template copy and undo","KeePass XML preview, cancel and confirmation","1Password 1PUX preview, cancel and confirmation","1Password CSV preview, cancel and confirmation","offline cURL preview, cancel, rejection and confirmation","AWS profile preview, cancel, selective import and undo","password history","trash restore and purge from settings","narrow layout"],artifacts},null,2));
 } finally {await browser.close();server.close();}

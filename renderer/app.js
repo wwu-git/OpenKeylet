@@ -137,6 +137,7 @@ const staticCopy = [
   ['[data-item-template="identity"] > span', 'html', '身份资料<small>姓名 + 联系方式 + 地址</small>', 'IDENTITY<small>NAME + CONTACT + ADDRESS</small>'],
   ['[data-item-template="secureNote"] > span', 'html', '安全笔记<small>加密保存长文本</small>', 'SECURE NOTE<small>ENCRYPTED TEXT</small>'],
   ['[data-item-template="ssh"] > span', 'html', 'SSH<small>主机 + 端口 + 账号 + 密码</small>', 'SSH<small>HOST + PORT + USER + PASSWORD</small>'],
+  ['[data-item-template="sshKey"] > span', 'html', 'SSH 私钥<small>主机 + 端口 + 账号 + 私钥</small>', 'SSH Key<small>HOST + PORT + USER + PRIVATE KEY</small>'],
   ['[data-item-template="api"] > span', 'html', 'API<small>API 凭据</small>', 'API<small>API CREDENTIAL</small>'],
   ['[data-item-template="aws"] > span', 'html', 'AWS API<small>SigV4 本地签名，操作由 Agent 决定</small>', 'AWS API<small>Local SigV4 signing; the agent chooses operations</small>'],
   ['[data-item-template="oci"] > span', 'html', 'OCI API<small>本地签名代执行，接口和操作由 Agent 决定</small>', 'OCI API<small>Local signing; the agent chooses API operations</small>'],
@@ -2019,6 +2020,7 @@ function applyTemplate(template) {
     identity: ['firstName', 'lastName', 'email', 'phone', 'address1', 'address2', 'city', 'state', 'postalCode', 'country'],
     secureNote: ['secureNote'],
     ssh: ['host', 'port', 'username', 'password'],
+    sshKey: ['host', 'port', 'username', 'privateKey'],
     api: ['url', 'apiCredential'],
     sshCertificate: ['host', 'port', 'username', 'privateKey', 'sshCertificate'],
     tlsCertificate: ['privateKey', 'publicKey', 'certificate', 'csr', 'caCertificate'],
@@ -2026,8 +2028,9 @@ function applyTemplate(template) {
     tlsAuthority: ['privateKey', 'caCertificate'],
     blank: [],
   };
-  value('#connection-type', template === 'sshCertificate' ? 'ssh' : ['blank', 'tlsCertificate', 'sshAuthority', 'tlsAuthority'].includes(template) ? 'custom' : template);
-  if (template === 'sshCertificate') editorSourceInput = { ...editorSourceInput, sshAuthType: 'certificate' };
+  const sshAuthType = { sshKey: 'privateKey', sshCertificate: 'certificate' }[template];
+  value('#connection-type', sshAuthType ? 'ssh' : ['blank', 'tlsCertificate', 'sshAuthority', 'tlsAuthority'].includes(template) ? 'custom' : template);
+  if (sshAuthType) editorSourceInput = { ...editorSourceInput, sshAuthType };
   currentModules = (presets[template] || []).map((kind) => ({ id: crypto.randomUUID(), kind, name: kind, value: kind === 'port' ? '22' : '', alternateValues: [], secretValue: '', configured: false, existing: false, privateKeyName: '', pending: '', agentVisible: defaultModuleAgentVisible(kind) }));
   $('#template-picker').classList.add('hidden');
   renderModules();
