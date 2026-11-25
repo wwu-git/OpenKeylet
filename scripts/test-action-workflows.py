@@ -16,9 +16,16 @@ class Endpoint(BaseHTTPRequestHandler):
         token = self.headers.get("Authorization")
         self.server.requests.append(token)
         body = json.dumps({"authorizedAccount": token}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
+        status = 403 if self.path == "/denied" else 200
+        content_type = "application/json"
+        if self.path == "/text":
+            body = b"fixture response"
+            content_type = "text/plain"
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        if status == 403:
+            self.send_header("X-Request-Id", "fixture-denial")
         self.end_headers()
         self.wfile.write(body)
 
@@ -121,6 +128,59 @@ def verify(binary, directory, address, requests):
         response = session.data("http_send", itemId=requested_id)
         assert response["status"] == 200 and requests[-1] == "Bearer fixture-token-Cloud One"
         assert "fixture-token" not in json.dumps(response)
+
+        planned = session.data("action_capabilities", action="httpRequest",
+                               itemId=requested_id, method="GET")
+        assert planned["status"] == "ready"
+        assert planned["project"]["id"] == requested_id
+        call = planned["nextCall"]
+        assert call["tool"] == "http_send" and call["arguments"]["itemId"] == requested_id
+        assert call["arguments"]["responseFormat"] == "structured"
+        structured = session.tool(call["tool"], **call["arguments"])
+        assert structured["structuredContent"]["status"] == 200
+        assert isinstance(structured["structuredContent"]["data"], dict)
+        assert "body" not in structured["structuredContent"]
+        assert "fixture-token" not in json.dumps(structured)
+        assert len(json.dumps(structured["content"])) < len(json.dumps(structured["structuredContent"]))
+
+        text = session.data("http_send", itemId=requested_id, url="/text",
+                            responseFormat="structured")
+        assert text["body"] == "fixture response" and "data" not in text
+        brief = session.data("http_send", itemId=requested_id, maxResponseBytes=2,
+                             responseFormat="structured")
+        assert brief["truncated"] and "body" in brief and "data" not in brief
+        denied = session.tool("http_send", itemId=requested_id, url="/denied",
+                              responseFormat="structured")["structuredContent"]
+        assert denied["status"] == 403 and denied["error"]["code"] == "remoteHttpError"
+        assert denied["error"]["requestId"] == "fixture-denial"
+        assert "fixture-token" not in json.dumps(denied)
+
+        before = len(requests)
+        runtime_url = session.data("items_create", name="Runtime URL", folder="Workflow",
+                                   itemType="custom", modules=[
+            {"kind": "customSecret", "name": "Value", "value": "synthetic-runtime-token"},
+        ])
+        no_url = session.data("action_capabilities", action="httpRequest",
+                              itemId=runtime_url["id"], method="GET")
+        assert no_url["status"] == "needsInput" and no_url["missingInputs"][0]["name"] == "url"
+        bad_reference = session.data("action_capabilities", action="httpRequest",
+                                     itemId=requested_id, method="GET",
+                                     query={"probe": "{{openkeylet:missing-value}}"})
+        assert bad_reference["status"] == "needsInput" and "nextCall" not in bad_reference
+        assert len(requests) == before
+
+        escaped_token = 'fixture-escaped-"quoted"'
+        escaped_project = session.data("items_create", name="Escaped JSON",
+                                        folder="Workflow", itemType="api",
+                                        httpAuthType="bearer", modules=[
+            {"kind": "url", "value": address},
+            {"kind": "apiCredential", "value": escaped_token},
+        ])
+        escaped = session.data("http_send", itemId=escaped_project["id"],
+                               responseFormat="structured")
+        assert requests[-1] == f"Bearer {escaped_token}"
+        assert "fixture-escaped-" not in json.dumps(escaped)
+
         uuid_named = create(requested_id)
         assert select_project(item=requested_id)["project"]["id"] == uuid_named["id"]
         assert select_project(itemId=requested_id)["project"]["id"] == requested_id

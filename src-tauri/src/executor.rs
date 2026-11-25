@@ -163,6 +163,68 @@ struct TransferStats {
     directories: u64,
 }
 
+pub(crate) enum ApiPreviewIssue {
+    MissingUrl,
+    InvalidUrl,
+    InvalidMethod,
+    MissingAuthentication,
+    UnsupportedTarget,
+}
+
+pub(crate) fn preview_api_request(
+    connection: &DecryptedConnection,
+    url: &str,
+    method: &str,
+    query: &HashMap<String, Value>,
+) -> Result<Url, ApiPreviewIssue> {
+    if connection.stored.base_url.trim().is_empty() && Url::parse(url.trim()).is_err() {
+        return Err(ApiPreviewIssue::MissingUrl);
+    }
+    let mut target = build_api_url(&connection.stored, url, query)
+        .map_err(|_| ApiPreviewIssue::InvalidUrl)?;
+    let method = normalize_api_request_method(method, &target)
+        .map_err(|_| ApiPreviewIssue::InvalidUrl)?;
+    let method = Method::from_bytes(method.as_bytes()).map_err(|_| ApiPreviewIssue::InvalidMethod)?;
+    if !target.username().is_empty() || target.password().is_some() {
+        return Err(ApiPreviewIssue::InvalidUrl);
+    }
+    let plan = crate::api_provider::execution_plan(&connection.stored, &connection.secrets, &target)
+        .map_err(|_| {
+            if crate::api_provider::describe_item(&connection.stored, &connection.secrets)
+                .ok()
+                .flatten()
+                .is_some_and(|capability| {
+                    capability.status == crate::api_provider::ConfigurationStatus::NeedsConfiguration
+                })
+            {
+                ApiPreviewIssue::MissingAuthentication
+            } else {
+                ApiPreviewIssue::UnsupportedTarget
+            }
+        })?;
+    match plan {
+        crate::api_provider::ExecutionPlan::Generic | crate::api_provider::ExecutionPlan::Token(_) => {
+            apply_api_auth(&connection.stored, &connection.secrets, &mut HeaderMap::new(), &mut target.clone())
+                .map_err(|_| ApiPreviewIssue::MissingAuthentication)?;
+        }
+        crate::api_provider::ExecutionPlan::Aws(_) => {
+            crate::aws::validate_request(&Request::new(method, target.clone()))
+                .map_err(|_| ApiPreviewIssue::InvalidMethod)?;
+            crate::aws::Credential::from_modules(&connection.stored, &connection.secrets)
+                .map_err(|_| ApiPreviewIssue::MissingAuthentication)?;
+        }
+        crate::api_provider::ExecutionPlan::Oci => {
+            let credential = crate::oci::Credential::from_modules(&connection.stored, &connection.secrets)
+                .map_err(|_| ApiPreviewIssue::MissingAuthentication)?;
+            crate::oci::validate_request(&credential.config, &Request::new(method, target.clone()))
+                .map_err(|_| ApiPreviewIssue::InvalidMethod)?;
+        }
+    }
+    target.set_query(None);
+    target.set_fragment(None);
+    Ok(target)
+}
+
 pub async fn execute_api(
     connection: &DecryptedConnection,
     input: ApiRequestInput,

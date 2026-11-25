@@ -1,13 +1,14 @@
 use crate::{
     action_workflow::{
-        ActionCapabilitiesInput, ActionResponse, MissingInput, ProjectCandidate, SelectedProject,
-        SelectionReason, UnavailableCode,
+        ActionCapabilitiesInput, ActionResponse, HttpRemoteError, HttpResponseFormat,
+        HttpTarget, HttpToolResponse, MissingInput, NeedInputCode, NextCall, ProjectCandidate,
+        SelectedProject, SelectionReason, TargetSource, UnavailableCode,
     },
     browser::{BrowserBridge, current_totp},
     desktop,
     executor::{
-        ApiRequestInput, ApiResponse, SshResponse, SshTransferResponse, describe_api_request,
-        execute_api, execute_local, execute_ssh, ssh_download, ssh_upload,
+        ApiPreviewIssue, ApiRequestInput, ApiResponse, SshResponse, SshTransferResponse, describe_api_request,
+        execute_api, execute_local, execute_ssh, preview_api_request, ssh_download, ssh_upload,
     },
     model::NewActivity,
     terminal::{TerminalManager, TerminalOpenResult, TerminalReadResult},
@@ -50,6 +51,28 @@ enum ProjectMatch {
     Ambiguous(Vec<ProjectCandidate>),
     NotFound(Vec<ProjectCandidate>),
     NoCompatibleProject,
+}
+
+impl ProjectMatch {
+    fn workflow_response(self) -> ActionResponse {
+        match self {
+            Self::Selected(connection, reason) => ActionResponse::Selected {
+                project: SelectedProject::new(&connection.stored, reason),
+            },
+            Self::Ambiguous(candidates) => ActionResponse::ChooseProject {
+                candidates,
+                missing_inputs: vec![MissingInput { name: "item", source: "caller" }],
+            },
+            Self::NotFound(candidates) => ActionResponse::Unavailable {
+                code: UnavailableCode::ProjectNotFound,
+                candidates,
+            },
+            Self::NoCompatibleProject => ActionResponse::Unavailable {
+                code: UnavailableCode::NoCompatibleProject,
+                candidates: Vec::new(),
+            },
+        }
+    }
 }
 
 impl std::fmt::Debug for VaultMcp {
@@ -444,6 +467,16 @@ impl VaultMcp {
         item_id: Option<Uuid>,
         capability: Option<&str>,
     ) -> Result<DecryptedConnection, String> {
+        self.resolve_action_project_with_reason(query, item_id, capability)
+            .map(|(connection, _)| connection)
+    }
+
+    fn resolve_action_project_with_reason(
+        &self,
+        query: &str,
+        item_id: Option<Uuid>,
+        capability: Option<&str>,
+    ) -> Result<(DecryptedConnection, SelectionReason), String> {
         let query = query.trim();
         let matched = self.match_action_project(query, item_id, capability)?;
         if (!query.is_empty() || item_id.is_some()) && !matches!(matched, ProjectMatch::Selected(..))
@@ -455,7 +488,7 @@ impl VaultMcp {
                 if !matches!(reason, SelectionReason::Session) {
                     self.bind_active_item(connection.stored.id);
                 }
-                Ok(connection)
+                Ok((connection, reason))
             }
             ProjectMatch::NoCompatibleProject => Err(match capability {
                 Some(capability) => {
@@ -590,6 +623,84 @@ fn project_candidates(connections: &[DecryptedConnection]) -> Vec<ProjectCandida
         .iter()
         .map(|connection| (&connection.stored).into())
         .collect()
+}
+
+fn http_target_source(request_url: &str) -> TargetSource {
+    if request_url.trim().is_empty() {
+        TargetSource::Saved
+    } else if url::Url::parse(request_url.trim()).is_ok() {
+        TargetSource::Explicit
+    } else {
+        TargetSource::Relative
+    }
+}
+
+fn http_target_is_visible(connection: &DecryptedConnection, source: TargetSource) -> bool {
+    matches!(source, TargetSource::Explicit)
+        || connection
+            .stored
+            .modules
+            .iter()
+            .filter(|module| {
+                module.kind == "url"
+                    || connection.stored.oci_bindings.as_ref()
+                        .is_some_and(|bindings| bindings.region == Some(module.id))
+            })
+            .all(crate::model::ItemModule::agent_visible)
+}
+
+fn describe_http_target(
+    connection: &DecryptedConnection,
+    source: TargetSource,
+    mut url: Option<url::Url>,
+) -> HttpTarget {
+    let url = if http_target_is_visible(connection, source) {
+        url.take().map(|mut url| {
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.set_query(None);
+            url.set_fragment(None);
+            crate::policy::redact(url.to_string(), &connection.stored, &connection.secrets)
+        })
+    } else {
+        None
+    };
+    HttpTarget { source, url }
+}
+
+fn structured_http_data(response: &ApiResponse, connection: &DecryptedConnection) -> Option<Value> {
+    let media_type = response.headers.get("content-type")?.split(';').next()?;
+    let media_type = media_type.trim().to_ascii_lowercase();
+    if response.truncated
+        || response.saved_to.is_some()
+        || !(media_type == "application/json" || media_type.ends_with("+json"))
+    {
+        return None;
+    }
+    let data = serde_json::from_str(&response.body).ok()?;
+    let secrets = zeroize::Zeroizing::new(connection.secrets.non_empty_values());
+    let candidates = zeroize::Zeroizing::new(crate::policy::redaction_candidates(&secrets));
+    Some(redact_http_json(data, &candidates))
+}
+
+fn redact_http_json(value: Value, candidates: &[String]) -> Value {
+    let redact = |text| {
+        candidates.iter().fold(text, |text: String, candidate| {
+            text.replace(candidate, "[REDACTED]")
+        })
+    };
+    match value {
+        Value::String(text) => Value::String(redact(text)),
+        Value::Array(values) => Value::Array(
+            values.into_iter().map(|value| redact_http_json(value, candidates)).collect(),
+        ),
+        Value::Object(object) => Value::Object(
+            object.into_iter()
+                .map(|(name, value)| (redact(name), redact_http_json(value, candidates)))
+                .collect(),
+        ),
+        other => other,
+    }
 }
 
 fn connection_supports_action(connection: &DecryptedConnection, capability: Option<&str>) -> bool {
@@ -887,6 +998,13 @@ fn collect_http_secret_placeholders(input: &HttpSendInput) -> Result<HashSet<Str
     Ok(placeholders)
 }
 
+fn include_http_secret_bindings(input: &mut HttpSendInput) -> Result<(), String> {
+    for module in collect_http_secret_placeholders(input)? {
+        input.secret_bindings.entry(module.clone()).or_insert(module);
+    }
+    Ok(())
+}
+
 fn interpolate_http_value(
     value: &mut Value,
     replacements: &HashMap<String, String>,
@@ -1172,6 +1290,9 @@ struct HttpSendInput {
     item: String,
     #[schemars(description = "Stable project UUID for exact selection. Omit item when providing itemId.")]
     item_id: Option<Uuid>,
+    #[serde(default)]
+    #[schemars(description = "Use structured to include the actual project, parsed complete JSON, and HTTP error details. Defaults to legacy.")]
+    response_format: HttpResponseFormat,
     #[serde(default)]
     #[schemars(
         description = "Optional absolute URL or path relative to the project's saved service URL. OCI relative paths use the default Compute base URL; use an absolute OCI regional URL for other services. OCI requires HTTPS on port 443 and a regional oraclecloud.com endpoint matching ociContext.region. Omit to request the saved service URL itself. An item without a saved service URL requires an absolute URL."
@@ -1488,7 +1609,7 @@ struct ApiServiceCapabilitiesInput {
 impl VaultMcp {
     #[tool(
         name = "action_capabilities",
-        description = "Preview project selection for an action. Reports the selected project and reason, or eligible candidates and missing inputs. Accepts an exact itemId or a project name in item. Does not change the current selection or run the action.",
+        description = "Preview the next step without executing it or changing session selection. Use selectProject for selection alone or httpRequest for a ready-to-call http_send. Reports the exact project, eligible candidates or missing inputs.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<ActionResponse>(),
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
@@ -1496,33 +1617,70 @@ impl VaultMcp {
         &self,
         Parameters(input): Parameters<ActionCapabilitiesInput>,
     ) -> CallToolResult {
-        let ActionCapabilitiesInput::SelectProject {
-            capability,
-            item,
-            item_id,
-        } = input;
-        let result = self
-            .match_action_project(&item, item_id, Some(capability.as_str()))
-            .map(|matched| match matched {
-                ProjectMatch::Selected(connection, reason) => ActionResponse::Selected {
-                    project: SelectedProject::new(&connection.stored, reason),
-                },
-                ProjectMatch::Ambiguous(candidates) => ActionResponse::ChooseProject {
-                    candidates,
-                    missing_inputs: vec![MissingInput {
-                        name: "item",
-                        source: "caller",
-                    }],
-                },
-                ProjectMatch::NotFound(candidates) => ActionResponse::Unavailable {
-                    code: UnavailableCode::ProjectNotFound,
-                    candidates,
-                },
-                ProjectMatch::NoCompatibleProject => ActionResponse::Unavailable {
-                    code: UnavailableCode::NoCompatibleProject,
-                    candidates: Vec::new(),
-                },
-            });
+        let result = (|| {
+            match input {
+                ActionCapabilitiesInput::SelectProject { capability, item, item_id } => self
+                    .match_action_project(&item, item_id, Some(capability.as_str()))
+                    .map(ProjectMatch::workflow_response),
+                ActionCapabilitiesInput::HttpRequest { item, item_id, url, method, query, body } => {
+                    let project = self.match_action_project(&item, item_id, Some("http"))?;
+                    let ProjectMatch::Selected(mut connection, reason) = project else {
+                        return Ok(project.workflow_response());
+                    };
+                    let project = SelectedProject::new(&connection.stored, reason);
+                    let method = method.unwrap_or_else(default_http_method);
+                    let source = http_target_source(&url);
+                    let mut arguments = json!({
+                        "itemId": connection.stored.id,
+                        "method": method,
+                        "responseFormat": "structured",
+                    });
+                    if !url.is_empty() {
+                        arguments["url"] = json!(url);
+                    }
+                    if !query.is_empty() {
+                        arguments["query"] = json!(query);
+                    }
+                    if let Some(body) = body {
+                        arguments["body"] = body;
+                    }
+                    let mut draft: HttpSendInput = serde_json::from_value(arguments.clone())
+                        .map_err(|_| "Unable to prepare HTTP workflow arguments".to_owned())?;
+                    if include_http_secret_bindings(&mut draft)
+                        .and_then(|_| self.prepare_http_secret_bindings(&mut connection, &mut draft))
+                        .is_err()
+                    {
+                        return Ok(ActionResponse::NeedsInput {
+                            project,
+                            code: NeedInputCode::MissingSecretBinding,
+                            missing_inputs: vec![MissingInput { name: "secretBindings", source: "project" }],
+                        });
+                    }
+                    let target = match preview_api_request(&connection, &draft.url, &draft.method, &draft.query) {
+                        Ok(target) => target,
+                        Err(issue) => {
+                            let (code, name, source) = match issue {
+                                ApiPreviewIssue::MissingUrl => (NeedInputCode::MissingRequestUrl, "url", "caller"),
+                                ApiPreviewIssue::InvalidUrl => (NeedInputCode::InvalidRequestUrl, "url", "caller"),
+                                ApiPreviewIssue::InvalidMethod => (NeedInputCode::InvalidHttpMethod, "method", "caller"),
+                                ApiPreviewIssue::MissingAuthentication => (NeedInputCode::MissingConfiguration, "authentication", "project"),
+                                ApiPreviewIssue::UnsupportedTarget => (NeedInputCode::UnsupportedTarget, "url", "caller"),
+                            };
+                            return Ok(ActionResponse::NeedsInput {
+                                project,
+                                code,
+                                missing_inputs: vec![MissingInput { name, source }],
+                            });
+                        }
+                    };
+                    Ok(ActionResponse::Ready {
+                        project,
+                        target: describe_http_target(&connection, source, Some(target)),
+                        next_call: NextCall { tool: "http_send", arguments },
+                    })
+                }
+            }
+        })();
         into_tool_result(result)
     }
 
@@ -2322,23 +2480,20 @@ impl VaultMcp {
 
     #[tool(
         name = "http_send",
-        description = "Send an authenticated HTTP request without returning hidden stored credentials. Consult api_service_capabilities for URL-specific support, missing module bindings and official operation documentation. AWS aws-sigv4 signs standard supported commercial regional endpoints using bound Access Key ID, Secret Access Key and optional Session Token; the request region must match the saved region. Supply AWS Query Action/Version or JSON X-Amz-Target as documented, and process XML/JSON responses and pagination yourself. Native providers reject cross-provider targets, proxies and redirects; unsupported signing endpoints never silently fall back to Bearer. No credential refresh, IMDS, S3, streaming signatures or SigV4a. Existing selected CA projects remain unavailable for generic APIs. Omit item after selecting a compatible project, or pass its name. OCI projects provide general API signing, not a fixed list of operations: choose the method, path, query, headers and one body format from the OCI API documentation. Relative URLs use the default Compute base; absolute URLs select another OCI service in ociContext.region. Only HTTPS port 443 regional oraclecloud.com endpoints are allowed for OCI; redirects and proxies are disabled. Signing headers are generated locally. Use items_search to discover ociContext.region and tenancyOcid when needed. Resolve named resources through the appropriate OCI APIs, handle pagination using service response headers, and ask only when resource matches remain ambiguous. Do not treat an empty root-compartment result as all resources. OCI IAM controls permissions; do not bypass a denial. OpenKeylet sends one request and does not choose operations, enumerate resources or follow pages automatically. Built-in API/Basic authentication is also injected automatically. Hidden ordinary modules may be referenced as {{openkeylet:password}} or {{openkeylet:service token}} in URL, headers, query or body values; secretBindings provides optional aliases. OCI signing fields follow ordinary module visibility and placeholder rules. Large responses may use saveResponseTo. Unrecognized generic HTTP services retain existing HTTP/HTTPS, proxy and redirect behavior. Recognized native providers enforce their own strict HTTPS target, no-proxy and no-redirect policies. No address failover occurs.",
-        output_schema = rmcp::handler::server::tool::schema_for_type::<ApiResponse>(),
+        description = "Send an authenticated HTTP request without returning hidden stored credentials. Use action_capabilities with httpRequest to prepare a concrete call. Consult api_service_capabilities for service authentication and documentation. AWS aws-sigv4 signs standard supported commercial regional endpoints using bound Access Key ID, Secret Access Key and optional Session Token; the request region must match the saved region. Supply AWS Query Action/Version or JSON X-Amz-Target as documented, and process XML/JSON responses and pagination yourself. Native providers reject cross-provider targets, proxies and redirects; unsupported signing endpoints never silently fall back to Bearer. No credential refresh, IMDS, S3, streaming signatures or SigV4a. Existing selected CA projects remain unavailable for generic APIs. Omit item after selecting a compatible project, or pass its name. OCI projects provide general API signing, not a fixed list of operations: choose the method, path, query, headers and one body format from the OCI API documentation. Relative URLs use the default Compute base; absolute URLs select another OCI service in ociContext.region. Only HTTPS port 443 regional oraclecloud.com endpoints are allowed for OCI; redirects and proxies are disabled. Signing headers are generated locally. Use items_search to discover ociContext.region and tenancyOcid when needed. Resolve named resources through the appropriate OCI APIs, handle pagination using service response headers, and ask only when resource matches remain ambiguous. Do not treat an empty root-compartment result as all resources. OCI IAM controls permissions; do not bypass a denial. OpenKeylet sends one request and does not choose operations, enumerate resources or follow pages automatically. Built-in API/Basic authentication is also injected automatically. Hidden ordinary modules may be referenced as {{openkeylet:password}} or {{openkeylet:service token}} in URL, headers, query or body values; secretBindings provides optional aliases. OCI signing fields follow ordinary module visibility and placeholder rules. Large responses may use saveResponseTo. Unrecognized generic HTTP services retain existing HTTP/HTTPS, proxy and redirect behavior. Recognized native providers enforce their own strict HTTPS target, no-proxy and no-redirect policies. No address failover occurs.",
+        output_schema = rmcp::handler::server::tool::schema_for_type::<HttpToolResponse>(),
         annotations(title = "Send an authenticated API request", read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = true)
     )]
     async fn http_send(&self, Parameters(input): Parameters<HttpSendInput>) -> CallToolResult {
-        let result: Result<ApiResponse, String> = async {
+        let structured = matches!(input.response_format, HttpResponseFormat::Structured);
+        let result: Result<HttpToolResponse, String> = async {
             let mut input = input;
-            for module in collect_http_secret_placeholders(&input)? {
-                input
-                    .secret_bindings
-                    .entry(module.clone())
-                    .or_insert(module);
-            }
+            include_http_secret_bindings(&mut input)?;
             let has_secret_bindings = !input.secret_bindings.is_empty();
-            let mut connection = self.resolve_action_project(&input.item, input.item_id, Some("http"))?;
+            let (mut connection, reason) = self.resolve_action_project_with_reason(&input.item, input.item_id, Some("http"))?;
             self.vault.guard_agent_secret_use(connection.stored.id).map_err(|error| error.to_string())?;
             let item_id = connection.stored.id;
+            let source = http_target_source(&input.url);
             self.prepare_http_secret_bindings(&mut connection, &mut input)?;
             let request = ApiRequestInput {
                 url: input.url,
@@ -2358,11 +2513,53 @@ impl VaultMcp {
             if has_secret_bindings {
                 action = crate::policy::redact(action, &connection.stored, &connection.secrets);
             }
-            self.track(item_id, action, execute_api(&connection, request))
-                .await
+            let mut response = self.track(item_id, action, execute_api(&connection, request)).await?;
+            let (project, target, data, error) = if structured {
+                let target = describe_http_target(&connection, source, url::Url::parse(&response.url).ok());
+                response.url = target.url.clone().unwrap_or_else(|| "[REDACTED]".to_owned());
+                let data = structured_http_data(&response, &connection);
+                let error = (!(200..300).contains(&response.status)).then(|| HttpRemoteError {
+                    code: "remoteHttpError",
+                    status: response.status,
+                    request_id: ["x-request-id", "x-github-request-id", "opc-request-id",
+                        "x-amzn-requestid", "x-amz-request-id", "cf-ray"]
+                        .iter()
+                        .find_map(|name| response.headers.get(*name).cloned()),
+                });
+                (Some(SelectedProject::new(&connection.stored, reason)), Some(target), data, error)
+            } else {
+                (None, None, None, None)
+            };
+            Ok(HttpToolResponse {
+                status: response.status,
+                status_text: response.status_text,
+                url: response.url,
+                headers: response.headers,
+                body: data.is_none().then_some(response.body),
+                truncated: response.truncated,
+                saved_to: response.saved_to,
+                bytes_transferred: response.bytes_transferred,
+                project,
+                target,
+                data,
+                error,
+            })
         }
         .await;
-        into_tool_result(result)
+        match result {
+            Ok(value) if structured => {
+                let summary = format!("HTTP {}", value.status);
+                match serde_json::to_value(value) {
+                    Ok(value) => {
+                        let mut result = CallToolResult::structured(value);
+                        result.content = vec![ContentBlock::text(summary)];
+                        result
+                    }
+                    Err(_) => tool_error("OpenKeylet could not serialize the tool result."),
+                }
+            }
+            result => into_tool_result(result),
+        }
     }
 }
 
@@ -2372,7 +2569,7 @@ impl ServerHandler for VaultMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("openkeylet", env!("CARGO_PKG_VERSION")).with_title("OpenKeylet"))
             .with_instructions(
-            "OpenKeylet lets agents use locally saved credentials without receiving hidden plaintext. API provider workflow: api_service_capabilities identifies a concrete API service, protocol support, required bindings and official documentation. AWS native aws-sigv4 uses awsBindings stable module IDs for serviceUrl, region, accessKeyId, secretAccessKey and optional sessionToken. Create ordinary modules, then bind returned IDs under normal write grants. The agent chooses operations, method, action/version, parameters and pagination; OpenKeylet validates supported provider/region targets, signs final bytes and sends one request without redirects/proxies. Native AWS supports a documented standard endpoint subset; S3, SigV4a, streaming, presigning and automatic credential refresh are excluded. Other vendor signatures and OAuth acquisition are not provided merely because a URL is recognized. GitHub/Cloudflare/DigitalOcean/Hetzner guides describe their distinct API/token boundaries. Do not infer all services from a company brand or send private keys/credential JSON as Bearer tokens. Certificate workflow: certificate_capabilities reports separately owner-granted CA kinds and TTL limits; certificate_inspect and certificate_verify operate on public material, and certificate_check_key compares a saved key locally. certificate_issue accepts public subject keys/CSRs only, a UUID requestId, concrete identities, purpose and ttlSeconds. Reuse the UUID only for identical retries; current grants are checked again before replay. CA-marked projects cannot be delegated through fill, HTTP, SSH, placeholders, secretEnv or terminals even if a module was marked visible. Agent cannot register/unmark a CA or edit signing grants. Existing CA bindings remain protected after module/type edits. Store SSH leaves as a standard sshCertificate module beside its matching privateKey, choose sshAuthType certificate; jump endpoints authenticate independently. Host CA trust requires explicit user confirmation of signer CA fingerprint for each exact item/host/port using the client or ssh-trust set-ca; never auto-trust from a probe. TLS verification does not check revocation. This does not sandbox arbitrary programs already having local-user file access. An explicit item or unique items_search result becomes the current project; later compatible actions may omit item, and a terminal keeps its own binding. When the user names a project and the action is clear, call it directly. Use items_search only for discovery, selection, inspection, or genuine ambiguity. For OCI, http_send is a general signed request executor. The agent reads the OCI API documentation and chooses operations, methods, parameters, pagination and filtering; OpenKeylet validates the target, signs locally and returns the response. items_search exposes non-secret ociContext.region and tenancyOcid. Use the relevant OCI APIs to discover named compartments or resources rather than asking the user for OCIDs that can be retrieved; ask when matches are ambiguous. Use an absolute regional OCI service URL when the API is not under the default Compute base. OCI requests stay within the configured region on HTTPS port 443, never follow redirects, and never use proxies. Resource permissions remain with OCI IAM. Do not bypass IAM denials or claim an empty root-compartment page means the tenancy has no instances. Each call sends one request; handle service pagination and filter returned data as required by the user. OCI signing fields are ordinary modules bound by stable module IDs. Module visibility controls all plaintext returned to the agent, including the signing key and OCI request context. Hidden modules can still be used locally without revealing plaintext. credential_fill understands common module phrases and may infer a sole secret; omit target to use the current running OpenKeylet terminal, otherwise a connected browser or foreground control, and use submit=true to complete the login. terminal_start makes the opened PTY current, so terminal_write, terminal_read, terminal_stop, and terminal credential fills should omit sessionId unless deliberately switching among multiple terminals. Use terminal_run for one-shot local commands and PTY tools only for persistent interaction. Direct {{openkeylet:module}} placeholders work in commands, stdin, paths, terminal input, SSH, and HTTP values; OpenKeylet substitutes and redacts them locally. terminal_run.stdin and ssh_run.stdin pass scripts, JSON, or other text without shell escaping or temporary files. Host and service URL modules may save other addresses in alternateValues; value is the default. Omitted SSH host or HTTP URL uses that default, relative HTTP paths use the default service URL, and explicit host or absolute URL selects another target only within the selected native provider target policy where applicable. Addresses share project credentials and SSH port; there is no automatic failover. A password or private-key project can use SSH without saved target metadata: pass host, optional port, and username at runtime; saved values are defaults and port 22 is the fallback. For a saved SSH jump route, call ssh_run, ssh_upload, or ssh_download with target project B directly. OpenKeylet automatically routes through jump project A and authenticates each endpoint with its own credentials. items_search exposes the saved route; items_create/items_update configure sshJumpItemId under the existing write permissions and revision rules. If a plain-key fingerprint or explicitly trusted host CA is missing or mismatched, stop and ask the user to verify it against a trusted source and confirm it through the OpenKeylet client or local ssh-trust CLI, confirming A before probing B when needed. Never auto-trust keys or bypass the route with a direct or nested ssh connection. Use secretEnv only when a program needs an environment variable, and HTTP secretBindings only for aliases. Never ask the user to reveal a hidden value. terminal_read.until waits without polling and has no deadline unless waitSeconds is supplied. For vault writing, consult vault_write_capabilities, then items_create/items_update. Writing requires desktop folder authorization, uses stable project/module IDs and expectedRevision, and cannot change visibility. Never echo submitted secrets. OpenKeylet has no observation, diagnostic, restricted, or execution modes.",
+            "OpenKeylet lets agents use locally saved credentials without receiving hidden plaintext. For a ready request with the exact project and target, use action_capabilities with httpRequest. API provider workflow: api_service_capabilities identifies a concrete API service, protocol support, required bindings and official documentation. AWS native aws-sigv4 uses awsBindings stable module IDs for serviceUrl, region, accessKeyId, secretAccessKey and optional sessionToken. Create ordinary modules, then bind returned IDs under normal write grants. The agent chooses operations, method, action/version, parameters and pagination; OpenKeylet validates supported provider/region targets, signs final bytes and sends one request without redirects/proxies. Native AWS supports a documented standard endpoint subset; S3, SigV4a, streaming, presigning and automatic credential refresh are excluded. Other vendor signatures and OAuth acquisition are not provided merely because a URL is recognized. GitHub/Cloudflare/DigitalOcean/Hetzner guides describe their distinct API/token boundaries. Do not infer all services from a company brand or send private keys/credential JSON as Bearer tokens. Certificate workflow: certificate_capabilities reports separately owner-granted CA kinds and TTL limits; certificate_inspect and certificate_verify operate on public material, and certificate_check_key compares a saved key locally. certificate_issue accepts public subject keys/CSRs only, a UUID requestId, concrete identities, purpose and ttlSeconds. Reuse the UUID only for identical retries; current grants are checked again before replay. CA-marked projects cannot be delegated through fill, HTTP, SSH, placeholders, secretEnv or terminals even if a module was marked visible. Agent cannot register/unmark a CA or edit signing grants. Existing CA bindings remain protected after module/type edits. Store SSH leaves as a standard sshCertificate module beside its matching privateKey, choose sshAuthType certificate; jump endpoints authenticate independently. Host CA trust requires explicit user confirmation of signer CA fingerprint for each exact item/host/port using the client or ssh-trust set-ca; never auto-trust from a probe. TLS verification does not check revocation. This does not sandbox arbitrary programs already having local-user file access. An explicit item or unique items_search result becomes the current project; later compatible actions may omit item, and a terminal keeps its own binding. When the user names a project and the action is clear, call it directly. Use items_search only for discovery, selection, inspection, or genuine ambiguity. For OCI, http_send is a general signed request executor. The agent reads the OCI API documentation and chooses operations, methods, parameters, pagination and filtering; OpenKeylet validates the target, signs locally and returns the response. items_search exposes non-secret ociContext.region and tenancyOcid. Use the relevant OCI APIs to discover named compartments or resources rather than asking the user for OCIDs that can be retrieved; ask when matches are ambiguous. Use an absolute regional OCI service URL when the API is not under the default Compute base. OCI requests stay within the configured region on HTTPS port 443, never follow redirects, and never use proxies. Resource permissions remain with OCI IAM. Do not bypass IAM denials or claim an empty root-compartment page means the tenancy has no instances. Each call sends one request; handle service pagination and filter returned data as required by the user. OCI signing fields are ordinary modules bound by stable module IDs. Module visibility controls all plaintext returned to the agent, including the signing key and OCI request context. Hidden modules can still be used locally without revealing plaintext. credential_fill understands common module phrases and may infer a sole secret; omit target to use the current running OpenKeylet terminal, otherwise a connected browser or foreground control, and use submit=true to complete the login. terminal_start makes the opened PTY current, so terminal_write, terminal_read, terminal_stop, and terminal credential fills should omit sessionId unless deliberately switching among multiple terminals. Use terminal_run for one-shot local commands and PTY tools only for persistent interaction. Direct {{openkeylet:module}} placeholders work in commands, stdin, paths, terminal input, SSH, and HTTP values; OpenKeylet substitutes and redacts them locally. terminal_run.stdin and ssh_run.stdin pass scripts, JSON, or other text without shell escaping or temporary files. Host and service URL modules may save other addresses in alternateValues; value is the default. Omitted SSH host or HTTP URL uses that default, relative HTTP paths use the default service URL, and explicit host or absolute URL selects another target only within the selected native provider target policy where applicable. Addresses share project credentials and SSH port; there is no automatic failover. A password or private-key project can use SSH without saved target metadata: pass host, optional port, and username at runtime; saved values are defaults and port 22 is the fallback. For a saved SSH jump route, call ssh_run, ssh_upload, or ssh_download with target project B directly. OpenKeylet automatically routes through jump project A and authenticates each endpoint with its own credentials. items_search exposes the saved route; items_create/items_update configure sshJumpItemId under the existing write permissions and revision rules. If a plain-key fingerprint or explicitly trusted host CA is missing or mismatched, stop and ask the user to verify it against a trusted source and confirm it through the OpenKeylet client or local ssh-trust CLI, confirming A before probing B when needed. Never auto-trust keys or bypass the route with a direct or nested ssh connection. Use secretEnv only when a program needs an environment variable, and HTTP secretBindings only for aliases. Never ask the user to reveal a hidden value. terminal_read.until waits without polling and has no deadline unless waitSeconds is supplied. For vault writing, consult vault_write_capabilities, then items_create/items_update. Writing requires desktop folder authorization, uses stable project/module IDs and expectedRevision, and cannot change visibility. Never echo submitted secrets. OpenKeylet has no observation, diagnostic, restricted, or execution modes.",
         )
     }
 
@@ -2718,6 +2915,75 @@ mod tests {
         vault.set_connection_enabled(second, false).unwrap();
         let no_http = preview(json!({ "action": "selectProject", "capability": "http" })).await;
         assert_eq!(no_http["code"], "noCompatibleProject");
+    }
+
+    #[tokio::test]
+    async fn action_capabilities_holds_hidden_urls_and_rejects_unresolved_bindings() {
+        let directory = tempdir().unwrap();
+        let vault = Vault::open(directory.path().join("vault")).unwrap();
+        let saved = vault
+            .save_connection(
+                serde_json::from_value(json!({
+                    "name": "Hidden URL",
+                    "itemType": "custom",
+                    "modules": [
+                        { "kind": "url", "value": "https://fixture.invalid/private", "agentVisible": false },
+                        { "kind": "customSecret", "name": "Value", "agentVisible": false },
+                    ],
+                    "secrets": { "namedSecrets": { "Value": "fixture-secret" } },
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let mcp = VaultMcp::new(vault);
+        let preview = |body| {
+            let input = serde_json::from_value(json!({
+                "action": "httpRequest",
+                "itemId": saved.id,
+                "url": "relative",
+                "method": "POST",
+                "body": body,
+            }))
+            .unwrap();
+            mcp.action_capabilities(Parameters(input))
+        };
+        let response = structured_value(&preview("{{openkeylet:Value}}").await);
+        assert_eq!(response["status"], "ready");
+        assert_eq!(response["target"], json!({ "source": "relative" }));
+        assert_eq!(response["nextCall"]["arguments"]["url"], "relative");
+        assert_eq!(response["nextCall"]["arguments"]["body"], "{{openkeylet:Value}}");
+        let wire = response.to_string();
+        assert!(!wire.contains("fixture.invalid"));
+        assert!(!wire.contains("fixture-secret"));
+
+        let response = structured_value(&preview("{{openkeylet:does-not-exist}}").await);
+        assert_eq!(response["status"], "needsInput");
+        assert_eq!(response["code"], "missingSecretBinding");
+        assert!(response.get("nextCall").is_none());
+    }
+
+    #[test]
+    fn structured_http_data_redacts_escaped_secrets_in_json_keys_and_values() {
+        let directory = tempdir().unwrap();
+        let vault = Vault::open(directory.path().join("vault")).unwrap();
+        let secret = r#"fixture"token\tail"#;
+        let (project, _) = env_template_project(&vault, "JSON token", secret);
+        let connection = vault.get_connection(project).unwrap();
+        let response = ApiResponse {
+            status: 200,
+            status_text: "OK".into(),
+            url: "https://fixture.invalid/".into(),
+            headers: HashMap::from([("content-type".into(), "application/json".into())]),
+            body: json!({ secret: [secret, {"keep": true}] }).to_string(),
+            truncated: false,
+            saved_to: None,
+            bytes_transferred: None,
+        };
+        assert!(!response.body.contains(secret));
+        assert_eq!(
+            structured_http_data(&response, &connection).unwrap(),
+            json!({ "[REDACTED]": ["[REDACTED]", {"keep": true}] })
+        );
     }
 
     #[tokio::test]
