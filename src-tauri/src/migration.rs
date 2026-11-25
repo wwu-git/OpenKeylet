@@ -1,4 +1,4 @@
-//! Local, transactional imports. Previews contain counts and compatibility notices only.
+//! Local, transactional imports with credential-free previews.
 use crate::{
     login_uri::LoginUri,
     model::{ItemModule, PortableConnection, SecretBundle},
@@ -18,6 +18,11 @@ use zeroize::Zeroizing;
 
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
 type Entry = (PortableConnection, SecretBundle);
+
+#[cfg(any(feature = "gui", test))]
+mod curl;
+#[cfg(feature = "gui")]
+pub(crate) use curl::parse_curl;
 
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]

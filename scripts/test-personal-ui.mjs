@@ -58,6 +58,14 @@ try {
       if(command==="commit_backup_restore") { (fixture.restores ??= []).push(args.selection); return {added:2,merged:0}; }
       if(command==="cancel_backup_restore") { (fixture.restoreCancels ??= []).push(args.id); return; }
       if(command==="prepare_import") return {id:"fixture-import",preview:{total:4,types:{login:1,card:1,identity:1,secureNote:1},passkeys:1,skippedDeleted:1,warnings:["defaultDomainMatch","passwordHistory"]}};
+      if(command==="prepare_curl_import") {
+        if(args.command.includes("--data")) throw Error("CURL_IMPORT_UNSUPPORTED");
+        const authentication=args.command.includes("Bearer")?"bearer":"basic";
+        const id=`curl-${authentication}`;
+        fixture.pendingCurl=id;
+        return {id,preview:{target:"https://api.example.test",authentication}};
+      }
+      if(command==="cancel_import") {delete fixture.pendingCurl;return;}
       if(command==="commit_import") {fixture.imports.push(args.id);return {added:4,merged:0};}
       if(command==="prepare_env_import") return {id:args.id,empty:1,multiline:2,rows:[
         {index:0,name:"API_KEY",conflict:false},
@@ -543,6 +551,48 @@ try {
   assert.deepEqual(await page.evaluate(()=>fixture.sshImport),[1,2]);
   assert.equal(await page.evaluate(()=>fixture.sshUndo),"ssh-undo-fixture");
   await page.locator("#migration-close").click();
+  const externalImportRequests=[];
+  page.on("request",request=>{
+    if(!request.url().startsWith(`http://127.0.0.1:${server.address().port}/`))externalImportRequests.push(request.url());
+  });
+  await page.locator("#migration-open").click();
+  await page.locator("#migration-format").selectOption("curl");
+  const curlInput=page.locator("#migration-curl");
+  const beforeCurl=await page.evaluate(()=>fixture.imports.length);
+  assert.ok(await page.locator("#migration-select").isDisabled());
+  await curlInput.fill("curl 'https://api.example.test/v1' -H 'Authorization: Bearer synthetic-curl-token'");
+  await page.locator("#migration-select").click();
+  await envPreview.waitFor();
+  assert.equal(await curlInput.inputValue(),"");
+  assert.match(await envPreview.innerText(),/https:\/\/api\.example\.test\s+Bearer/);
+  assert.doesNotMatch(await envPreview.innerText(),/synthetic-curl-token/);
+  await page.screenshot({path:path.join(artifacts,"curl-import-preview.png")});
+  assert.ok(await curlInput.isHidden());
+  await page.locator("#migration-select").click();
+  await page.waitForFunction(()=>!fixture.pendingCurl);
+  assert.ok(await envPreview.isHidden());
+  await curlInput.fill("curl 'https://api.example.test/v1' -H 'Authorization: Bearer synthetic-curl-token'");
+  await page.locator("#migration-select").click();
+  await envPreview.waitFor();
+  await page.locator("#migration-close").click();
+  await page.waitForFunction(()=>!fixture.pendingCurl);
+  assert.equal(await page.evaluate(()=>fixture.imports.length),beforeCurl);
+
+  await page.locator("#migration-open").click();
+  await curlInput.fill("curl 'https://api.example.test/v1' --data 'synthetic-body'");
+  await page.locator("#migration-select").click();
+  await page.locator("#migration-error").waitFor();
+  assert.doesNotMatch(await page.locator("#migration-error").innerText(),/synthetic-body/);
+  assert.equal(await curlInput.inputValue(),"");
+  await curlInput.fill("curl -u 'synthetic-user:synthetic-password' https://api.example.test/v1");
+  await page.locator("#migration-select").click();
+  await envPreview.waitFor();
+  assert.match(await envPreview.innerText(),/Basic/);
+  assert.doesNotMatch(await envPreview.innerText(),/synthetic-user|synthetic-password/);
+  await page.locator("#migration-confirm").click();
+  await page.locator("#migration-modal").waitFor({state:"hidden"});
+  assert.deepEqual(await page.evaluate(start=>fixture.imports.slice(start),beforeCurl),["curl-basic"]);
+  assert.deepEqual(externalImportRequests,[]);
   await page.locator('[data-page="connections"]').click();
   await page.setViewportSize({width:460,height:690});
   await fillItemSearch("");
@@ -600,5 +650,5 @@ try {
   await page.screenshot({path:path.join(artifacts,"narrow-card-editor.png")});
   assert.ok(await page.evaluate(()=>document.querySelector("#connection-modal .modal-card").getBoundingClientRect().bottom<=innerHeight));
   assert.deepEqual(errors,[]);
-  console.log(JSON.stringify({ok:true,checks:["combined add/draft selector","draft preservation and recovery","card editor","encrypted field payload","one header search and filter panel with Ctrl/Cmd+F and independent page queries","multiple host and URL addresses, default switching, removal, drafts, failed save and address search","combined keyword, type, exact folder and enabled status filters","unsaved edits survive filtering and are saved as drafts","460px filter controls","multiline secure note","generator inserts password","browser address copy, pairing, launch failures and recovery","backup password flow","multiple website rules","migration preview/cancel/commit","password history","trash restore and purge from settings","narrow layout"],artifacts},null,2));
+  console.log(JSON.stringify({ok:true,checks:["combined add/draft selector","draft preservation and recovery","card editor","encrypted field payload","one header search and filter panel with Ctrl/Cmd+F and independent page queries","multiple host and URL addresses, default switching, removal, drafts, failed save and address search","combined keyword, type, exact folder and enabled status filters","unsaved edits survive filtering and are saved as drafts","460px filter controls","multiline secure note","generator inserts password","browser address copy, pairing, launch failures and recovery","backup password flow","multiple website rules","migration preview/cancel/commit","offline cURL preview, cancel, rejection and confirmation","password history","trash restore and purge from settings","narrow layout"],artifacts},null,2));
 } finally {await browser.close();server.close();}

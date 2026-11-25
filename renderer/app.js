@@ -2707,6 +2707,7 @@ $('#login-uri-list').onclick = event => event.target.closest('[data-remove-uri]'
 
 let migrationId = null;
 let migrationSequence = 0;
+let migrationCancellation = Promise.resolve();
 let batchImport = null;
 const importUndoIds = new Map();
 const selectableImportFormats = new Set(['env', 'ssh']);
@@ -2729,8 +2730,11 @@ function migrationHelp() {
     chrome: localized('选择 Chrome 或 Edge 导出的密码 CSV。支持带引号、逗号和多行备注的文件。', 'Choose a password CSV exported by Chrome or Edge. Quoted fields, commas and multiline notes are supported.'),
     ssh: localized('选取一个 OpenSSH 配置文件。预览显式主机及路由。需同时选中可用的直连跳板，导入后再配置认证和主机指纹。', 'Choose one OpenSSH config file to preview explicit hosts and routes. Select the direct jump host as well, then configure credentials and host fingerprints after import.'),
     env: localized('只预览变量名。每个选中的变量会在 Env 文件夹中建立一个加密项目。同名项目会跳过。macOS 可按 ⌘⇧. 显示隐藏文件。', 'Preview variable names. Each selected variable becomes an encrypted item in the Env folder. Items with existing names are skipped. On macOS, press ⌘⇧. to show hidden files.'),
+    curl: localized('粘贴一条使用 Bearer 或 Basic 认证的 HTTPS cURL 命令。确认后保存服务根地址，凭据会在本机加密保存。', 'Paste one HTTPS cURL command with Bearer or Basic authentication. Confirm to save the service origin and encrypted credentials.'),
   };
   $('#migration-help').textContent = help[format];
+  $('#migration-curl-field span').textContent = localized('cURL 命令', 'cURL command');
+  updateImportSelection();
   $('#migration-preview').setAttribute('role', selectableImportFormats.has(format) ? 'group' : 'status');
   $('#migration-preview').setAttribute('aria-label', localized('导入预览', 'Import preview'));
   $('#migration-batch-undo').textContent = localized('撤销本批新增', 'Undo added items');
@@ -2739,6 +2743,7 @@ function migrationHelp() {
 }
 function resetMigration() {
   migrationSequence++; migrationId = null;
+  $('#migration-curl').value = '';
   if (batchImport) invoke(`cancel_${batchImport.format}_import`, { id: batchImport.id }).catch(() => {});
   batchImport = null;
   $('#migration-preview').replaceChildren(); $('#migration-preview').classList.add('hidden');
@@ -2749,12 +2754,19 @@ function resetMigration() {
 function setMigrationBusy(busy) {
   migrationBusy = busy;
   $('#migration-preview').inert = busy;
-  for (const key of ['select', 'format', 'close', 'batch-undo']) $(`#migration-${key}`).disabled = busy;
+  for (const key of ['curl', 'format', 'close', 'batch-undo']) $(`#migration-${key}`).disabled = busy;
   updateImportSelection();
 }
 function updateImportSelection() {
+  const format = $('#migration-format').value;
+  const curlPreview = format === 'curl' && migrationId !== null;
+  const selectButton = $('#migration-select');
+  selectButton.textContent = format !== 'curl' ? localized('选择文件', 'CHOOSE FILE') : curlPreview
+    ? localized('重新粘贴', 'PASTE AGAIN') : localized('预览命令', 'PREVIEW COMMAND');
+  selectButton.disabled = migrationBusy || (format === 'curl' && !curlPreview && !$('#migration-curl').value.trim());
+  $('#migration-curl-field').classList.toggle('hidden', format !== 'curl' || curlPreview);
   const selected = $$('#migration-preview input:checked');
-  $('#migration-confirm').disabled = migrationBusy || (selectableImportFormats.has($('#migration-format').value) && !selected.length);
+  $('#migration-confirm').disabled = migrationBusy || (selectableImportFormats.has(format) && !selected.length);
   if (batchImport?.format !== 'ssh') return;
   const selectedIndices = new Set(selected.map(box => Number(box.value)));
   for (const route of $$('[data-import-ssh-route]')) {
@@ -2811,9 +2823,12 @@ function showBatchImportStatus(message) {
   status.textContent = message;
   status.classList.remove('hidden');
 }
+function cancelMigrationImport() {
+  migrationCancellation = migrationCancellation.then(() => api.cancelImport()).catch(() => {});
+}
 function closeMigration() {
   resetMigration(); $('#migration-modal').classList.add('hidden');
-  api.cancelImport().catch(() => {});
+  cancelMigrationImport();
 }
 $('#migration-open').onclick = async () => {
   await refreshOwnerLock();
@@ -2821,13 +2836,43 @@ $('#migration-open').onclick = async () => {
   resetMigration(); migrationHelp(); $('#migration-modal').classList.remove('hidden');
 };
 $('#migration-close').onclick = closeMigration;
-$('#migration-format').onchange = () => { resetMigration(); api.cancelImport().catch(() => {}); migrationHelp(); };
+$('#migration-format').onchange = () => { resetMigration(); cancelMigrationImport(); migrationHelp(); };
+$('#migration-curl').oninput = () => {
+  $('#migration-error').classList.add('hidden');
+  updateImportSelection();
+};
 $('#migration-preview').onchange = updateImportSelection;
 $('#migration-select').onclick = async () => {
-  resetMigration(); const sequence = migrationSequence;
   const format = $('#migration-format').value;
+  if (format === 'curl' && migrationId) {
+    resetMigration();
+    cancelMigrationImport();
+    updateImportSelection();
+    $('#migration-curl').focus();
+    return;
+  }
+  let curlInput = $('#migration-curl').value;
+  resetMigration(); const sequence = migrationSequence;
   setMigrationBusy(true);
   try {
+    await migrationCancellation;
+    if (sequence !== migrationSequence) return;
+    if (format === 'curl') {
+      const response = invoke('prepare_curl_import', { command: curlInput });
+      curlInput = '';
+      const { id, preview } = await response;
+      if (sequence !== migrationSequence) return;
+      migrationId = id;
+      const target = document.createElement('p');
+      target.textContent = preview.target;
+      const authentication = document.createElement('p');
+      authentication.textContent = preview.authentication === 'basic'
+        ? localized('Basic 认证', 'Basic authentication') : localized('Bearer 认证', 'Bearer authentication');
+      $('#migration-preview').replaceChildren(target, authentication);
+      $('#migration-preview').classList.remove('hidden');
+      $('#migration-confirm').classList.remove('hidden');
+      return;
+    }
     if (selectableImportFormats.has(format)) {
       const id = crypto.randomUUID();
       batchImport = { id, format, rows: {} };
@@ -2848,8 +2893,18 @@ $('#migration-select').onclick = async () => {
     const preview = $('#migration-preview'); preview.replaceChildren(...lines.map(line => {const p = document.createElement('p'); p.textContent=line; return p;}));
     preview.classList.remove('hidden'); $('#migration-confirm').classList.toggle('hidden', p.total === 0);
   } catch(error) {
-    if (sequence === migrationSequence) { $('#migration-error').textContent=cleanError(error); $('#migration-error').classList.remove('hidden'); }
-  } finally { setMigrationBusy(false); }
+    const code = String(error?.message || error);
+    if (sequence === migrationSequence) {
+      $('#migration-error').textContent = format !== 'curl' ? cleanError(error) : code === 'CURL_IMPORT_UNSUPPORTED'
+        ? localized('请使用单个 HTTPS 地址和 Bearer 或 Basic 认证。请去掉查询参数和不支持的选项。', 'Use one HTTPS URL with Bearer or Basic authentication. Remove URL query parameters and unsupported options.')
+        : localized('无法预览命令。请检查格式后重新粘贴。', 'Could not preview the command. Check the format and paste it again.');
+      $('#migration-error').classList.remove('hidden');
+    }
+  } finally {
+    curlInput = '';
+    setMigrationBusy(false);
+    if (format === 'curl' && migrationId && sequence === migrationSequence) $('#migration-confirm').focus();
+  }
 };
 $('#migration-confirm').onclick = async () => {
   if (migrationBusy || (!migrationId && !batchImport)) return;

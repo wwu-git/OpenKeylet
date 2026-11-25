@@ -17,7 +17,7 @@ use crate::{
     mcp,
     model::{
         AppState, ConnectionInput, ImportSummary, NewActivity, OwnerEditorDraft, OwnerLockState,
-        OwnerSecretView, PublicConnection, SettingsPatch,
+        OwnerSecretView, PortableConnection, PublicConnection, SecretBundle, SettingsPatch,
     },
     storage::app_data_dir,
     vault::Vault,
@@ -1450,18 +1450,36 @@ async fn prepare_import(
     let mut owner = runtime.same_owner(epoch).await?;
     let parsed = crate::migration::read(&path.into_path().map_err(command_error)?, &format)
         .map_err(command_error)?;
+    stage_import(&runtime.vault, &mut owner, &parsed.entries, parsed.preview).map(Some)
+}
+
+#[tauri::command]
+async fn prepare_curl_import(
+    runtime: State<'_, AppRuntime>,
+    command: String,
+) -> Result<serde_json::Value, String> {
+    let command = zeroize::Zeroizing::new(command);
+    let mut owner = runtime.authorized_owner().await?;
+    owner.pending_import = None;
+    let (entry, preview) = crate::migration::parse_curl(&command).map_err(command_error)?;
+    stage_import(&runtime.vault, &mut owner, &[entry], preview)
+}
+
+fn stage_import(
+    vault: &Vault,
+    owner: &mut OwnerState,
+    entries: &[(PortableConnection, SecretBundle)],
+    preview: impl serde::Serialize,
+) -> Result<serde_json::Value, String> {
     let id = Uuid::new_v4().to_string();
-    let encrypted = runtime
-        .vault
-        .protect_local_state(&parsed.entries)
-        .map_err(command_error)?;
-    let result = serde_json::json!({"id":id,"preview":parsed.preview});
+    let encrypted = vault.protect_local_state(&entries).map_err(command_error)?;
+    let result = serde_json::json!({"id":id,"preview":preview});
     owner.pending_import = Some(PendingImport {
         id,
         created: Instant::now(),
         encrypted,
     });
-    Ok(Some(result))
+    Ok(result)
 }
 
 #[tauri::command]
@@ -1472,13 +1490,13 @@ async fn commit_import(
 ) -> Result<ImportSummary, String> {
     let mut owner = runtime.authorized_owner().await?;
     let slot = &mut owner.pending_import;
-    let pending = slot.as_ref().ok_or("Choose an import file first")?;
+    let pending = slot.as_ref().ok_or("Prepare an import preview first")?;
     if pending.id != id {
-        return Err("Import preview changed; choose the file again".into());
+        return Err("Import preview changed; prepare a new preview".into());
     }
     if pending.created.elapsed().as_secs() > 300 {
         *slot = None;
-        return Err("Import preview expired; choose the file again".into());
+        return Err("Import preview expired; prepare a new preview".into());
     }
     let entries = runtime
         .vault
@@ -2040,6 +2058,7 @@ pub fn run_gui() -> Result<()> {
             commit_backup_restore,
             cancel_backup_restore,
             prepare_import,
+            prepare_curl_import,
             commit_import,
             cancel_import,
             prepare_env_import,
