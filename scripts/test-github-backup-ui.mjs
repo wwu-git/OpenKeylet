@@ -21,7 +21,7 @@ try{
   const errors=[];page.on("pageerror",error=>errors.push(error.message));
   await page.addInitScript(()=>{
     const state={settings:{language:"zh",closeBehavior:"tray",browserEnabled:true,browserPort:39272},connections:[],activities:[],mcp:{status:"ready"},browserBridge:{status:"listening"},security:{encrypted:true}};
-    window.fixture={status:{connected:false},connects:[],uploads:0,restores:0,failUpload:false,failConnect:false,unlocked:true};
+    window.fixture={status:{connected:false},connects:[],uploads:0,restores:0,restoreAttempts:[],previews:0,revision:"a",failUpload:false,failConnect:false,unlocked:true};
     window.__TAURI__={event:{listen:async()=>()=>{}},core:{invoke:async(command,args={})=>{
       if(command==="get_state")return structuredClone(state);
       if(command==="owner_status")return {pinConfigured:!fixture.unlocked,unlocked:fixture.unlocked};
@@ -47,7 +47,19 @@ try{
         if(fixture.failUpload)throw Error("GITHUB_NETWORK");
         fixture.uploads++;fixture.status.hasRemoteBackup=true;fixture.status.lastBackupAt="2026-10-20T00:00:00Z";return structuredClone(fixture.status);
       }
+      if(command==="github_backup_preview_restore"){
+        fixture.previews++;
+        const revision=fixture.revision;
+        return {
+          snapshot:{repositoryId:"7",branch:"main",sha:revision.repeat(40)},
+          createdAt:"2026-10-20T00:00:00Z",
+          items:{active:[{name:revision==="a"?"<b>Shared login</b>":"Updated login",itemType:"login",folder:"Work",nameConflict:revision==="a"}],
+            trash:[{name:"Old login",itemType:"constructor",folder:"",nameConflict:false}]},
+        };
+      }
       if(command==="github_backup_restore"){
+        fixture.restoreAttempts.push(structuredClone(args.snapshot));
+        if(args.snapshot?.sha!==fixture.revision.repeat(40))throw Error("GITHUB_RESTORE_PREVIEW_STALE");
         fixture.restores++;fixture.status.needsRestore=false;fixture.status.lastRestoreAt="2026-10-20T00:00:00Z";
         return {status:structuredClone(fixture.status),summary:{added:2,merged:1}};
       }
@@ -110,11 +122,40 @@ try{
   assert.equal(await page.evaluate(()=>fixture.uploads),1,"Existing backups must not be uploaded over");
   assert.equal(await page.locator("#github-upload").isDisabled(),true);
   assert.equal(await page.locator("#github-token").inputValue(),"");
-  await page.locator("#github-restore").click();await page.locator("#confirmation-cancel").click();
+  await page.locator("#github-restore").click();
+  const preview=page.locator("#confirmation-details");
+  await preview.waitFor({state:"visible"});
+  assert.match(await page.locator("#confirmation-message").textContent(),/2026.*共 2 项/);
+  assert.match(await preview.textContent(),/<b>Shared login<\/b>.*Work.*本机已有同名项目.*废纸篓.*Old login/);
+  assert.equal(await preview.locator("b").count(),0);
+  assert.ok(await page.locator("#confirmation-modal .confirm-icon").isHidden());
+  await page.screenshot({path:path.join(artifacts,"restore-preview.png")});
+  await page.locator("#confirmation-cancel").click();
+  assert.equal(await preview.textContent(),"");
+  assert.equal(await page.evaluate(()=>fixture.restoreAttempts.length),0);
+  assert.ok(await page.locator("#github-upload").isDisabled());
+  assert.ok(await page.locator("#github-restore").evaluate(button=>button===document.activeElement));
+
+  await page.locator("#github-restore").click();
+  await preview.waitFor({state:"visible"});
+  await page.evaluate(()=>fixture.revision="b");
+  await page.locator("#confirmation-accept").click();
+  await page.waitForFunction(()=>document.querySelector("#github-error").textContent.includes("重新预览"));
   assert.equal(await page.evaluate(()=>fixture.restores),0);
-  await page.locator("#github-restore").click();await page.locator("#confirmation-accept").click();
+  assert.ok(await page.locator("#github-upload").isDisabled());
+  assert.equal(await preview.textContent(),"");
+
+  await page.locator("#github-restore").click();
+  await preview.waitFor({state:"visible"});
+  assert.match(await preview.textContent(),/Updated login/);
+  await page.locator("#confirmation-accept").click();
   await page.waitForFunction(()=>fixture.restores===1);
   await page.waitForFunction(()=>!document.querySelector("#github-upload").disabled);
+  assert.deepEqual(await page.evaluate(()=>fixture.restoreAttempts),[
+    {repositoryId:"7",branch:"main",sha:"a".repeat(40)},
+    {repositoryId:"7",branch:"main",sha:"b".repeat(40)},
+  ]);
+  assert.equal(await page.evaluate(()=>fixture.previews),3);
   await page.screenshot({path:path.join(artifacts,"restored.png")});
   await page.locator("#github-disconnect").click();await page.locator("#confirmation-accept").click();
   await page.locator("#github-connect").waitFor({state:"visible"});
@@ -162,5 +203,5 @@ try{
   assert.equal(await page.locator("#github-modal").isVisible(),false);
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
   assert.deepEqual(errors,[]);
-  console.log(JSON.stringify({ok:true,checks:["account check","CLI authorization selection","explicit repository creation","recovery key acknowledgement","first encrypted upload","existing backup restore gate","token cleared","cancel restore","merge restore","public repository rejection","upload retry without reconnection","lock clears secrets","460px layout"],artifacts},null,2));
+  console.log(JSON.stringify({ok:true,checks:["account check","CLI authorization selection","explicit repository creation","recovery key acknowledgement","first encrypted upload","existing backup restore gate","token cleared","restore preview metadata","cancel restore without confirming","stale remote snapshot rejected","re-preview and merge restore","public repository rejection","upload retry without reconnection","lock clears secrets","460px layout"],artifacts},null,2));
 }finally{await browser.close();server.close();}

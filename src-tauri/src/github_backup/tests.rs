@@ -168,6 +168,11 @@ fn input(key: &str, mode: &str) -> ConnectInput {
     }
 }
 
+async fn restore_current(manager: &GithubBackup) -> Result<RestoreResult> {
+    let preview = manager.preview_restore().await?;
+    manager.restore(Some(preview.snapshot)).await
+}
+
 #[tokio::test]
 async fn discovery_uses_get_and_returns_only_verified_private_backup_candidates() {
     let remote_bytes =
@@ -335,7 +340,7 @@ async fn account_check_and_private_repository_creation_do_not_upload_secrets() {
     assert!(!String::from_utf8_lossy(&ciphertext).contains(&key));
     let (_other_directory, other) = remote.manager();
     other.connect(input(&key, "existing")).await.unwrap();
-    assert_eq!(other.restore().await.unwrap().summary.added, 1);
+    assert_eq!(other.restore(None).await.unwrap().summary.added, 1);
 }
 
 #[tokio::test]
@@ -552,18 +557,119 @@ async fn backup_restores_on_another_device_and_keeps_local_credentials_private()
         target.upload().await.err().unwrap().to_string(),
         "GITHUB_RESTORE_REQUIRED"
     );
-    let restored = target.restore().await.unwrap();
+    let restored = restore_current(&target).await.unwrap();
     assert_eq!(restored.summary.added, 1);
     assert!(!restored.status.needs_restore);
     let entries = target.vault.export_connections().unwrap();
     assert_eq!(entries[0].0.name, "project-marker");
     assert_eq!(entries[0].1.get("apiCredential"), Some("credential-marker"));
-    assert_eq!(target.restore().await.unwrap().summary.merged, 1);
+    assert_eq!(restore_current(&target).await.unwrap().summary.merged, 1);
     assert_eq!(target.vault.export_connections().unwrap().len(), 1);
     assert!(!target.disconnect().unwrap().connected);
     assert!(mock.state.lock().unwrap().bytes.is_some());
     assert_eq!(target.vault.export_connections().unwrap().len(), 1);
     assert!(target.recovery_key().is_err());
+}
+
+#[tokio::test]
+async fn preview_leaves_local_data_untouched_and_confirmation_requires_the_same_snapshot() {
+    let mock = MockGithub::start().await;
+    let (_a, source) = mock.manager();
+    let (_b, target) = mock.manager();
+    let key = generate_recovery_key().unwrap();
+    let shared = Uuid::new_v4();
+    let deleted = Uuid::new_v4();
+    add_item(&source.vault, shared, "shared", "old-remote-credential");
+    add_item(
+        &source.vault,
+        deleted,
+        "deleted",
+        "deleted-remote-credential",
+    );
+    source.vault.trash_connection(deleted, None).unwrap();
+    source.connect(input(&key, "new")).await.unwrap();
+    source.upload().await.unwrap();
+    add_item(&target.vault, Uuid::new_v4(), "shared", "local-credential");
+    target.connect(input(&key, "existing")).await.unwrap();
+    let config_path = target.vault.data_dir().join(LOCAL_FILE);
+    let vault_path = target.vault.data_dir().join("vault.json");
+    let config_before = fs::read(&config_path).unwrap();
+    let vault_before = fs::read(&vault_path).unwrap();
+
+    let cancelled = target.preview_restore().await.unwrap();
+    assert_eq!(cancelled.items.active.len(), 1);
+    assert_eq!(cancelled.items.active[0].name, "shared");
+    assert!(cancelled.items.active[0].name_conflict);
+    assert_eq!(cancelled.items.trash[0].name, "deleted");
+    assert!(cancelled.items.trash[0].deleted_at.is_some());
+    assert!(chrono::DateTime::parse_from_rfc3339(&cancelled.created_at).is_ok());
+    let preview_json = serde_json::to_string(&cancelled).unwrap();
+    for marker in [
+        key.as_str(),
+        "test-token",
+        "old-remote-credential",
+        "deleted-remote-credential",
+        "local-credential",
+        "private-description-marker",
+    ] {
+        assert!(!preview_json.contains(marker));
+    }
+    drop(cancelled);
+    assert_eq!(fs::read(&config_path).unwrap(), config_before);
+    assert_eq!(fs::read(&vault_path).unwrap(), vault_before);
+    assert_eq!(mock.state.lock().unwrap().writes, 1);
+    assert!(target.status().unwrap().needs_restore);
+
+    let old_preview = target.preview_restore().await.unwrap();
+    add_item(&source.vault, shared, "shared", "updated-remote-credential");
+    add_item(
+        &source.vault,
+        Uuid::new_v4(),
+        "new item",
+        "new-remote-credential",
+    );
+    source.upload().await.unwrap();
+    assert_eq!(
+        target
+            .restore(Some(old_preview.snapshot))
+            .await
+            .err()
+            .unwrap()
+            .to_string(),
+        "GITHUB_RESTORE_PREVIEW_STALE"
+    );
+    assert_eq!(fs::read(&config_path).unwrap(), config_before);
+    assert_eq!(fs::read(&vault_path).unwrap(), vault_before);
+    assert_eq!(mock.state.lock().unwrap().writes, 2);
+    assert_eq!(
+        target.upload().await.err().unwrap().to_string(),
+        "GITHUB_RESTORE_REQUIRED"
+    );
+
+    let latest = target.preview_restore().await.unwrap();
+    assert_eq!(latest.items.active.len(), 2);
+    assert_eq!(latest.items.trash.len(), 1);
+    let result = target.restore(Some(latest.snapshot)).await.unwrap();
+    assert!(!result.status.needs_restore);
+    assert_eq!(result.status.remote_item_count, Some(3));
+    let mut values = target
+        .vault
+        .export_connections()
+        .unwrap()
+        .into_iter()
+        .map(|(_, secret)| secret.get("apiCredential").unwrap().to_owned())
+        .collect::<Vec<_>>();
+    values.sort_unstable();
+    assert_eq!(
+        values,
+        [
+            "local-credential",
+            "new-remote-credential",
+            "updated-remote-credential",
+        ]
+    );
+    assert_eq!(target.vault.trash_items().unwrap()[0].item.name, "deleted");
+    assert_eq!(mock.state.lock().unwrap().writes, 2);
 }
 
 #[tokio::test]
@@ -577,7 +683,7 @@ async fn remote_changes_require_restore_and_conflicting_items_are_preserved() {
     first.connect(input(&key, "new")).await.unwrap();
     first.upload().await.unwrap();
     second.connect(input(&key, "existing")).await.unwrap();
-    second.restore().await.unwrap();
+    restore_current(&second).await.unwrap();
     add_item(&first.vault, id, "shared", "updated-first-secret");
     first.upload().await.unwrap();
     let before = mock.state.lock().unwrap().bytes.clone();
@@ -587,7 +693,7 @@ async fn remote_changes_require_restore_and_conflicting_items_are_preserved() {
     );
     assert!(second.status().unwrap().needs_restore);
     assert_eq!(mock.state.lock().unwrap().bytes, before);
-    let result = second.restore().await.unwrap();
+    let result = restore_current(&second).await.unwrap();
     assert_eq!(result.summary.added, 1);
     let entries = second.vault.export_connections().unwrap();
     assert_eq!(entries.len(), 2);
@@ -652,13 +758,14 @@ async fn wrong_keys_and_public_repositories_do_not_modify_local_or_remote_data()
             .to_string(),
         "GITHUB_BACKUP_EXISTS"
     );
+    let snapshot = source.preview_restore().await.unwrap().snapshot;
     mock.state.lock().unwrap().public = true;
     assert_eq!(
         source.upload().await.err().unwrap().to_string(),
         "GITHUB_PRIVATE_REQUIRED"
     );
     assert_eq!(
-        source.restore().await.err().unwrap().to_string(),
+        source.restore(Some(snapshot)).await.err().unwrap().to_string(),
         "GITHUB_PRIVATE_REQUIRED"
     );
     assert_eq!(mock.state.lock().unwrap().writes, 1);
@@ -671,6 +778,7 @@ async fn optimistic_write_conflicts_and_remote_deletion_never_force_overwrite() 
     let key = generate_recovery_key().unwrap();
     manager.connect(input(&key, "new")).await.unwrap();
     manager.upload().await.unwrap();
+    let snapshot = manager.preview_restore().await.unwrap().snapshot;
     let before = mock.state.lock().unwrap().bytes.clone();
     mock.state.lock().unwrap().conflict_on_put = true;
     assert_eq!(
@@ -685,7 +793,11 @@ async fn optimistic_write_conflicts_and_remote_deletion_never_force_overwrite() 
     );
     assert!(mock.state.lock().unwrap().bytes.is_none());
     assert_eq!(
-        manager.restore().await.err().unwrap().to_string(),
+        manager.restore(Some(snapshot)).await.err().unwrap().to_string(),
+        "GITHUB_RESTORE_PREVIEW_STALE"
+    );
+    assert_eq!(
+        manager.preview_restore().await.err().unwrap().to_string(),
         "GITHUB_BACKUP_MISSING"
     );
     assert_eq!(
@@ -702,17 +814,19 @@ async fn large_contents_use_the_pinned_blob_and_errors_are_redacted() {
     manager.connect(input(&key, "new")).await.unwrap();
     manager.upload().await.unwrap();
     mock.state.lock().unwrap().force_blob = true;
-    manager.restore().await.unwrap();
+    restore_current(&manager).await.unwrap();
     for (status, expected) in [
         (401, "GITHUB_AUTH"),
         (403, "GITHUB_PERMISSION"),
         (429, "GITHUB_RATE_LIMIT"),
         (302, "GITHUB_REDIRECT"),
     ] {
+        let snapshot = manager.preview_restore().await.unwrap().snapshot;
         mock.state.lock().unwrap().force_status = Some(status);
-        let error = manager.restore().await.err().unwrap().to_string();
+        let error = manager.restore(Some(snapshot)).await.err().unwrap().to_string();
         assert_eq!(error, expected);
         assert!(!error.contains("token-and-secret-marker"));
+        mock.state.lock().unwrap().force_status = None;
     }
 }
 
@@ -727,7 +841,7 @@ async fn description_only_remote_change_is_preserved_and_reimport_is_idempotent(
     first.connect(input(&key, "new")).await.unwrap();
     first.upload().await.unwrap();
     second.connect(input(&key, "existing")).await.unwrap();
-    second.restore().await.unwrap();
+    restore_current(&second).await.unwrap();
 
     let original = first.vault.get_connection(id).unwrap();
     let mut edit: ConnectionInput =
@@ -737,14 +851,14 @@ async fn description_only_remote_change_is_preserved_and_reimport_is_idempotent(
     first.upload().await.unwrap();
     assert_eq!(second.upload().await.err().unwrap().to_string(), "GITHUB_REMOTE_CHANGED");
 
-    let restored = second.restore().await.unwrap();
+    let restored = restore_current(&second).await.unwrap();
     assert_eq!(restored.summary.added, 1);
     assert_eq!(restored.summary.merged, 0);
     let projects = second.vault.list_connections().unwrap();
     assert_eq!(projects.len(), 2);
     assert!(projects.iter().any(|p| p.id == id && p.description == "private-description-marker"));
     assert!(projects.iter().any(|p| p.id != id && p.description == "updated-description"));
-    let repeated = second.restore().await.unwrap();
+    let repeated = restore_current(&second).await.unwrap();
     assert_eq!(repeated.summary.added, 0);
     assert_eq!(repeated.summary.merged, 1);
     assert_eq!(second.vault.list_connections().unwrap().len(), 2);

@@ -1,6 +1,6 @@
 /* GitHub backup UI. No credentials are persisted in browser storage. */
 window.OpenKeyletGithubBackup = {
-  create({ invoke, localized, toast, isUnlocked, confirmAction, onRestore }) {
+  create({ invoke, localized, toast, itemTypeLabel, isUnlocked, confirmAction, onRestore }) {
     const $ = (id) => document.getElementById(id);
     const modal = $('github-modal');
     let status = { connected: false };
@@ -85,6 +85,7 @@ window.OpenKeyletGithubBackup = {
       GITHUB_BUSY: ['此保险库正在执行另一项 GitHub 备份操作，请稍后重试。', 'Another GitHub backup operation is running for this vault. Retry shortly.'],
       GITHUB_RESTORE_REQUIRED: ['请先恢复合并云端备份，再上传本机数据。', 'Restore and merge the remote backup before uploading this device.'],
       GITHUB_REMOTE_CHANGED: ['云端版本已变更，已停止上传。请先恢复合并。', 'The remote version changed. Upload stopped. Restore and merge first.'],
+      GITHUB_RESTORE_PREVIEW_STALE: ['云端快照或连接已变更。请重新预览再恢复。', 'The cloud snapshot or connection changed. Preview it again before restoring.'],
       GITHUB_CONFLICT: ['云端发生并发更新，或仓库规则拒绝了提交。请先恢复，并检查分支保护规则。', 'A concurrent update or repository rule rejected the write. Restore first and check branch protection.'],
       GITHUB_UPLOAD_UNCONFIRMED: ['上传结果尚未确认。请先恢复云端备份，确认最新版本后再上传。', 'Upload could not be confirmed. Restore the remote backup before uploading again.'],
       GITHUB_RATE_LIMIT: ['GitHub 暂时限制了请求。请稍后再试。', 'GitHub temporarily limited requests. Try again later.'],
@@ -108,6 +109,30 @@ window.OpenKeyletGithubBackup = {
 
     function dateText(value) {
       return value ? new Date(value).toLocaleString(document.documentElement.lang, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : localized('尚无', 'Not yet');
+    }
+
+    function restorePreviewDetails({ active, trash }) {
+      const details = document.createElement('div');
+      details.className = 'github-restore-preview';
+      for (const [title, rows] of [[localized('保险库', 'Vault'), active], [localized('废纸篓', 'Trash'), trash]]) {
+        if (!rows.length) continue;
+        const section = document.createElement('section');
+        const heading = document.createElement('h3');
+        heading.textContent = title;
+        const list = document.createElement('ul');
+        for (const row of rows) {
+          const item = document.createElement('li');
+          item.textContent = row.name;
+          const metadata = document.createElement('small');
+          metadata.textContent = [itemTypeLabel(row.itemType), row.folder,
+            row.nameConflict && localized('本机已有同名项目', 'Same name on this device')].filter(Boolean).join(' · ');
+          item.append(metadata);
+          list.append(item);
+        }
+        section.append(heading, list);
+        details.append(section);
+      }
+      return details.childElementCount ? details : undefined;
     }
 
     function render() {
@@ -215,7 +240,7 @@ window.OpenKeyletGithubBackup = {
       busy = true;
       lastError = '';
       render();
-      try { await action(); }
+      try { return await action(); }
       catch (error) { lastError = error; toast(errorText(error), 'error'); }
       finally { busy = false; await refresh(); }
     }
@@ -366,10 +391,25 @@ window.OpenKeyletGithubBackup = {
       if (busy || !await confirmAction({ title: localized('上传加密备份？', 'Upload encrypted backup?'), message: localized(`将整个保险库加密上传到 ${status.repository}。GitHub 历史会保留旧版密文。`, `Encrypt and upload the entire vault to ${status.repository}. GitHub history retains older encrypted snapshots.`), acceptLabel: localized('立即备份', 'BACK UP'), tag: localized('手动云端备份', 'MANUAL CLOUD BACKUP') })) return;
       await operate(async () => { status = await invoke('github_backup_upload'); toast(localized('加密备份已上传', 'Encrypted backup uploaded')); });
     });
-    $('github-restore').addEventListener('click', async () => {
-      if (busy || !await confirmAction({ title: localized('恢复云端备份？', 'Restore remote backup?'), message: localized('云端项目会合并到本机。相同内容不重复导入；同名但内容不同的项目会另存，现有项目不会被覆盖或删除。', 'Merge cloud items into this device. Identical items are skipped; differing items are kept separately. Existing items are never overwritten or deleted.'), acceptLabel: localized('恢复并合并', 'RESTORE & MERGE'), tag: localized('恢复加密备份', 'RESTORE BACKUP') })) return;
+    $('github-restore').addEventListener('click', async (event) => {
+      const returnFocus = event.currentTarget;
+      const epoch = secretEpoch;
+      const preview = await operate(() => invoke('github_backup_preview_restore'));
+      if (!preview || epoch !== secretEpoch || !isUnlocked()) return;
+      const { snapshot, createdAt, items } = preview;
+      const backupTime = new Date(createdAt).toLocaleString(document.documentElement.lang);
+      const count = items.active.length + items.trash.length;
+      const accepted = await confirmAction({
+        title: localized('云端恢复预览', 'Cloud restore preview'),
+        message: localized(`备份于 ${backupTime} 创建，共 ${count} 项。确认后合并整份备份。相同项目会跳过，同名但内容不同的项目会另存。`,
+          `Backup from ${backupTime}. ${count} total. Confirm to merge the entire backup. Identical items are skipped. Items with the same name and different contents are saved separately.`),
+        details: restorePreviewDetails(items), returnFocus, destructive: false,
+        acceptLabel: localized('恢复并合并', 'RESTORE & MERGE'),
+        tag: '',
+      });
+      if (!accepted || epoch !== secretEpoch || !isUnlocked()) return;
       await operate(async () => {
-        const result = await invoke('github_backup_restore'); status = result.status;
+        const result = await invoke('github_backup_restore', { snapshot }); status = result.status;
         toast(localized(`恢复完成：新增 ${result.summary.added}，跳过重复 ${result.summary.merged}`, `Restored: ${result.summary.added} added, ${result.summary.merged} duplicates skipped`));
         await onRestore();
       });

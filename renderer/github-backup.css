@@ -57,3 +57,17 @@
   .github-error { color: CanvasText; }
   .github-key-confirm input { appearance: auto; }
 }
+#confirmation-details {
+  max-height: min(220px, 35dvh);
+  overflow: auto;
+  margin-bottom: 14px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-soft);
+  overflow-wrap: anywhere;
+}
+
+.github-restore-preview section + section { margin-top: 12px; }
+.github-restore-preview h3 { margin: 0 0 4px; font-size: 12px; }
+.github-restore-preview ul { margin: 0; padding-inline-start: 18px; }
+.github-restore-preview li { padding-block: 3px; font-size: 12px; }
+.github-restore-preview li small { display: block; color: var(--muted); font-size: 11px; }

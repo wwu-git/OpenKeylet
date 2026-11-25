@@ -232,6 +232,10 @@ pub(crate) fn restore_cloud_snapshot(vault: &Vault, plain: &[u8]) -> Result<Impo
     parse_backup_payload(plain, None)?.restore_all(vault)
 }
 
+pub(crate) fn preview_cloud_snapshot(vault: &Vault, plain: &[u8]) -> Result<RestorePreview> {
+    parse_backup_payload(plain, None)?.preview(vault)
+}
+
 fn write_backup_file(path: &Path, file: &BackupFile) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(&file).context("Unable to generate backup file")?;
     let mut writer = AtomicWriteFile::open(path).context("Unable to create backup file")?;

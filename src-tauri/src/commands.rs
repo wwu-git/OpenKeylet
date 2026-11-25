@@ -1297,16 +1297,29 @@ async fn github_backup_upload(runtime: State<'_, AppRuntime>) -> Result<BackupSt
 }
 
 #[tauri::command]
+async fn github_backup_preview_restore(
+    runtime: State<'_, AppRuntime>,
+) -> Result<github_backup::RestorePreview, String> {
+    let epoch = runtime.owner_epoch().await?;
+    let backup = runtime.github_backup.lock().await;
+    drop(runtime.same_owner(epoch).await?);
+    let result = backup.preview_restore().await;
+    let _owner = runtime.same_owner(epoch).await?;
+    result.map_err(command_error)
+}
+
+#[tauri::command]
 async fn github_backup_restore(
     app: AppHandle,
     runtime: State<'_, AppRuntime>,
+    snapshot: github_backup::RestoreSnapshot,
 ) -> Result<RestoreResult, String> {
     require_owner_unlocked(&runtime).await?;
     let result = runtime
         .github_backup
         .lock()
         .await
-        .restore()
+        .restore(Some(snapshot))
         .await
         .map_err(command_error)?;
     emit_changed(&app);
@@ -2044,6 +2057,7 @@ pub fn run_gui() -> Result<()> {
             github_backup_recovery_key,
             github_backup_connect,
             github_backup_upload,
+            github_backup_preview_restore,
             github_backup_restore,
             github_backup_disconnect,
             github_backup_help,

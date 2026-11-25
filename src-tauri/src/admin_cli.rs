@@ -188,7 +188,7 @@ pub(crate) async fn github_backup(vault: Vault, args: &[String]) -> Result<()> {
             print_json(backup.connect(input).await.map_err(backup_error)?)
         }
         BackupCommand::Upload => print_json(backup.upload().await.map_err(backup_error)?),
-        BackupCommand::Restore => print_json(backup.restore().await.map_err(backup_error)?),
+        BackupCommand::Restore => print_json(backup.restore(None).await.map_err(backup_error)?),
         BackupCommand::Disconnect => print_json(backup.disconnect().map_err(backup_error)?),
     }
 }

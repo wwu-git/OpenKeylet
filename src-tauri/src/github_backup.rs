@@ -88,6 +88,22 @@ pub struct RestoreResult {
     pub status: BackupStatus,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreSnapshot {
+    repository_id: String,
+    branch: String,
+    sha: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestorePreview {
+    pub snapshot: RestoreSnapshot,
+    pub created_at: String,
+    pub items: backup::RestorePreview,
+}
+
 #[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 #[serde(rename_all = "camelCase")]
 struct DeviceConfig {
@@ -408,14 +424,47 @@ impl GithubBackup {
         Ok(config.status())
     }
 
-    pub async fn restore(&self) -> Result<RestoreResult> {
+    pub async fn preview_restore(&self) -> Result<RestorePreview> {
         let _device_lock = self.lock_device()?;
-        let mut config = self.connected()?;
+        let config = self.connected()?;
         self.check_repository(&config).await?;
         let remote = self
             .remote_file(&config)
             .await?
             .context("GITHUB_BACKUP_MISSING")?;
+        let plain = decrypt_snapshot(&remote.bytes, &config.recovery_key)?;
+        let (created_at, _) =
+            backup::inspect_cloud_snapshot(&plain).context("GITHUB_BACKUP_INVALID")?;
+        let items =
+            backup::preview_cloud_snapshot(&self.vault, &plain).context("GITHUB_RESTORE_FAILED")?;
+        Ok(RestorePreview {
+            snapshot: RestoreSnapshot {
+                repository_id: config.repository_id.to_string(),
+                branch: config.branch.clone(),
+                sha: remote.sha,
+            },
+            created_at,
+            items,
+        })
+    }
+
+    pub async fn restore(&self, snapshot: Option<RestoreSnapshot>) -> Result<RestoreResult> {
+        let _device_lock = self.lock_device()?;
+        let mut config = self.connected()?;
+        if snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.repository_id != config.repository_id.to_string()
+                || snapshot.branch != config.branch
+        }) {
+            bail!("GITHUB_RESTORE_PREVIEW_STALE");
+        }
+        self.check_repository(&config).await?;
+        let remote = self.remote_file(&config).await?;
+        if let Some(snapshot) = snapshot {
+            if remote.as_ref().map(|remote| &remote.sha) != Some(&snapshot.sha) {
+                bail!("GITHUB_RESTORE_PREVIEW_STALE");
+            }
+        }
+        let remote = remote.context("GITHUB_BACKUP_MISSING")?;
         let plain = decrypt_snapshot(&remote.bytes, &config.recovery_key)?;
         let (created_at, count) =
             backup::inspect_cloud_snapshot(&plain).context("GITHUB_BACKUP_INVALID")?;

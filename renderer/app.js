@@ -363,7 +363,7 @@ let confirmationResolver = null;
 let confirmationPreviousFocus = null;
 let confirmationInertElements = [];
 const githubBackup = window.OpenKeyletGithubBackup.create({
-  invoke, localized, toast,
+  invoke, localized, toast, itemTypeLabel,
   isUnlocked: () => ownerLockState.unlocked,
   confirmAction: confirmDestructiveAction,
   onRestore: () => refresh(),
@@ -394,6 +394,8 @@ function finishConfirmation(accepted, restoreFocus = true) {
   const resolve = confirmationResolver;
   confirmationResolver = null;
   $('#confirmation-modal').classList.add('hidden');
+  $('#confirmation-details').replaceChildren();
+  $('#confirmation-details').classList.add('hidden');
   confirmationInertElements.forEach((element) => { element.inert = false; });
   confirmationInertElements = [];
   if (restoreFocus) {
@@ -408,15 +410,23 @@ function finishConfirmation(accepted, restoreFocus = true) {
   resolve(accepted);
 }
 
-function confirmDestructiveAction({ title, message, acceptLabel = localized('删除', 'DELETE'), tag = localized('确认删除', 'CONFIRM DELETION') }) {
+function confirmDestructiveAction({ title, message, details, destructive = true, returnFocus = document.activeElement, acceptLabel = localized('删除', 'DELETE'), tag = localized('确认删除', 'CONFIRM DELETION') }) {
   if (confirmationResolver) return Promise.resolve(false);
   finishModulePointerDrag(false);
   $('#confirmation-tag').textContent = tag;
+  $('#confirmation-tag').classList.toggle('hidden', !tag);
+  $('#confirmation-modal .confirm-icon').classList.toggle('hidden', !destructive);
   $('#confirmation-title').textContent = title;
   $('#confirmation-message').textContent = message;
+  const detailsPanel = $('#confirmation-details');
+  detailsPanel.replaceChildren(...(details ? [details] : []));
+  detailsPanel.classList.toggle('hidden', !details);
   $('#confirmation-cancel').textContent = localized('取消', 'CANCEL');
-  $('#confirmation-accept').textContent = acceptLabel;
-  confirmationPreviousFocus = document.activeElement;
+  const accept = $('#confirmation-accept');
+  accept.textContent = acceptLabel;
+  accept.classList.toggle('danger', destructive);
+  accept.classList.toggle('primary', !destructive);
+  confirmationPreviousFocus = returnFocus;
   confirmationInertElements = [...document.body.children].filter((element) => element !== $('#confirmation-modal') && !element.inert && !['SCRIPT', 'STYLE'].includes(element.tagName));
   confirmationInertElements.forEach((element) => { element.inert = true; });
   $('#confirmation-modal').classList.remove('hidden');
@@ -1322,7 +1332,7 @@ const MODULE_DEFS = {
 };
 const PERSONAL_FIELDS = Object.keys(MODULE_DEFS).slice(0, Object.keys(MODULE_DEFS).indexOf('username'));
 const ITEM_TYPES = { login: ['登录', 'Login'], card: ['信用卡', 'Card'], identity: ['身份资料', 'Identity'], secureNote: ['安全笔记', 'Secure note'], ssh: ['SSH', 'SSH'], api: ['API', 'API'], custom: ['自定义', 'Custom'], passkey: ['Passkey', 'Passkey'] };
-function itemTypeLabel(kind) { const labels = ITEM_TYPES[kind] || ITEM_TYPES.custom; return localized(...labels); }
+function itemTypeLabel(kind) { const labels = Object.hasOwn(ITEM_TYPES, kind) ? ITEM_TYPES[kind] : ITEM_TYPES.custom; return localized(...labels); }
 function typeOptions(emptyLabel, selected, includePasskey = false) {
   return `${emptyLabel ? `<option value="">${emptyLabel}</option>` : ''}${Object.keys(ITEM_TYPES).filter(k => includePasskey || k !== 'passkey').map(k => `<option value="${k}" ${k === selected ? 'selected' : ''}>${itemTypeLabel(k)}</option>`).join('')}`;
 }
@@ -3544,10 +3554,10 @@ document.addEventListener('keydown', (event) => {
       return;
     }
     if (event.key === 'Tab') {
-      const buttons = [$('#confirmation-cancel'), $('#confirmation-accept')];
-      const index = buttons.indexOf(document.activeElement);
+      const focusable = $$('#confirmation-modal button, #confirmation-details:not(.hidden)');
+      const index = focusable.indexOf(document.activeElement);
       event.preventDefault();
-      buttons[(index + (event.shiftKey ? -1 : 1) + buttons.length) % buttons.length].focus();
+      focusable[(index + (event.shiftKey ? -1 : 1) + focusable.length) % focusable.length].focus();
     }
     return;
   }
