@@ -58,6 +58,10 @@ try {
       if(command==="commit_backup_restore") { (fixture.restores ??= []).push(args.selection); return {added:2,merged:0}; }
       if(command==="cancel_backup_restore") { (fixture.restoreCancels ??= []).push(args.id); return; }
       if(command==="prepare_import") {
+        if(args.format==="1pux") {
+          fixture.pendingOnePassword="fixture-1pux";
+          return {id:fixture.pendingOnePassword,preview:{total:3,types:{login:2,secureNote:1},passkeys:0,sources:{"QA vault":3},skippedArchived:1,skippedTypes:2,skippedAttachments:4,warnings:["onepasswordFillRules"]}};
+        }
         if(args.format==="keepass") {
           fixture.pendingKeepass="fixture-keepass";
           return {id:fixture.pendingKeepass,preview:{total:2,types:{login:2},passkeys:0,skippedDeleted:1,warnings:["keepassHistory","keepassProtected"]}};
@@ -71,7 +75,7 @@ try {
         fixture.pendingCurl=id;
         return {id,preview:{target:"https://api.example.test",authentication}};
       }
-      if(command==="cancel_import") {delete fixture.pendingCurl;delete fixture.pendingKeepass;return;}
+      if(command==="cancel_import") {delete fixture.pendingCurl;delete fixture.pendingKeepass;delete fixture.pendingOnePassword;return;}
       if(command==="commit_import") {fixture.imports.push(args.id);return {added:4,merged:0};}
       if(command==="prepare_env_import") return {id:args.id,empty:1,multiline:2,rows:[
         {index:0,name:"API_KEY",conflict:false},
@@ -545,6 +549,25 @@ try {
   await page.locator("#migration-modal").waitFor({state:"hidden"});
   assert.deepEqual(await page.evaluate(()=>fixture.imports),["fixture-import","fixture-keepass"]);
   await page.locator("#migration-open").click();
+  await page.locator("#migration-format").selectOption("1pux");
+  await page.locator("#migration-select").click();
+  await keepassPreview.waitFor();
+  const onePasswordPreview=await keepassPreview.innerText();
+  assert.match(onePasswordPreview,/可导入 3 项/);
+  assert.match(onePasswordPreview,/来源保险库 QA vault · 3 项/);
+  assert.match(onePasswordPreview,/跳过 1 个归档项目/);
+  assert.match(onePasswordPreview,/跳过 2 个不支持的项目/);
+  assert.match(onePasswordPreview,/跳过 4 个附件或其他文件/);
+  assert.match(onePasswordPreview,/已保留禁填规则/);
+  await page.locator("#migration-close").click();
+  await page.waitForFunction(()=>!fixture.pendingOnePassword);
+  assert.deepEqual(await page.evaluate(()=>fixture.imports),["fixture-import","fixture-keepass"]);
+  await page.locator("#migration-open").click();
+  await page.locator("#migration-select").click();
+  await page.locator("#migration-confirm").click();
+  await page.locator("#migration-modal").waitFor({state:"hidden"});
+  assert.deepEqual(await page.evaluate(()=>fixture.imports),["fixture-import","fixture-keepass","fixture-1pux"]);
+  await page.locator("#migration-open").click();
   await page.locator("#migration-format").selectOption("env");
   await page.locator("#migration-select").click();
   const envPreview = page.locator("#migration-preview");
@@ -708,5 +731,5 @@ try {
   await page.screenshot({path:path.join(artifacts,"narrow-card-editor.png")});
   assert.ok(await page.evaluate(()=>document.querySelector("#connection-modal .modal-card").getBoundingClientRect().bottom<=innerHeight));
   assert.deepEqual(errors,[]);
-  console.log(JSON.stringify({ok:true,checks:["combined add/draft selector","draft preservation and recovery","card editor","encrypted field payload","one header search and filter panel with Ctrl/Cmd+F and independent page queries","multiple host and URL addresses, default switching, removal, drafts, failed save and address search","combined keyword, type, exact folder and enabled status filters","unsaved edits survive filtering and are saved as drafts","460px filter controls","multiline secure note","generator inserts password","browser address copy, pairing, launch failures and recovery","backup password flow","multiple website rules","migration preview/cancel/commit","KeePass XML preview, cancel and confirmation","offline cURL preview, cancel, rejection and confirmation","AWS profile preview, cancel, selective import and undo","password history","trash restore and purge from settings","narrow layout"],artifacts},null,2));
+  console.log(JSON.stringify({ok:true,checks:["combined add/draft selector","draft preservation and recovery","card editor","encrypted field payload","one header search and filter panel with Ctrl/Cmd+F and independent page queries","multiple host and URL addresses, default switching, removal, drafts, failed save and address search","combined keyword, type, exact folder and enabled status filters","unsaved edits survive filtering and are saved as drafts","460px filter controls","multiline secure note","generator inserts password","browser address copy, pairing, launch failures and recovery","backup password flow","multiple website rules","migration preview/cancel/commit","KeePass XML preview, cancel and confirmation","1Password 1PUX preview, cancel and confirmation","offline cURL preview, cancel, rejection and confirmation","AWS profile preview, cancel, selective import and undo","password history","trash restore and purge from settings","narrow layout"],artifacts},null,2));
 } finally {await browser.close();server.close();}

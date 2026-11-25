@@ -13,6 +13,9 @@ const repo=path.resolve(import.meta.dirname,"..");
 const root=await fs.mkdtemp(path.join(os.tmpdir(),"openkeylet-browser-test-"));
 const extension=path.join(root,"extension");
 const fixture=process.argv[2] || path.join(process.env.CARGO_TARGET_DIR || path.join(repo,"src-tauri/target"),"debug/examples",process.platform==="win32"?"browser_fixture.exe":"browser_fixture");
+const importFormat=process.env.OPENKEYLET_TEST_IMPORT || "keepass";
+assert.ok(["1pux", "keepass"].includes(importFormat));
+const importLabel=importFormat==="1pux" ? "1Password 1PUX" : "KeePass XML";
 // Independent decoder for the definite-length CBOR used in WebAuthn attestation/COSE.
 function readCbor(bytes, start=0) {
   let offset=start;
@@ -54,14 +57,14 @@ assert.ok(!testManifest.host_permissions.includes("<all_urls>"));
 testManifest.host_permissions.push("<all_urls>");
 await fs.writeFile(manifestPath, JSON.stringify(testManifest));
 const swPath=path.join(extension,"service-worker.js");await fs.writeFile(swPath,(await fs.readFile(swPath,"utf8")).replaceAll("39272",String(port)));
-await fs.writeFile(path.join(root,"keepass.xml"),`<?xml version="1.0" encoding="UTF-8"?>
+if(importFormat==="keepass") await fs.writeFile(path.join(root,"keepass.xml"),`<?xml version="1.0" encoding="UTF-8"?>
 <KeePassFile><Root><Group><Name>Fixture</Name><Group><Name>Sites</Name><Entry>
   <String><Key>Title</Key><Value>Fixture login</Value></String>
   <String><Key>UserName</Key><Value>alice</Value></String>
   <String><Key>Password</Key><Value>fixture-initial-password</Value></String>
   <String><Key>URL</Key><Value>${origin}/</Value></String>
 </Entry></Group></Group></Root></KeePassFile>`);
-const child=spawn(fixture,[root,String(port),origin],{windowsHide:true,stdio:["ignore","pipe","pipe"]});
+const child=spawn(fixture,[root,String(port),origin,importFormat],{windowsHide:true,stdio:["ignore","pipe","pipe"]});
 let output="", context;
 child.stdout.on("data",d=>{output+=d});child.stderr.on("data",d=>{output+=d});
 async function until(fn,description,timeout=20000){const end=Date.now()+timeout;while(Date.now()<end){if(await fn())return;await new Promise(r=>setTimeout(r,100));}throw new Error(`Timed out: ${description}. ${output.slice(-1500)}`);}
@@ -107,7 +110,7 @@ try {
   await until(async()=>await site.locator("#password").inputValue()==="fixture-initial-password","password autofill");
   assert.equal(await site.locator("#username").inputValue(),"alice");
   assert.equal(site.url(),origin+"/");
-  console.log("Imported KeePass username and password filled without submitting the page");
+  console.log(`Imported ${importLabel} username and password filled without submitting the page`);
   await site.locator("#password").fill("browser-update-secret");await site.bringToFront();await popup.locator("#read-form").click();
   await popup.locator("#save-form").waitFor({state:"visible"});
   await site.bringToFront();await popup.locator('#save-form button[type="submit"]').click();
@@ -467,7 +470,7 @@ try {
   await site.locator("#password").fill("page-isolation-sentinel");
   const isolation=await site.evaluate(()=>new Promise(resolve=>{window.postMessage({type:"vault-ui",action:"fill",id:"anything"},location.origin);setTimeout(()=>resolve(document.querySelector("#password").value),100);}));
   assert.equal(isolation,"page-isolation-sentinel");
-  console.log(JSON.stringify({ok:true,checks:["pairing","browser page guidance","live bridge status","reconnect recovery","PIN unlock","KeePass XML username and password autofill","TOTP fill and lock","browser save","desktop update","card create/edit/fill","identity create/fill","secure note round trip","lock clears open editors","hidden fields excluded","HTTPS enforcement","cross-origin iframe denied","password generator","origin isolation","passkey create","duplicate registration rejected","COSE public key","verified assertion","discoverable login","cancel","abort during preparation"],artifacts:root},null,2));
+  console.log(JSON.stringify({ok:true,checks:["pairing","browser page guidance","live bridge status","reconnect recovery","PIN unlock",`${importLabel} username and password autofill`,"TOTP fill and lock","browser save","desktop update","card create/edit/fill","identity create/fill","secure note round trip","lock clears open editors","hidden fields excluded","HTTPS enforcement","cross-origin iframe denied","password generator","origin isolation","passkey create","duplicate registration rejected","COSE public key","verified assertion","discoverable login","cancel","abort during preparation"],artifacts:root},null,2));
 } catch(error) {
   console.error(`Browser test artifacts: ${root}`);
   for(const [index,page] of (context?.pages() || []).entries()) await page.screenshot({path:path.join(root,`failure-${index}.png`),timeout:2000}).catch(()=>{});

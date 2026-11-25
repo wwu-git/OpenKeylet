@@ -2713,6 +2713,10 @@ const importUndoIds = new Map();
 const selectableImportFormats = new Set(['env', 'ssh', 'aws']);
 let migrationBusy = false;
 const migrationWarnings = {
+  onepasswordFields: ['已跳过无法迁移的字段。', 'Fields that could not be migrated were skipped.'],
+  onepasswordHistory: ['已跳过旧密码的历史记录。', 'Password history was skipped.'],
+  onepasswordUrls: ['无法用于填充的网址已存为加密字段。', 'URLs unavailable for autofill were saved as encrypted fields.'],
+  onepasswordFillRules: ['已保留禁填规则。无法确认的来源规则也被设为禁填。', 'Never-fill rules were preserved. Unknown source rules were also set to never fill.'],
   keepassHistory: ['已跳过历史版本。', 'Historical versions were skipped.'],
   keepassAttachments: ['已跳过附件。', 'Attachments were skipped.'],
   keepassProtected: ['无法读取的受保护字段已跳过。', 'Unreadable protected fields were skipped.'],
@@ -2735,6 +2739,7 @@ function migrationHelp() {
     bitwarden: localized('在 Bitwarden 中导出未加密 JSON，然后选择文件预览。原文件不变；导入的秘密会加密存入本地库。', 'Export unencrypted JSON from Bitwarden, then choose the file to preview. Imported secrets are encrypted locally.'),
     chrome: localized('选择 Chrome 或 Edge 导出的密码 CSV。支持带引号、逗号和多行备注的文件。', 'Choose a password CSV exported by Chrome or Edge. Quoted fields, commas and multiline notes are supported.'),
     keepass: localized('选择 KeePass 导出的 2.x XML 文件。本机预览，确认后加密保存。内容相同的项目会跳过，同名但内容不同的项目会另存。', 'Choose a KeePass 2.x XML export. Preview it locally and confirm to save it encrypted. Identical items are skipped. Different items with the same name are saved separately.'),
+    '1pux': localized('选择 1Password 8 导出的 .1pux 文件。导出文件为明文。导入时在本机预览，确认后加密保存到保险库。', 'Choose a .1pux export from 1Password 8. The export contains plaintext. Review it locally and confirm to save it encrypted in your vault.'),
     ssh: localized('选取一个 OpenSSH 配置文件。预览显式主机及路由。需同时选中可用的直连跳板，导入后再配置认证和主机指纹。', 'Choose one OpenSSH config file to preview explicit hosts and routes. Select the direct jump host as well, then configure credentials and host fingerprints after import.'),
     env: localized('只预览变量名。每个选中的变量会在 Env 文件夹中建立一个加密项目。同名项目会跳过。macOS 可按 ⌘⇧. 显示隐藏文件。', 'Preview variable names. Each selected variable becomes an encrypted item in the Env folder. Items with existing names are skipped. On macOS, press ⌘⇧. to show hidden files.'),
     curl: localized('粘贴一条使用 Bearer 或 Basic 认证的 HTTPS cURL 命令。确认后保存服务根地址，凭据会在本机加密保存。', 'Paste one HTTPS cURL command with Bearer or Basic authentication. Confirm to save the service origin and encrypted credentials.'),
@@ -2902,9 +2907,13 @@ $('#migration-select').onclick = async () => {
     if (!result || sequence !== migrationSequence) return;
     migrationId = result.id;
     const p = result.preview;
-    const lines = [format === 'keepass' ? localized(`可导入 ${p.total} 项`, `${p.total} items ready to import`)
+    const lines = [format === 'keepass' || format === '1pux' ? localized(`可导入 ${p.total} 项`, `${p.total} items ready to import`)
       : localized(`可导入 ${p.total} 项 · Passkey ${p.passkeys} 个`, `${p.total} items · ${p.passkeys} passkeys`),
       ...Object.entries(p.types).map(([type,count]) => `${itemTypeLabel(type)}: ${count}`),
+      ...Object.entries(p.sources || {}).map(([name, count]) => localized(`来源保险库 ${name} · ${count} 项`, `Source vault ${name} · ${count} items`)),
+      ...(p.skippedArchived ? [localized(`跳过 ${p.skippedArchived} 个归档项目`, `Skipped ${p.skippedArchived} archived items`)] : []),
+      ...(p.skippedTypes ? [localized(`跳过 ${p.skippedTypes} 个不支持的项目`, `Skipped ${p.skippedTypes} unsupported items`)] : []),
+      ...(p.skippedAttachments ? [localized(`跳过 ${p.skippedAttachments} 个附件或其他文件`, `Skipped ${p.skippedAttachments} attachments or other files`)] : []),
       ...(p.skippedDeleted ? [localized(`跳过回收站项目 ${p.skippedDeleted} 项`, `Skipped ${p.skippedDeleted} deleted items`)] : []),
       ...p.warnings.map(key => migrationWarnings[key] ? localized(...migrationWarnings[key]) : key)];
     const preview = $('#migration-preview'); preview.replaceChildren(...lines.map(line => {const p = document.createElement('p'); p.textContent=line; return p;}));

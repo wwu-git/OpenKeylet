@@ -22,6 +22,7 @@ type Entry = (PortableConnection, SecretBundle);
 #[cfg(any(feature = "gui", test))]
 mod curl;
 mod keepass;
+mod onepassword;
 #[cfg(feature = "gui")]
 pub(crate) use curl::parse_curl;
 
@@ -32,7 +33,19 @@ pub struct Preview {
     pub types: BTreeMap<String, usize>,
     pub passkeys: usize,
     pub skipped_deleted: usize,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub sources: BTreeMap<String, usize>,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub skipped_archived: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub skipped_types: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub skipped_attachments: usize,
     pub warnings: Vec<String>,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 pub struct Parsed {
@@ -72,6 +85,7 @@ pub fn parse(bytes: &[u8], format: &str) -> Result<Parsed> {
         "bitwarden" => bitwarden(bytes, &mut preview)?,
         "chrome" => chrome_csv(bytes, &mut preview)?,
         "keepass" => keepass::parse(bytes, &mut preview)?,
+        "1pux" => onepassword::parse(bytes, &mut preview)?,
         _ => bail!("Unsupported import format"),
     };
     ensure!(

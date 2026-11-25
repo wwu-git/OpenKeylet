@@ -1444,6 +1444,7 @@ async fn prepare_import(
         "bitwarden" => "json",
         "chrome" => "csv",
         "keepass" => "xml",
+        "1pux" => "1pux",
         _ => return Err("Unsupported import format".into()),
     };
     let selected = app
