@@ -397,7 +397,7 @@ mod tests {
     }
 }
 
-fn label(value: &str, max: usize) -> String {
+pub(super) fn label(value: &str, max: usize) -> String {
     value
         .chars()
         .filter(|ch| !ch.is_control())

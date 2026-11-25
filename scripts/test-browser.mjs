@@ -14,8 +14,9 @@ const root=await fs.mkdtemp(path.join(os.tmpdir(),"openkeylet-browser-test-"));
 const extension=path.join(root,"extension");
 const fixture=process.argv[2] || path.join(process.env.CARGO_TARGET_DIR || path.join(repo,"src-tauri/target"),"debug/examples",process.platform==="win32"?"browser_fixture.exe":"browser_fixture");
 const importFormat=process.env.OPENKEYLET_TEST_IMPORT || "keepass";
-assert.ok(["1pux", "keepass"].includes(importFormat));
-const importLabel=importFormat==="1pux" ? "1Password 1PUX" : "KeePass XML";
+const importLabels={keepass:"KeePass XML","1pux":"1Password 1PUX","1password-csv":"1Password CSV"};
+assert.ok(Object.hasOwn(importLabels,importFormat));
+const importLabel=importLabels[importFormat];
 // Independent decoder for the definite-length CBOR used in WebAuthn attestation/COSE.
 function readCbor(bytes, start=0) {
   let offset=start;
@@ -64,6 +65,10 @@ if(importFormat==="keepass") await fs.writeFile(path.join(root,"keepass.xml"),`<
   <String><Key>Password</Key><Value>fixture-initial-password</Value></String>
   <String><Key>URL</Key><Value>${origin}/</Value></String>
 </Entry></Group></Group></Root></KeePassFile>`);
+if(importFormat==="1password-csv") {
+  await fs.writeFile(path.join(root,"1password.csv"),
+    `Title,Url,Username,Password,OTPAuth,Favorite,Archived,Tags,Notes\r\n"Fixture login",${origin}/,alice,fixture-initial-password,,false,false,,"Synthetic, note"\r\n`);
+}
 const child=spawn(fixture,[root,String(port),origin,importFormat],{windowsHide:true,stdio:["ignore","pipe","pipe"]});
 let output="", context;
 child.stdout.on("data",d=>{output+=d});child.stderr.on("data",d=>{output+=d});

@@ -1442,7 +1442,7 @@ async fn prepare_import(
     };
     let extension = match format.as_str() {
         "bitwarden" => "json",
-        "chrome" => "csv",
+        "chrome" | "1password-csv" => "csv",
         "keepass" => "xml",
         "1pux" => "1pux",
         _ => return Err("Unsupported import format".into()),

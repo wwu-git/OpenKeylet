@@ -23,6 +23,7 @@ type Entry = (PortableConnection, SecretBundle);
 mod curl;
 mod keepass;
 mod onepassword;
+mod onepassword_csv;
 #[cfg(feature = "gui")]
 pub(crate) use curl::parse_curl;
 
@@ -86,6 +87,7 @@ pub fn parse(bytes: &[u8], format: &str) -> Result<Parsed> {
         "chrome" => chrome_csv(bytes, &mut preview)?,
         "keepass" => keepass::parse(bytes, &mut preview)?,
         "1pux" => onepassword::parse(bytes, &mut preview)?,
+        "1password-csv" => onepassword_csv::parse(bytes, &mut preview)?,
         _ => bail!("Unsupported import format"),
     };
     ensure!(

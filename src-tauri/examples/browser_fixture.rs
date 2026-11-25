@@ -59,6 +59,8 @@ async fn main() -> anyhow::Result<()> {
         let path = root.join("fixture.1pux");
         write_onepassword_fixture(&path, website)?;
         Some((path, "1pux"))
+    } else if args.get(4).is_some_and(|format| format == "1password-csv") {
+        Some((root.join("1password.csv"), "1password-csv"))
     } else if keepass.is_file() {
         Some((keepass, "keepass"))
     } else {

@@ -58,6 +58,10 @@ try {
       if(command==="commit_backup_restore") { (fixture.restores ??= []).push(args.selection); return {added:2,merged:0}; }
       if(command==="cancel_backup_restore") { (fixture.restoreCancels ??= []).push(args.id); return; }
       if(command==="prepare_import") {
+        if(args.format==="1password-csv") {
+          fixture.pendingOnePassword="fixture-1password-csv";
+          return {id:fixture.pendingOnePassword,preview:{total:2,types:{login:2},passkeys:0,skippedArchived:1,warnings:[]}};
+        }
         if(args.format==="1pux") {
           fixture.pendingOnePassword="fixture-1pux";
           return {id:fixture.pendingOnePassword,preview:{total:3,types:{login:2,secureNote:1},passkeys:0,sources:{"QA vault":3},skippedArchived:1,skippedTypes:2,skippedAttachments:4,warnings:["onepasswordFillRules"]}};
@@ -568,6 +572,20 @@ try {
   await page.locator("#migration-modal").waitFor({state:"hidden"});
   assert.deepEqual(await page.evaluate(()=>fixture.imports),["fixture-import","fixture-keepass","fixture-1pux"]);
   await page.locator("#migration-open").click();
+  await page.locator("#migration-format").selectOption("1password-csv");
+  await page.locator("#migration-select").click();
+  await keepassPreview.waitFor();
+  assert.match(await keepassPreview.innerText(),/可导入 2 项/);
+  assert.match(await keepassPreview.innerText(),/跳过 1 个归档项目/);
+  await page.locator("#migration-close").click();
+  await page.waitForFunction(()=>!fixture.pendingOnePassword);
+  assert.equal(await page.evaluate(()=>fixture.imports.includes("fixture-1password-csv")),false);
+  await page.locator("#migration-open").click();
+  await page.locator("#migration-select").click();
+  await page.locator("#migration-confirm").click();
+  await page.locator("#migration-modal").waitFor({state:"hidden"});
+  assert.equal(await page.evaluate(()=>fixture.imports.at(-1)),"fixture-1password-csv");
+  await page.locator("#migration-open").click();
   await page.locator("#migration-format").selectOption("env");
   await page.locator("#migration-select").click();
   const envPreview = page.locator("#migration-preview");
@@ -731,5 +749,5 @@ try {
   await page.screenshot({path:path.join(artifacts,"narrow-card-editor.png")});
   assert.ok(await page.evaluate(()=>document.querySelector("#connection-modal .modal-card").getBoundingClientRect().bottom<=innerHeight));
   assert.deepEqual(errors,[]);
-  console.log(JSON.stringify({ok:true,checks:["combined add/draft selector","draft preservation and recovery","card editor","encrypted field payload","one header search and filter panel with Ctrl/Cmd+F and independent page queries","multiple host and URL addresses, default switching, removal, drafts, failed save and address search","combined keyword, type, exact folder and enabled status filters","unsaved edits survive filtering and are saved as drafts","460px filter controls","multiline secure note","generator inserts password","browser address copy, pairing, launch failures and recovery","backup password flow","multiple website rules","migration preview/cancel/commit","KeePass XML preview, cancel and confirmation","1Password 1PUX preview, cancel and confirmation","offline cURL preview, cancel, rejection and confirmation","AWS profile preview, cancel, selective import and undo","password history","trash restore and purge from settings","narrow layout"],artifacts},null,2));
+  console.log(JSON.stringify({ok:true,checks:["combined add/draft selector","draft preservation and recovery","card editor","encrypted field payload","one header search and filter panel with Ctrl/Cmd+F and independent page queries","multiple host and URL addresses, default switching, removal, drafts, failed save and address search","combined keyword, type, exact folder and enabled status filters","unsaved edits survive filtering and are saved as drafts","460px filter controls","multiline secure note","generator inserts password","browser address copy, pairing, launch failures and recovery","backup password flow","multiple website rules","migration preview/cancel/commit","KeePass XML preview, cancel and confirmation","1Password 1PUX preview, cancel and confirmation","1Password CSV preview, cancel and confirmation","offline cURL preview, cancel, rejection and confirmation","AWS profile preview, cancel, selective import and undo","password history","trash restore and purge from settings","narrow layout"],artifacts},null,2));
 } finally {await browser.close();server.close();}
