@@ -2715,6 +2715,7 @@ mod tests {
         assert_eq!(stale["code"], "projectNotFound");
         assert_eq!(stale["candidates"], json!([{ "id": second, "name": "Second project" }]));
         assert!(mcp.resolve_action_project("", Some(first), Some("fill")).is_err());
+        vault.set_connection_enabled(second, false).unwrap();
         let no_http = preview(json!({ "action": "selectProject", "capability": "http" })).await;
         assert_eq!(no_http["code"], "noCompatibleProject");
     }
