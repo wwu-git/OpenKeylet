@@ -140,6 +140,7 @@ fn route_secrets(
 #[derive(Clone)]
 enum ServerKeyPolicy {
     Probe,
+    UntrustedDirect,
     Pinned(String),
     CertificateAuthority { fingerprint: String, hostname: String },
 }
@@ -162,6 +163,10 @@ impl client::Handler for SshClient {
         let ca_fingerprint = presented.certificate().map(|cert| cert.signature_key().fingerprint(ssh_key::HashAlg::Sha256).to_string());
         let verdict = match (&self.policy, presented) {
             (ServerKeyPolicy::Probe, _) => Ok(false),
+            (ServerKeyPolicy::UntrustedDirect, PublicKeyOrCertificate::PublicKey { .. }) => Ok(true),
+            (ServerKeyPolicy::UntrustedDirect, PublicKeyOrCertificate::Certificate(_)) => {
+                Err(anyhow::anyhow!("An SSH host certificate requires a trusted certificate authority"))
+            }
             (ServerKeyPolicy::Pinned(expected), PublicKeyOrCertificate::PublicKey { .. }) => Ok(expected == &fingerprint),
             (ServerKeyPolicy::Pinned(_), PublicKeyOrCertificate::Certificate(_)) => Err(anyhow::anyhow!("Expected a pinned SSH host key, received a certificate")),
             (ServerKeyPolicy::CertificateAuthority { fingerprint, hostname }, PublicKeyOrCertificate::Certificate(cert)) => {
@@ -179,10 +184,23 @@ impl client::Handler for SshClient {
     }
 }
 
-fn expected_policy(trust: &[SshHostTrust], connection: &DecryptedConnection) -> Result<ServerKeyPolicy> {
+fn expected_policy(
+    trust: &[SshHostTrust],
+    connection: &DecryptedConnection,
+    allow_untrusted_direct: bool,
+) -> Result<ServerKeyPolicy> {
     let host = ssh_endpoint_host(&connection.stored.host)?;
-    let entry = trust.iter().find(|entry| entry.item_id == connection.stored.id && entry.host == host && entry.port == connection.stored.port)
-        .context("SSH host key is not trusted; verify the fingerprint using the local client or ssh-trust CLI")?;
+    let entry = trust.iter().find(|entry| {
+        entry.item_id == connection.stored.id
+            && entry.host == host
+            && entry.port == connection.stored.port
+    });
+    let Some(entry) = entry else {
+        if allow_untrusted_direct {
+            return Ok(ServerKeyPolicy::UntrustedDirect);
+        }
+        anyhow::bail!("SSH host key is not trusted; verify the fingerprint using the local client or ssh-trust CLI");
+    };
     Ok(match entry.kind {
         SshHostTrustKind::HostKey => ServerKeyPolicy::Pinned(entry.fingerprint.clone()),
         SshHostTrustKind::CertificateAuthority => ServerKeyPolicy::CertificateAuthority { fingerprint: entry.fingerprint.clone(), hostname: host },
@@ -285,8 +303,8 @@ pub(crate) async fn connect(
     let operation = async {
         if let Some(jump) = &jump {
             let trust = vault.ssh_host_trust()?;
-            let a_key = expected_policy(&trust, jump).context("Jump host A")?;
-            let b_key = expected_policy(&trust, connection).context("Target host B")?;
+            let a_key = expected_policy(&trust, jump, false).context("Jump host A")?;
+            let b_key = expected_policy(&trust, connection, false).context("Target host B")?;
             let a = direct(jump, a_key).await.context("Jump host A")?;
             let channel = a
                 .channel_open_direct_tcpip(
@@ -313,7 +331,8 @@ pub(crate) async fn connect(
                 secrets: route_secrets(connection, Some(jump)),
             })
         } else {
-            let expected = expected_policy(&vault.ssh_host_trust()?, connection)?;
+            let (trust, allow_untrusted_direct) = vault.direct_ssh_trust()?;
+            let expected = expected_policy(&trust, connection, allow_untrusted_direct)?;
             Ok(SshConnection {
                 target: direct(connection, expected).await?,
                 _jump: None,
@@ -353,7 +372,7 @@ pub async fn probe(vault: &Vault, id: Uuid) -> Result<SshHostProbe> {
         let a;
         let observed = Arc::new(Mutex::new(None));
         if let Some(jump) = &jump {
-            a = direct(jump, expected_policy(&vault.ssh_host_trust()?, jump)?)
+            a = direct(jump, expected_policy(&vault.ssh_host_trust()?, jump, false)?)
                 .await
                 .context("Jump host A")?;
             let channel = a

@@ -1,5 +1,8 @@
 use super::*;
-use crate::{executor, model::ConnectionInput};
+use crate::{
+    executor,
+    model::{ConnectionInput, SettingsPatch},
+};
 use russh::{
     Channel, ChannelId,
     server::{self, Server as _},
@@ -399,6 +402,73 @@ async fn direct_untrusted_host_stops_before_authentication() {
     fixture.closed().await;
 }
 
+#[tokio::test]
+async fn direct_untrusted_host_can_connect_with_opt_in_without_saving_trust() {
+    let fixture = Fixture::new(true).await;
+    fixture
+        .vault
+        .set_ssh_host_trust(fixture.jump, "127.0.0.1", fixture.a_port, None)
+        .unwrap();
+    fixture
+        .vault
+        .update_settings_patch(SettingsPatch {
+            allow_untrusted_direct_ssh: Some(true),
+            ..SettingsPatch::default()
+        })
+        .unwrap();
+    let target = fixture.vault.get_connection(fixture.jump).unwrap();
+    assert_eq!(
+        executor::test_connection(&fixture.vault, &target).await.unwrap(),
+        "SSH connection successful"
+    );
+    assert!(fixture.a.auth.load(Ordering::SeqCst) > 0);
+    assert!(
+        fixture
+            .vault
+            .ssh_host_trust()
+            .unwrap()
+            .iter()
+            .all(|entry| entry.item_id != fixture.jump)
+    );
+    let auth_before = fixture.a.auth.load(Ordering::SeqCst);
+    fixture
+        .vault
+        .update_settings_patch(SettingsPatch {
+            allow_untrusted_direct_ssh: Some(false),
+            ..SettingsPatch::default()
+        })
+        .unwrap();
+    let error = executor::test_connection(&fixture.vault, &target).await.unwrap_err();
+    assert!(error.to_string().contains("host key is not trusted"), "{error}");
+    assert_eq!(fixture.a.auth.load(Ordering::SeqCst), auth_before);
+    fixture.closed().await;
+}
+
+#[tokio::test]
+async fn direct_untrusted_host_opt_in_does_not_allow_untrusted_jump_routes() {
+    for missing_jump in [true, false] {
+        let fixture = Fixture::new(true).await;
+        let (item, host, port, expected) = if missing_jump {
+            (fixture.jump, "127.0.0.1", fixture.a_port, "Jump host A")
+        } else {
+            (fixture.target, "private.test.invalid", fixture.b_port, "Target host B")
+        };
+        fixture.vault.set_ssh_host_trust(item, host, port, None).unwrap();
+        fixture
+            .vault
+            .update_settings_patch(SettingsPatch {
+                allow_untrusted_direct_ssh: Some(true),
+                ..SettingsPatch::default()
+            })
+            .unwrap();
+        let error = fixture.command("hostname", Some(10)).await.unwrap_err().to_string();
+        assert!(error.contains(expected) && error.contains("host key is not trusted"), "{error}");
+        assert_eq!(fixture.a.auth.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.b.auth.load(Ordering::SeqCst), 0);
+        fixture.closed().await;
+    }
+}
+
 #[cfg(feature = "gui")]
 #[tokio::test]
 async fn imported_routes_require_explicit_trust_and_never_fall_back_to_direct() {
@@ -522,6 +592,13 @@ async fn imported_routes_require_explicit_trust_and_never_fall_back_to_direct() 
 #[tokio::test]
 async fn direct_key_mismatch_stops_before_authentication() {
     let fixture = Fixture::new(true).await;
+    fixture
+        .vault
+        .update_settings_patch(SettingsPatch {
+            allow_untrusted_direct_ssh: Some(true),
+            ..SettingsPatch::default()
+        })
+        .unwrap();
     let wrong = key(9)
         .public_key()
         .fingerprint(ssh_key::HashAlg::Sha256)

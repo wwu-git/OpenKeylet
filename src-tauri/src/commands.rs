@@ -814,10 +814,16 @@ async fn update_settings(
     runtime: State<'_, AppRuntime>,
     patch: SettingsPatch,
 ) -> Result<crate::model::Settings, String> {
+    let owner = if patch.allow_untrusted_direct_ssh.is_some() {
+        Some(runtime.authorized_owner().await?)
+    } else {
+        None
+    };
     let settings = runtime
         .vault
         .update_settings_patch(patch)
         .map_err(command_error)?;
+    drop(owner);
     runtime.browser.sync().await;
     emit_changed(&app);
     Ok(settings)

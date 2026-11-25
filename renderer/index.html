@@ -187,6 +187,14 @@
 
             <section class="content-panel settings-card wide" data-module="MCP / CERTIFICATES" id="certificate-panel"></section>
 
+            <section class="content-panel settings-card" data-module="SSH / TRUST">
+              <div class="settings-heading"><div><h2 id="ssh-settings-title">SSH host identity</h2></div></div>
+              <div class="desktop-option">
+                <span><strong id="ssh-untrusted-label">Allow direct SSH without saved host trust</strong><small id="ssh-untrusted-help">Without a saved fingerprint, the other server could be an impostor. Saved trust and jump hosts are still verified.</small></span>
+                <label class="switch"><input type="checkbox" id="ssh-allow-untrusted-direct" aria-labelledby="ssh-untrusted-label" aria-describedby="ssh-untrusted-help" /><span></span></label>
+              </div>
+            </section>
+
             <section class="content-panel settings-card" data-module="APP / 03">
               <div class="settings-heading"><div><h2>Appearance, window and lock</h2><p>Adjust text size, window behavior and the local PIN lock.</p></div></div>
               <div class="desktop-options">

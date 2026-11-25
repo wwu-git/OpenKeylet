@@ -23,6 +23,7 @@ pub struct OwnerPinVerifier {
 #[serde(rename_all = "camelCase")]
 #[serde(default)]
 pub struct Settings {
+    pub allow_untrusted_direct_ssh: bool,
     pub agent_signing_enabled: bool,
     pub agent_signing_grants: Vec<SigningGrant>,
     pub agent_write_enabled: bool,
@@ -37,6 +38,7 @@ pub struct Settings {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsPatch {
+    pub allow_untrusted_direct_ssh: Option<bool>,
     pub agent_write_enabled: Option<bool>,
     pub agent_write_folders: Option<Vec<String>>,
     pub language: Option<String>,
@@ -54,6 +56,7 @@ impl Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            allow_untrusted_direct_ssh: false,
             agent_signing_enabled: false,
             agent_signing_grants: Vec::new(),
             agent_write_enabled: false,
@@ -80,6 +83,7 @@ mod settings_tests {
         assert_eq!(settings.language, "en");
         assert_eq!(settings.close_behavior, "tray");
         let json = serde_json::to_value(settings).unwrap();
+        assert_eq!(json["allowUntrustedDirectSsh"], false);
         assert_eq!(json["agentWriteEnabled"], false);
         assert_eq!(json["agentWriteFolders"], serde_json::json!([]));
     }

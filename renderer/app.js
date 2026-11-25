@@ -307,7 +307,7 @@ const itemTypeFilterOrder = ['all', 'ssh', 'login', 'api', 'passkey', 'card', 'i
 let currentItemTypeFilter = 'all';
 let currentFolderFilter = 'all';
 let currentItemStatusFilter = 'all';
-const settingsFilterOrder = ['all', 'SYSTEM', 'MCP', 'APP', 'WEB', 'CLOUD', 'SAFE'];
+const settingsFilterOrder = ['all', 'SYSTEM', 'MCP', 'SSH', 'APP', 'WEB', 'CLOUD', 'SAFE'];
 let currentSettingsFilter = 'all';
 let titleSearchOpen = false;
 let creationMode = 'add';
@@ -773,7 +773,7 @@ function syncItemTypeFilter() {
 }
 
 function syncSettingsFilterControl() {
-  const labels = { all: ['全部设置', 'All settings'], SYSTEM: ['系统入口', 'System access'], MCP: ['Agent 接入', 'Agent setup'], APP: ['窗口与锁定', 'Window & lock'], WEB: ['浏览器', 'Browser'], CLOUD: ['云端备份', 'Cloud backup'], SAFE: ['本地数据', 'Local data'] };
+  const labels = { all: ['全部设置', 'All settings'], SYSTEM: ['系统入口', 'System access'], MCP: ['Agent 接入', 'Agent setup'], SSH: ['SSH', 'SSH'], APP: ['窗口与锁定', 'Window & lock'], WEB: ['浏览器', 'Browser'], CLOUD: ['云端备份', 'Cloud backup'], SAFE: ['本地数据', 'Local data'] };
   $('#settings-filter-switch').setAttribute('aria-label', localized('设置分组筛选', 'Settings section filter'));
   syncFilterStrip('#settings-filter-switch', settingsFilterOrder, currentSettingsFilter, 'data-settings-filter', kind => localized(...labels[kind]));
 }
@@ -858,6 +858,7 @@ function switchControlFor(target) {
         else if (input.id === 'launch-at-login-enabled') await setSystemIntegration('startup', input.checked);
         else if (input.id === 'browser-enabled') await saveBrowserSettings();
         else if (input.id === 'pin-enabled') await savePinSettings();
+        else if (input.id === 'ssh-allow-untrusted-direct') await saveSshTrustSetting();
       } };
   }
   if (strip.matches('.module-agent-toggle')) {
@@ -1235,6 +1236,10 @@ function renderSettings() {
   certificatePanel.render();
   if (ownerLockState.unlocked) void certificatePanel.load().catch(() => {});
   renderAgentWriteSettings();
+  $('#ssh-settings-title').textContent = localized('SSH 主机身份', 'SSH host identity');
+  $('#ssh-untrusted-label').textContent = localized('允许直连未信任的 SSH 主机', 'Allow direct SSH without saved host trust');
+  $('#ssh-untrusted-help').textContent = localized('开启后，直连可在没有信任记录时尝试登录，对端可能是冒充的服务器。已有信任记录和跳板路径仍会校验。', 'When enabled, a direct connection can try to sign in without saved trust. The server could be an impostor. Saved trust and jump routes are still verified.');
+  $('#ssh-allow-untrusted-direct').checked = state.settings.allowUntrustedDirectSsh === true;
   githubBackup.render();
   $('#mcp-endpoint').textContent = `${state.mcp.stdioCommand} mcp stdio`;
   const mcpFault = state.mcp.status === 'error';
@@ -1835,7 +1840,10 @@ async function refreshSshTrust() {
   if (editorExistingItem?.id !== id) return;
   const entry = entries.find(entry => entry.itemId === id && entry.host === editorExistingItem.host.trim().replace(/^\[|\]$/g, '').toLowerCase() && entry.port === editorExistingItem.port);
   if (entry) value('#ssh-trust-kind', entry.kind || 'hostKey');
-  $('#ssh-trust-status').textContent = entry ? localized(`已信任 ${entry.fingerprint}`, `Trusted ${entry.fingerprint}`) : localized('尚未信任。连接会在认证前拒绝。', 'Not trusted. Connections stop before authentication.');
+  const untrustedStatus = editorSshRouteMode === 'direct' && state.settings.allowUntrustedDirectSsh === true
+    ? localized('尚未信任。当前设置允许直连尝试登录。', 'Not trusted. Current settings allow a direct sign-in attempt.')
+    : localized('尚未信任。连接会在认证前拒绝。', 'Not trusted. Connections stop before authentication.');
+  $('#ssh-trust-status').textContent = entry ? localized(`已信任 ${entry.fingerprint}`, `Trusted ${entry.fingerprint}`) : untrustedStatus;
 }
 
 $('#ssh-auth-type').addEventListener('change', () => { editorSourceInput = { ...editorSourceInput, sshAuthType: value('#ssh-auth-type') }; });
@@ -2388,6 +2396,21 @@ async function saveDesktopSettings() {
   } catch (error) {
     toast(cleanError(error), 'error');
     await refresh(false);
+  }
+}
+
+async function saveSshTrustSetting() {
+  const input = $('#ssh-allow-untrusted-direct');
+  if (input.disabled) return;
+  input.disabled = true;
+  try {
+    state.settings = await api.settings({ allowUntrustedDirectSsh: input.checked });
+    toast(localized('SSH 设置已保存', 'SSH settings saved'));
+  } catch (error) {
+    toast(cleanError(error), 'error');
+  } finally {
+    input.checked = state.settings.allowUntrustedDirectSsh === true;
+    input.disabled = false;
   }
 }
 
@@ -3862,6 +3885,7 @@ if (!isMacOS) $('#desktop-shortcut-enabled').addEventListener('change', (event) 
 $('#launch-at-login-enabled').addEventListener('change', (event) => setSystemIntegration('startup', event.currentTarget.checked));
 $('#pin-enabled').addEventListener('change', savePinSettings);
 $('#close-behavior').addEventListener('change', saveDesktopSettings);
+$('#ssh-allow-untrusted-direct').addEventListener('change', saveSshTrustSetting);
 $('#quick-pairing-button').addEventListener('click', async event => {
   const button = event.currentTarget;
   button.disabled = true;

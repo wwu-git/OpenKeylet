@@ -36,7 +36,10 @@ try {
       if(command==="delete_editor_draft") {fixture.drafts=fixture.drafts.filter(d=>d.id!==args.id);return;}
       if(command==="github_backup_status") return {connected:false};
       if(command==="system_integration_status") return {desktopShortcut:false,launchAtLogin:false};
-      if(command==="update_settings") {Object.assign(state.settings,args.patch);return state.settings;}
+      if(command==="update_settings") {
+        if (fixture.failSshSettings && Object.hasOwn(args.patch, "allowUntrustedDirectSsh")) throw Error("Synthetic SSH settings failure");
+        Object.assign(state.settings,args.patch);return state.settings;
+      }
       if(command==="save_connection") {
         if (fixture.failSave) throw Error("Synthetic save failure");
         fixture.saved.push(structuredClone(args.input));
@@ -133,6 +136,22 @@ try {
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   await page.locator("#connections-list .empty-state").waitFor();
   await page.locator('[data-page="settings"]').click();
+  await page.locator('[data-settings-filter="SSH"]').click();
+  const sshTrustToggle = page.locator('#ssh-allow-untrusted-direct');
+  const sshTrustSwitch = page.locator('label:has(#ssh-allow-untrusted-direct)');
+  assert.equal(await sshTrustToggle.isChecked(), false);
+  await sshTrustSwitch.click();
+  await page.waitForFunction(() => fixture.state.settings.allowUntrustedDirectSsh === true);
+  assert.equal(await sshTrustToggle.isChecked(), true);
+  await page.evaluate(() => { fixture.failSshSettings = true; });
+  await sshTrustSwitch.click();
+  await page.getByText('Synthetic SSH settings failure', { exact: true }).waitFor();
+  assert.equal(await sshTrustToggle.isChecked(), true);
+  await page.evaluate(() => { fixture.failSshSettings = false; });
+  await sshTrustSwitch.click();
+  await page.waitForFunction(() => fixture.state.settings.allowUntrustedDirectSsh === false);
+  assert.equal(await sshTrustToggle.isChecked(), false);
+  await page.locator('[data-settings-filter="all"]').click();
   const manualConfig = page.locator('.manual-mcp-config');
   await manualConfig.locator('summary').click();
   await page.locator('.manual-config-steps b .lettering-ink').first().waitFor();

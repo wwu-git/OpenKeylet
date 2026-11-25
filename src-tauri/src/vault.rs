@@ -122,6 +122,14 @@ impl Vault {
         Ok(self.read_document()?.ssh_host_trust)
     }
 
+    pub(crate) fn direct_ssh_trust(&self) -> Result<(Vec<crate::model::SshHostTrust>, bool)> {
+        let document = self.read_document()?;
+        Ok((
+            document.ssh_host_trust,
+            document.settings.allow_untrusted_direct_ssh,
+        ))
+    }
+
     pub fn set_ssh_host_trust(&self, item_id: Uuid, host: &str, port: u16, fingerprint: Option<&str>) -> Result<()> {
         let host = ssh_endpoint_host(host)?;
         anyhow::ensure!(port > 0, "Invalid SSH port");
@@ -427,6 +435,9 @@ impl Vault {
     pub fn update_settings_patch(&self, patch: SettingsPatch) -> Result<Settings> {
         self.update_document_with_result(|document| {
             let mut next = document.settings.clone();
+            if let Some(allow) = patch.allow_untrusted_direct_ssh {
+                next.allow_untrusted_direct_ssh = allow;
+            }
             if let Some(enabled) = patch.agent_write_enabled { next.agent_write_enabled = enabled; }
             if let Some(folders) = patch.agent_write_folders { next.agent_write_folders = crate::vault_write::normalize_folders(folders)?; }
             if let Some(language) = patch.language {
@@ -2702,6 +2713,13 @@ mod tests {
     fn settings_patches_do_not_overwrite_unrelated_concurrent_changes() {
         let directory = tempdir().unwrap();
         let vault = Vault::open(directory.path().to_path_buf()).unwrap();
+        vault
+            .update_settings_patch(SettingsPatch {
+                allow_untrusted_direct_ssh: Some(true),
+                close_behavior: Some("exit".to_owned()),
+                ..SettingsPatch::default()
+            })
+            .unwrap();
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
 
         let language_vault = vault.clone();
@@ -2732,9 +2750,12 @@ mod tests {
         language.join().unwrap();
         browser.join().unwrap();
 
-        let settings = vault.settings().unwrap();
+        let reopened = Vault::open(directory.path().to_path_buf()).unwrap();
+        let settings = reopened.settings().unwrap();
         assert_eq!(settings.language, "en");
         assert!(settings.browser_enabled);
+        assert!(settings.allow_untrusted_direct_ssh);
+        assert_eq!(settings.close_behavior, "exit");
     }
 
     #[test]
