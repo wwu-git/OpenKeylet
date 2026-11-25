@@ -84,6 +84,14 @@ try {
       if(command==="cancel_ssh_import") return;
       if(command==="commit_ssh_import") { fixture.sshImport=args.selection; return {added:2,skipped:0,undoId:"ssh-undo-fixture"}; }
       if(command==="undo_ssh_import") { fixture.sshUndo=args.id; return {removed:2,skipped:0}; }
+      if(command==="prepare_aws_import") return {id:args.id,skippedProfiles:1,rows:[
+        {index:0,name:"AWS · default",region:"us-west-2",hasSessionToken:false,conflict:false},
+        {index:1,name:"AWS · temporary",region:null,hasSessionToken:true,conflict:false},
+        {index:2,name:"AWS · existing",region:null,hasSessionToken:false,conflict:true},
+      ]};
+      if(command==="cancel_aws_import") { (fixture.awsCancels ??= []).push(args.id); return; }
+      if(command==="commit_aws_import") { fixture.awsImport=args.selection; return {added:1,skipped:0,undoId:"aws-undo-fixture"}; }
+      if(command==="undo_aws_import") { fixture.awsUndo=args.id; return {removed:1,skipped:0}; }
       if(command==="owner_secret_view") return {fields:[]};
       if(command==="delete_connection") {
         const item=state.connections.find(i=>i.id===args.id);
@@ -592,6 +600,32 @@ try {
   await page.locator("#migration-confirm").click();
   await page.locator("#migration-modal").waitFor({state:"hidden"});
   assert.deepEqual(await page.evaluate(start=>fixture.imports.slice(start),beforeCurl),["curl-basic"]);
+  await page.locator("#migration-open").click();
+  await page.locator("#migration-format").selectOption("aws");
+  await page.locator("#migration-select").click();
+  const awsTemporary=envPreview.getByRole("checkbox",{name:/temporary.*待填写区域.*含会话令牌/});
+  const awsDefault=envPreview.getByRole("checkbox",{name:/default.*us-west-2.*无会话令牌/});
+  await awsTemporary.waitFor();
+  assert.ok(await page.locator("#migration-confirm").isDisabled());
+  assert.ok(await envPreview.getByRole("checkbox",{name:/existing.*名称重复/}).isDisabled());
+  assert.match(await page.locator("#migration-batch-status").innerText(),/跳过 1 个/);
+  assert.match(await page.locator("#migration-help").innerText(),/填写 AWS 服务地址/);
+  await awsTemporary.check();
+  await page.locator('#toast-region .toast').last().waitFor({state:'hidden'});
+  await page.screenshot({path:path.join(artifacts,"aws-profile-preview.png")});
+  await page.locator("#migration-close").click();
+  await page.waitForFunction(()=>fixture.awsCancels?.length===1);
+  assert.equal(await page.evaluate(()=>fixture.awsImport),undefined);
+  await page.locator("#migration-open").click();
+  await page.locator("#migration-select").click();
+  await awsDefault.check();
+  assert.equal(await awsTemporary.isChecked(),false);
+  await page.locator("#migration-confirm").click();
+  await page.locator("#migration-batch-undo").click();
+  await page.locator("#migration-batch-undo").waitFor({state:"hidden"});
+  assert.deepEqual(await page.evaluate(()=>fixture.awsImport),[0]);
+  assert.equal(await page.evaluate(()=>fixture.awsUndo),"aws-undo-fixture");
+  await page.locator("#migration-close").click();
   assert.deepEqual(externalImportRequests,[]);
   await page.locator('[data-page="connections"]').click();
   await page.setViewportSize({width:460,height:690});
@@ -650,5 +684,5 @@ try {
   await page.screenshot({path:path.join(artifacts,"narrow-card-editor.png")});
   assert.ok(await page.evaluate(()=>document.querySelector("#connection-modal .modal-card").getBoundingClientRect().bottom<=innerHeight));
   assert.deepEqual(errors,[]);
-  console.log(JSON.stringify({ok:true,checks:["combined add/draft selector","draft preservation and recovery","card editor","encrypted field payload","one header search and filter panel with Ctrl/Cmd+F and independent page queries","multiple host and URL addresses, default switching, removal, drafts, failed save and address search","combined keyword, type, exact folder and enabled status filters","unsaved edits survive filtering and are saved as drafts","460px filter controls","multiline secure note","generator inserts password","browser address copy, pairing, launch failures and recovery","backup password flow","multiple website rules","migration preview/cancel/commit","offline cURL preview, cancel, rejection and confirmation","password history","trash restore and purge from settings","narrow layout"],artifacts},null,2));
+  console.log(JSON.stringify({ok:true,checks:["combined add/draft selector","draft preservation and recovery","card editor","encrypted field payload","one header search and filter panel with Ctrl/Cmd+F and independent page queries","multiple host and URL addresses, default switching, removal, drafts, failed save and address search","combined keyword, type, exact folder and enabled status filters","unsaved edits survive filtering and are saved as drafts","460px filter controls","multiline secure note","generator inserts password","browser address copy, pairing, launch failures and recovery","backup password flow","multiple website rules","migration preview/cancel/commit","offline cURL preview, cancel, rejection and confirmation","AWS profile preview, cancel, selective import and undo","password history","trash restore and purge from settings","narrow layout"],artifacts},null,2));
 } finally {await browser.close();server.close();}

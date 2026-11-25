@@ -1,3 +1,5 @@
+#[path = "aws_credentials_import.rs"]
+mod aws_credentials_import;
 #[path = "env_import.rs"]
 mod env_import;
 #[path = "ssh_config_import.rs"]
@@ -84,6 +86,8 @@ struct OwnerState {
     env_undo: Option<env_import::UndoBatch>,
     pending_ssh: Option<SelectableImportState>,
     ssh_undo: Option<env_import::UndoBatch>,
+    pending_aws: Option<SelectableImportState>,
+    aws_undo: Option<env_import::UndoBatch>,
 }
 
 impl OwnerState {
@@ -97,6 +101,8 @@ impl OwnerState {
         self.env_undo = None;
         self.pending_ssh = None;
         self.ssh_undo = None;
+        self.pending_aws = None;
+        self.aws_undo = None;
         runtime.clipboard.clear_on_lock(&runtime.app);
     }
 }
@@ -1521,12 +1527,14 @@ async fn cancel_import(runtime: State<'_, AppRuntime>) -> Result<(), String> {
 enum LocalImportKind {
     Env,
     Ssh,
+    Aws,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
 enum LocalImport {
     Env(env_import::EnvImport),
     Ssh(ssh_config_import::SshConfigImport),
+    Aws(aws_credentials_import::AwsCredentialsImport),
 }
 
 impl LocalImportKind {
@@ -1534,6 +1542,7 @@ impl LocalImportKind {
         match self {
             Self::Env => &mut owner.pending_env,
             Self::Ssh => &mut owner.pending_ssh,
+            Self::Aws => &mut owner.pending_aws,
         }
     }
 
@@ -1541,6 +1550,7 @@ impl LocalImportKind {
         match self {
             Self::Env => &mut owner.env_undo,
             Self::Ssh => &mut owner.ssh_undo,
+            Self::Aws => &mut owner.aws_undo,
         }
     }
 
@@ -1548,6 +1558,7 @@ impl LocalImportKind {
         Ok(match self {
             Self::Env => LocalImport::Env(env_import::EnvImport::read(path)?),
             Self::Ssh => LocalImport::Ssh(ssh_config_import::SshConfigImport::read(path)?),
+            Self::Aws => LocalImport::Aws(aws_credentials_import::AwsCredentialsImport::read(path)?),
         })
     }
 }
@@ -1557,6 +1568,7 @@ impl LocalImport {
         Ok(match self {
             Self::Env(import) => serde_json::to_value(import.preview(vault, id)?)?,
             Self::Ssh(import) => serde_json::to_value(import.preview(vault, id)?)?,
+            Self::Aws(import) => serde_json::to_value(import.preview(vault, id)?)?,
         })
     }
 
@@ -1564,6 +1576,7 @@ impl LocalImport {
         match self {
             Self::Env(import) => import.commit(vault, selection),
             Self::Ssh(import) => import.commit(vault, selection),
+            Self::Aws(import) => import.commit(vault, selection),
         }
     }
 }
@@ -1717,6 +1730,33 @@ async fn undo_ssh_import(
     app: AppHandle, runtime: State<'_, AppRuntime>, id: Uuid,
 ) -> Result<env_import::UndoSummary, String> {
     undo_local_import(&app, &runtime, LocalImportKind::Ssh, id).await
+}
+
+#[tauri::command]
+async fn prepare_aws_import(
+    app: AppHandle, runtime: State<'_, AppRuntime>, id: Uuid,
+) -> Result<Option<serde_json::Value>, String> {
+    prepare_local_import(&app, &runtime, LocalImportKind::Aws, id).await
+}
+
+#[tauri::command]
+async fn commit_aws_import(
+    app: AppHandle, runtime: State<'_, AppRuntime>, id: Uuid, selection: Vec<usize>,
+) -> Result<env_import::CommitSummary, String> {
+    commit_local_import(&app, &runtime, LocalImportKind::Aws, id, selection).await
+}
+
+#[tauri::command]
+async fn cancel_aws_import(runtime: State<'_, AppRuntime>, id: Uuid) -> Result<(), String> {
+    cancel_local_import(&runtime, LocalImportKind::Aws, id).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn undo_aws_import(
+    app: AppHandle, runtime: State<'_, AppRuntime>, id: Uuid,
+) -> Result<env_import::UndoSummary, String> {
+    undo_local_import(&app, &runtime, LocalImportKind::Aws, id).await
 }
 
 #[tauri::command]
@@ -2069,6 +2109,10 @@ pub fn run_gui() -> Result<()> {
             commit_ssh_import,
             cancel_ssh_import,
             undo_ssh_import,
+            prepare_aws_import,
+            commit_aws_import,
+            cancel_aws_import,
+            undo_aws_import,
             github_backup_status,
             github_backup_account,
             github_backup_discover,

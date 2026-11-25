@@ -2710,7 +2710,7 @@ let migrationSequence = 0;
 let migrationCancellation = Promise.resolve();
 let batchImport = null;
 const importUndoIds = new Map();
-const selectableImportFormats = new Set(['env', 'ssh']);
+const selectableImportFormats = new Set(['env', 'ssh', 'aws']);
 let migrationBusy = false;
 const migrationWarnings = {
   nonWebUris: ['非网页地址已保留，设为“不匹配”。','Non-web addresses are preserved with matching disabled.'],
@@ -2731,6 +2731,7 @@ function migrationHelp() {
     ssh: localized('选取一个 OpenSSH 配置文件。预览显式主机及路由。需同时选中可用的直连跳板，导入后再配置认证和主机指纹。', 'Choose one OpenSSH config file to preview explicit hosts and routes. Select the direct jump host as well, then configure credentials and host fingerprints after import.'),
     env: localized('只预览变量名。每个选中的变量会在 Env 文件夹中建立一个加密项目。同名项目会跳过。macOS 可按 ⌘⇧. 显示隐藏文件。', 'Preview variable names. Each selected variable becomes an encrypted item in the Env folder. Items with existing names are skipped. On macOS, press ⌘⇧. to show hidden files.'),
     curl: localized('粘贴一条使用 Bearer 或 Basic 认证的 HTTPS cURL 命令。确认后保存服务根地址，凭据会在本机加密保存。', 'Paste one HTTPS cURL command with Bearer or Basic authentication. Confirm to save the service origin and encrypted credentials.'),
+    aws: localized('选择 AWS CLI 的 credentials 文件，勾选要加密导入的 profile。保存后，在项目中填写 AWS 服务地址及缺少的区域。macOS 可按 ⌘⇧. 显示隐藏文件。', 'Choose an AWS CLI credentials file and select profiles to import encrypted. After saving, set the AWS service URL and any missing region. Press ⌘⇧. on macOS to show hidden files.'),
   };
   $('#migration-help').textContent = help[format];
   $('#migration-curl-field span').textContent = localized('cURL 命令', 'cURL command');
@@ -2783,7 +2784,7 @@ function sshImportRouteLabel(row, selectedIndices) {
     ? localized(`跳板 ${row.jump} 未配置，连接受阻`, `Jump host ${row.jump} unresolved. Connection blocked.`)
     : localized('路由待配置，连接受阻', 'Route unresolved. Connection blocked.');
 }
-function renderBatchImport({ rows, empty, multiline }) {
+function renderBatchImport({ rows, empty, multiline, skippedProfiles }) {
   const preview = $('#migration-preview');
   for (const row of rows) {
     const label = document.createElement('label');
@@ -2792,7 +2793,7 @@ function renderBatchImport({ rows, empty, multiline }) {
     box.type = 'checkbox';
     box.value = row.index;
     box.disabled = row.conflict;
-    box.checked = !box.disabled;
+    box.checked = !box.disabled && batchImport.format !== 'aws';
     const name = document.createElement('span');
     name.textContent = row.name;
     if (batchImport.format === 'ssh') {
@@ -2801,6 +2802,12 @@ function renderBatchImport({ rows, empty, multiline }) {
       const route = document.createElement('small');
       route.dataset.importSshRoute = row.index;
       name.append(endpoint, route);
+    } else if (batchImport.format === 'aws') {
+      const metadata = document.createElement('small');
+      const region = row.region || localized('待填写区域', 'Region needed');
+      const token = row.hasSessionToken ? localized('含会话令牌', 'Has session token') : localized('无会话令牌', 'No session token');
+      metadata.textContent = `${region} · ${token}`;
+      name.append(metadata);
     }
     if (row.conflict) {
       const status = document.createElement('small');
@@ -2816,6 +2823,8 @@ function renderBatchImport({ rows, empty, multiline }) {
   const notices = [];
   if (empty) notices.push(localized(`跳过 ${empty} 个空值变量。`, `Skipped ${empty} empty variables.`));
   if (multiline) notices.push(localized(`跳过 ${multiline} 个多行值变量。`, `Skipped ${multiline} variables with multiline values.`));
+  if (skippedProfiles) notices.push(localized(`跳过 ${skippedProfiles} 个不完整或不受支持的 profile。`, `Skipped ${skippedProfiles} incomplete or unsupported profiles.`));
+  if (batchImport.format === 'aws' && !rows.length && !skippedProfiles) notices.push(localized('文件中没有可导入的 AWS profile。', 'The file contains no importable AWS profiles.'));
   if (notices.length) showBatchImportStatus(notices.join(' '));
 }
 function showBatchImportStatus(message) {

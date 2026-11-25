@@ -15,7 +15,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 pub(crate) const AUTH_MODE: &str = "aws-sigv4";
-const MAX_SECRET_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_SECRET_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 const RESERVED_HEADERS: &[&str] = &[
     "authorization",
@@ -55,7 +55,7 @@ fn bound_secret<'a>(
         .and_then(|name| secrets.get(name))
 }
 
-fn region_endpoint(region: &str) -> Result<AwsEndpoint> {
+pub(crate) fn region_endpoint(region: &str) -> Result<AwsEndpoint> {
     ensure!(
         region.len() <= 64
             && region
