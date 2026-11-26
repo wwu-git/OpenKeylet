@@ -40,7 +40,7 @@ class Session:
             stdout=subprocess.PIPE, text=True,
         )
         self.request_id = 0
-        self.rpc("initialize", {
+        self.info = self.rpc("initialize", {
             "protocolVersion": "2025-03-26", "capabilities": {},
             "clientInfo": {"name": "action-workflow-test", "version": "1"},
         })
@@ -85,6 +85,14 @@ def verify(binary, directory, address, requests):
         tools = session.rpc("tools/list", {})["tools"]
         action_tool = next(tool for tool in tools if tool["name"] == "action_capabilities")
         assert action_tool["inputSchema"]["type"] == "object"
+        ssh_tool = next(tool for tool in tools if tool["name"] == "ssh_run")
+        for guidance in [session.info["instructions"], ssh_tool["description"]]:
+            assert "sudo -S -p '' -- ls" in guidance
+            assert r"{{openkeylet:password}}\n" in guidance
+            assert r"{{openkeylet:sudoPassword}}\n" in guidance
+            assert "SSH password authentication" in guidance
+            assert "SSH private-key authentication" in guidance
+        print("PASS: MCP initialization and ssh_run describe both SSH sudo flows")
 
         def select_project(**selector):
             return session.data("action_capabilities", action="selectProject",
