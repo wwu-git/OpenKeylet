@@ -16,7 +16,7 @@ function createCertificatePanel({ invoke, getState, isUnlocked, localized: l, es
       <p>${l('以下操作立即生效。注册 CA 后，Agent 只能通过签发工具使用私钥，不能通过通用凭据工具使用。撤权不会吊销已签发证书。', 'Changes apply immediately. Registered CA secrets are restricted to issuance tools. Revoking a grant does not revoke issued certificates.')}</p>
       ${select('certificate-item', l('项目', 'Project'))}<div class="field-grid two">${select('certificate-ca-kind', l('CA 类型', 'CA kind'))}${select('certificate-private-key', l('私钥模块', 'Private key module'))}${select('certificate-ca-module', l('TLS CA 证书模块', 'TLS CA certificate module'))}</div>
       <div class="button-row">${button('certificate-register', l('注册 CA', 'Register CA'))}${button('certificate-unregister', l('解除 CA 用途限制', 'Unregister CA'))}</div>
-      <div class="field-grid two">${select('certificate-grant-kind', l('允许签发的用途', 'Allowed certificate purpose'))}${field('certificate-max-ttl', l('最长有效秒数', 'Maximum lifetime in seconds'), 'type="number" min="1" max="31622400" value="3600"')}</div>${button('certificate-allow', l('替换为此用途授权', 'Replace grant with this purpose'))}
+      <div class="field-grid two">${select('certificate-grant-kind', l('允许签发的用途', 'Allowed certificate purpose'))}${field('certificate-max-ttl', l('最长有效秒数', 'Maximum lifetime in seconds'), 'type="number" min="1" max="31622400" value="31622400"')}</div>${button('certificate-allow', l('替换为此用途授权', 'Replace grant with this purpose'))}
     </details>
     <details id="certificate-issue-panel"><summary>${l('签发证书', 'Issue certificate')}</summary>
       <div id="certificate-issue-empty">
