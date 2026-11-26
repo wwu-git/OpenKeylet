@@ -128,10 +128,13 @@
               <label><span id="connection-folder-filter-label">Folder</span><select id="connection-folder-filter"></select></label>
               <label><span id="connection-status-filter-label">Status</span><select id="connection-status-filter"></select></label>
             </div>
+          </div>
+          <div id="connection-active-filters" role="group" aria-labelledby="connection-active-label" hidden>
+            <strong id="connection-active-label">Active filters</strong>
             <div id="connection-filter-chips"></div>
             <div class="connection-search-summary">
               <span id="connection-result-count" role="status" aria-atomic="true"></span>
-              <button type="button" class="button quiet" id="connection-clear-all" data-action="clear-connection-filters" hidden>Clear all</button>
+              <button type="button" class="button quiet" id="connection-clear-all" data-action="clear-connection-filters">Clear all</button>
             </div>
           </div>
           <div class="list-well project-workspace">

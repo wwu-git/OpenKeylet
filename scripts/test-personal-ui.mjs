@@ -231,6 +231,9 @@ try {
   });
   const visible = () => page.locator('.connection-card').evaluateAll(rows => rows.map(row => row.dataset.itemId));
   const filterPanel = page.locator('#connection-filter-panel');
+  const activeFilters = page.locator('#connection-active-filters');
+  const filterChips = activeFilters.locator('[data-clear-item-filter]');
+  const searchToggle = page.locator('#title-search-toggle');
   const openFilters = () => page.keyboard.press('Control+f');
   assert.equal(await page.locator('#connection-filter-toggle, .connection-search-tools').count(), 0);
   assert.equal(await filterPanel.isHidden(), true);
@@ -246,7 +249,10 @@ try {
   assert.equal(await filterPanel.isVisible(), true, 'Selecting filters keeps the shared search panel open');
   await page.locator('#title-search-toggle').click();
   assert.equal(await filterPanel.isHidden(), true);
+  assert.equal(await activeFilters.isVisible(), true);
+  assert.equal(await filterChips.count(), 3);
   assert.match(await page.locator('#title-search-toggle').getAttribute('aria-label'), /筛选中/);
+  assert.notEqual(await searchToggle.getAttribute('data-filter-active'), null);
   assert.deepEqual(await visible(), ['exact'], 'Collapsing search preserves folder, status and type filters');
   await fillItemSearch('生产 github');
   assert.deepEqual(await visible(), ['exact']);
@@ -282,6 +288,8 @@ try {
   await openFilters();
   await page.locator('#connection-clear-all').click();
   assert.equal(await page.locator('#connection-clear-all').isHidden(), true, 'Clear all hides after resetting every search condition');
+  assert.equal(await activeFilters.isHidden(), true);
+  assert.equal(await searchToggle.getAttribute('data-filter-active'), null);
   assert.equal(await projectSearch.inputValue(), '');
   assert.equal((await visible()).length, 5);
   await fillItemSearch('github');
@@ -290,6 +298,7 @@ try {
     await page.locator(`[data-page="${pageName}"]`).click();
     await page.keyboard.press('Control+f');
     assert.equal(await filterPanel.isHidden(), true, 'Project filters stay hidden on other pages');
+    assert.equal(await activeFilters.isHidden(), true);
     assert.equal(await projectSearch.inputValue(), '');
     await projectSearch.fill(query);
   }
@@ -308,6 +317,7 @@ try {
   await fillItemSearch('github');
   await folder.selectOption({label:'agent'});
   await status.selectOption('enabled');
+  const workspaceColors = {};
   for (const width of [690, 460]) {
     await page.setViewportSize({width,height:1000});
     for (const theme of ['dark', 'light']) {
@@ -321,10 +331,37 @@ try {
       assert.ok(panelBounds.left>=0 && panelBounds.right<=width && panelBounds.bottom<=1000 && panelBounds.scroll<=panelBounds.width+1, JSON.stringify(panelBounds));
       assert.ok(panelBounds.top >= await projectSearch.evaluate(el=>el.getBoundingClientRect().bottom));
       await page.screenshot({path:path.join(artifacts, `single-search-${width}-${theme}.png`)});
+      await searchToggle.click();
+      assert.equal(await filterPanel.isHidden(), true);
+      assert.equal(await activeFilters.isVisible(), true);
+      assert.match(await activeFilters.locator('[data-clear-item-filter="query"]').innerText(), /github/);
+      assert.equal(await filterChips.count(), 3);
+      assert.ok(await activeFilters.evaluate(el => {
+        const bounds = el.getBoundingClientRect();
+        return bounds.left >= 0 && bounds.right <= innerWidth && el.scrollWidth <= el.clientWidth + 1;
+      }));
+      workspaceColors[theme] = await page.locator('#project-sidebar, #connections-list, #project-detail, #connection-active-filters')
+        .evaluateAll(panels => panels.map(el => getComputedStyle(el).backgroundColor));
+      await page.screenshot({path:path.join(artifacts, `active-filters-${width}-${theme}.png`)});
     }
   }
+  assert.equal(workspaceColors.dark.length, 4);
+  workspaceColors.dark.forEach((color, index) => {
+    assert.notEqual(color, workspaceColors.light[index], 'Each project surface follows the theme');
+  });
+  const longQuery = '<' + 'no-match'.repeat(35) + '>';
+  await fillItemSearch(longQuery);
+  await searchToggle.click();
+  assert.equal(await activeFilters.locator('.connection-filter-chip-label').first().textContent(), `搜索：${longQuery}`);
+  assert.match(await page.locator('#connection-result-count').textContent(), /0\s*\/\s*5/);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await activeFilters.locator('[data-clear-item-filter="query"]').click();
+  assert.equal(await projectSearch.inputValue(), '');
+  assert.equal(await filterPanel.isHidden(), true, 'Removing a visible chip keeps a collapsed search closed');
+  assert.equal(await filterChips.count(), 2);
+  assert.deepEqual(await visible(), ['exact', 'ssh']);
   await page.locator('#connection-clear-all').click();
-  await projectSearch.press('Escape');
+  assert.equal(await activeFilters.isHidden(), true);
   await page.setViewportSize({width:1080,height:1000});
   await page.evaluate(async () => {
     fixture.state.connections = [{id:'addresses',name:'Multiple addresses',itemType:'custom',enabled:true,folder:'',host:'a.example',port:22,baseUrl:'https://a.example/',updatedAt:'original',modules:[

@@ -995,7 +995,7 @@ function syncTitleSearch() {
   const label = localized(...labels[activePage]);
   const control = $('#title-search');
   control.classList.toggle('is-open', open);
-  const hasFilters = Boolean(pageSearch[activePage]) || (activePage === 'connections' && [currentItemTypeFilter, currentFolderFilter, currentItemStatusFilter].some(value => value !== 'all'));
+  const hasFilters = Boolean(pageSearch[activePage].trim()) || (activePage === 'connections' && [currentItemTypeFilter, currentFolderFilter, currentItemStatusFilter].some(value => value !== 'all'));
   control.classList.toggle('has-query', hasFilters);
   $('#connection-filter-panel').hidden = !open || activePage !== 'connections';
   $('.title-drag-region').classList.toggle('search-open', open);
@@ -1006,9 +1006,10 @@ function syncTitleSearch() {
   input.setAttribute('aria-label', label);
   if (input.value !== pageSearch[activePage]) input.value = pageSearch[activePage];
   const button = $('#title-search-toggle');
+  button.toggleAttribute('data-filter-active', hasFilters);
   button.setAttribute('aria-expanded', String(open));
   button.title = open ? localized('收起搜索', 'Collapse search') : label;
-  if (hasFilters && !open) button.title += localized(' · 筛选中', ' · Filter active');
+  if (hasFilters) button.title += localized(' · 筛选中', ' · Filter active');
   button.setAttribute('aria-label', button.title);
 }
 
@@ -1270,19 +1271,30 @@ function syncConnectionSearchControls(matchCount, editingOutsideFilters) {
   }
 
   const chips = [];
-  if (currentItemTypeFilter !== 'all') chips.push(['type', itemFilterLabel(currentItemTypeFilter)]);
-  if (currentFolderFilter !== 'all') chips.push(['folder', folderOptions.find(([value]) => value === currentFolderFilter)[1]]);
+  const query = pageSearch.connections.trim();
+  if (query) chips.push(['query', localized(`搜索：${query}`, `Search: ${query}`)]);
+  if (currentItemTypeFilter !== 'all') {
+    const type = itemFilterLabel(currentItemTypeFilter);
+    chips.push(['type', localized(`类型：${type}`, `Type: ${type}`)]);
+  }
+  if (currentFolderFilter !== 'all') {
+    const folder = folderOptions.find(([value]) => value === currentFolderFilter)[1];
+    chips.push(['folder', localized(`文件夹：${folder}`, `Folder: ${folder}`)]);
+  }
   if (currentItemStatusFilter !== 'all') chips.push(['status', statusOptions.find(([value]) => value === currentItemStatusFilter)[1]]);
   const chipList = $('#connection-filter-chips');
-  const chipMarkup = chips.map(([kind, label]) => `<button type="button" class="button quiet" data-clear-item-filter="${kind}" aria-label="${escapeHtml(localized(`移除筛选：${label}`, `Remove filter: ${label}`))}">${escapeHtml(label)} <span aria-hidden="true">×</span></button>`).join('');
+  const chipMarkup = chips.map(([kind, label]) => {
+    const removeLabel = escapeHtml(localized(`移除筛选：${label}`, `Remove filter: ${label}`));
+    return `<button type="button" class="button quiet connection-filter-chip" data-clear-item-filter="${kind}" aria-label="${removeLabel}" title="${removeLabel}"><span class="connection-filter-chip-label">${escapeHtml(label)}</span><span aria-hidden="true">×</span></button>`;
+  }).join('');
   if (chipList.innerHTML !== chipMarkup) chipList.innerHTML = chipMarkup;
+  $('#connection-active-label').textContent = localized('当前筛选', 'Active filters');
+  $('#connection-active-filters').hidden = !chips.length;
   $('#connection-result-count').textContent = localized(
     `${matchCount} / ${state.connections.length} 个项目` + (editingOutsideFilters ? ' · 保留正在编辑的项目' : ''),
     `${matchCount} / ${state.connections.length} projects` + (editingOutsideFilters ? ' · Open editor kept visible' : ''),
   );
-  const clearAll = $('#connection-clear-all');
-  clearAll.textContent = localized('清除全部', 'Clear all');
-  clearAll.hidden = !chips.length && !pageSearch.connections;
+  $('#connection-clear-all').textContent = localized('清除全部', 'Clear all');
   syncTitleSearch();
 }
 
@@ -3371,7 +3383,7 @@ $('#migration-batch-undo').onclick = async () => {
 
 document.addEventListener('click', async (event) => {
   if (event.target.closest('#title-search-toggle')) setTitleSearchOpen(!titleSearchOpen);
-  else if (titleSearchOpen && !event.target.closest('#title-search, #connection-filter-panel, [data-clear-item-filter], [data-action="clear-connection-filters"]')) setTitleSearchOpen(false, false);
+  else if (titleSearchOpen && !event.target.closest('#title-search, #connection-filter-panel, #connection-active-filters, [data-clear-item-filter], [data-action="clear-connection-filters"]')) setTitleSearchOpen(false, false);
   const filterButton = event.target.closest('.filter-strip button');
   if (filterButton && !switchSelectionPending) await selectFilterButton(filterButton);
   const languageButton = event.target.closest('[data-language]');
@@ -3555,9 +3567,8 @@ document.addEventListener('click', async (event) => {
     currentFolderFilter = 'all';
     currentItemStatusFilter = 'all';
     syncItemTypeFilter();
-    syncTitleSearch();
     renderConnections();
-    setTitleSearchOpen(true);
+    setTitleSearchOpen(titleSearchOpen);
   }
   if (action?.dataset.action === 'clear-activity-filters') {
     currentActivityFilter = 'all';
@@ -3707,11 +3718,13 @@ $('#connection-status-filter').addEventListener('change', event => {
 $('#connection-filter-chips').addEventListener('click', event => {
   const kind = event.target.closest('[data-clear-item-filter]')?.dataset.clearItemFilter;
   if (!kind) return;
+  if (kind === 'query') pageSearch.connections = '';
   if (kind === 'type') { currentItemTypeFilter = 'all'; syncItemTypeFilter(); }
   if (kind === 'folder') currentFolderFilter = 'all';
   if (kind === 'status') currentItemStatusFilter = 'all';
   renderConnections();
-  setTitleSearchOpen(true);
+  const nextFocus = titleSearchOpen ? $('#title-search-input') : ($('#connection-filter-chips button') || $('#title-search-toggle'));
+  nextFocus.focus({ preventScroll: true });
 });
 document.addEventListener('input', (event) => {
   if (event.target.id === 'api-service-search' && apiServicePicker) { apiServicePicker.query = event.target.value; renderApiServicePicker(); return; }
@@ -4157,7 +4170,8 @@ document.addEventListener('keydown', (event) => {
       const page = search.dataset.pageSearch;
       search.value = '';
       pageSearch[page] = '';
-      if (page === 'connections') { syncTitleSearch(); renderConnections(); }
+      syncTitleSearch();
+      if (page === 'connections') renderConnections();
       if (page === 'activity') { activityVisibleCount = ACTIVITY_PAGE_SIZE; renderActivity(); }
       if (page === 'settings') applySettingsSearch();
       event.preventDefault();
