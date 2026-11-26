@@ -733,6 +733,54 @@ async fn direct_trusted_host_executes_connection_check_without_forwarding() {
 }
 
 #[tokio::test]
+async fn disabled_ssh_copy_can_be_checked_after_confirming_its_own_host_trust() {
+    let fixture = Fixture::new(true).await;
+    let original = fixture.vault.get_connection(fixture.jump).unwrap();
+    let copy = fixture
+        .vault
+        .duplicate_connection(fixture.jump, &original.stored.updated_at)
+        .unwrap();
+    assert!(copy.can_test);
+    assert!(!copy.enabled);
+    let target = fixture.vault.get_connection(copy.id).unwrap();
+
+    let untrusted = executor::test_connection(&fixture.vault, &target).await.unwrap_err();
+    assert!(untrusted.to_string().contains("host key is not trusted"), "{untrusted:#}");
+    let observed = probe(&fixture.vault, copy.id).await.unwrap();
+    assert_eq!(observed.fingerprint, fingerprint(1));
+    assert_eq!(fixture.a.auth.load(Ordering::SeqCst), 0);
+    assert!(!fixture.vault.ssh_host_trust().unwrap().iter().any(|entry| entry.item_id == copy.id));
+
+    fixture
+        .vault
+        .set_ssh_host_trust(copy.id, &observed.host, observed.port, Some(&observed.fingerprint))
+        .unwrap();
+    assert_eq!(
+        executor::test_connection(&fixture.vault, &target).await.unwrap(),
+        "SSH connection successful"
+    );
+    let saved = fixture.vault.get_connection(copy.id).unwrap();
+    assert!(!saved.stored.enabled);
+    assert_eq!(saved.stored.updated_at, target.stored.updated_at);
+    let auth_count = fixture.a.auth.load(Ordering::SeqCst);
+    assert!(auth_count > 0);
+    let denied = executor::execute_ssh(
+        &fixture.vault,
+        &saved,
+        "echo mcp-vault-ok",
+        None,
+        Some(30),
+        &HashMap::new(),
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(denied.to_string().contains("This connection is disabled"));
+    assert_eq!(fixture.a.auth.load(Ordering::SeqCst), auth_count);
+    fixture.closed().await;
+}
+
+#[tokio::test]
 async fn direct_probe_observes_without_authentication_or_implicit_trust() {
     let fixture = Fixture::new(true).await;
     fixture

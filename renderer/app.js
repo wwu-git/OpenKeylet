@@ -1100,7 +1100,7 @@ function renderConnections() {
   }
   container.innerHTML = items.map((item) => {
     const type = itemDisplayType(item);
-    const canTest = item.enabled && item.canTest;
+    const canTest = item.canTest;
     const checkTitle = item.httpAuthType === 'oci-signature'
       ? localized('只读检查租户根区间的实例列表，最多请求 1 项，不显示实例内容。', 'Read-only ListInstances check of the tenancy root compartment, limit 1; instance data is not displayed.')
       : item.httpAuthType === 'aws-sigv4'

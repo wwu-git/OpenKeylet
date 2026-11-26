@@ -2009,19 +2009,27 @@ fn validate_transfer_path(value: &str, label: &str) -> Result<String> {
 }
 
 pub async fn test_connection(vault: &Vault, connection: &DecryptedConnection) -> Result<String> {
+    let enabled_snapshot;
+    let connection = if connection.stored.enabled {
+        connection
+    } else {
+        let mut stored = connection.stored.clone();
+        stored.enabled = true;
+        enabled_snapshot = DecryptedConnection {
+            stored,
+            secrets: connection.secrets.clone(),
+        };
+        &enabled_snapshot
+    };
     if connection.stored.test_target(&connection.secrets) == Some("aws") {
         crate::api_provider::check_aws_configuration(&connection.stored, &connection.secrets)
     } else if connection.stored.test_target(&connection.secrets) == Some("oci") {
         let response = execute_api(connection, oci_check_request(connection)?).await?;
         oci_check_summary(&response)
     } else if connection.stored.test_target(&connection.secrets) == Some("ssh") {
-        let testable = DecryptedConnection {
-            stored: connection.stored.clone(),
-            secrets: connection.secrets.clone(),
-        };
         let result = execute_ssh(
             vault,
-            &testable,
+            connection,
             "echo mcp-vault-ok",
             None,
             Some(30),
@@ -2582,6 +2590,23 @@ mod tests {
         .unwrap();
         assert_eq!(result.status, 200);
         assert_eq!(result.body, "CustomClient/1.0");
+
+        let mut disabled = connection;
+        disabled.stored.enabled = false;
+        assert_eq!(
+            test_connection(&vault, &disabled).await.unwrap(),
+            "API responded: HTTP 200"
+        );
+        let denied = execute_api(
+            &disabled,
+            ApiRequestInput {
+                method: "GET".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(denied.to_string().contains("This connection is disabled"));
         server.abort();
     }
 

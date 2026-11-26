@@ -38,6 +38,8 @@ async fn aws_check_reports_local_readiness_without_claiming_cloud_authentication
     for secret in [ACCESS, SECRET, TOKEN] {
         assert!(!summary.contains(secret));
     }
+    saved.stored.enabled = false;
+    assert_eq!(test_connection(&vault, &saved).await.unwrap(), summary);
 
     saved.stored.http_auth_type = "auto".into();
     saved.stored.aws_bindings = None;
@@ -78,9 +80,6 @@ async fn aws_check_rejects_incomplete_unsupported_and_untrusted_configuration_lo
         }
         cases.push(unsupported);
     }
-    let mut disabled = copy();
-    disabled.stored.enabled = false;
-    cases.push(disabled);
     for saved in cases {
         assert_eq!(saved.stored.test_target(&saved.secrets), Some("aws"));
         let error = test_connection(&vault, &saved).await.unwrap_err().to_string();

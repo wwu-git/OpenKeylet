@@ -366,7 +366,6 @@ pub struct SshHostProbe {
 
 pub async fn probe(vault: &Vault, id: Uuid) -> Result<SshHostProbe> {
     let target = vault.get_connection(id)?;
-    ensure!(target.stored.enabled, "SSH project disabled");
     let jump = vault.ssh_jump_connection(&target)?;
     probe_endpoint(vault, &target.stored.host, target.stored.port, jump.as_ref())
         .await

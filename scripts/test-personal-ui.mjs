@@ -67,6 +67,10 @@ try {
         state.connections.splice(index+1, 0, copy);
         return copy;
       }
+      if(command==="test_connection") {
+        fixture.checkedItem = args.id;
+        return "Synthetic SSH check succeeded";
+      }
       if(command==="generate_password") return "Aa1!".repeat(32).slice(0,args.options.length);
       if(command==="copy_owner_value") {if(fixture.failCopy)throw Error("Copy failed");fixture.copies.push(args.value);return;}
       if(command==="quick_pair_browser") {fixture.pairings.push(args.port);if(fixture.failPairing)throw Error("Pairing failed");state.settings.browserEnabled=true;state.settings.browserPort=args.port;return;}
@@ -857,6 +861,12 @@ try {
   await copyButton.click();
   await copiedRow.waitFor({state:'visible'});
   assert.match(await copiedRow.locator('.connection-name').textContent(), /Synthetic SSH key project\(2\)/);
+  assert.equal(await copiedRow.locator('.item-toggle').getAttribute('aria-pressed'), 'false');
+  const copiedCheck = copiedRow.locator('[data-action="test"]');
+  assert.equal(await copiedCheck.isEnabled(), true, 'A manually checked copy may remain disabled for agents');
+  await copiedCheck.click();
+  await page.locator('#toast-region').getByText('Synthetic SSH check succeeded').waitFor();
+  assert.equal(await page.evaluate(() => fixture.checkedItem), 'fixture-duplicate');
   assert.equal(await copiedRow.locator('.item-toggle').getAttribute('aria-pressed'), 'false');
   assert.equal(await sourceRow.locator('.item-toggle').getAttribute('aria-pressed'), 'true');
   assert.deepEqual(await page.evaluate(() => fixture.duplicateRequests), Array(2).fill({id:sourceId,expectedUpdatedAt:source.updatedAt}));
