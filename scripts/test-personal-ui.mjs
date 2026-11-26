@@ -850,6 +850,22 @@ try {
     await refresh();
   }, sourceId);
   const source = await page.evaluate(id => fixture.state.connections.find(item => item.id === id), sourceId);
+  const useButton = sourceRow.locator('[data-action="copy-name"]');
+  for (const [locale, guide, anchor] of [
+    ['zh', 'README.zh-CN.md', 'agent-使用示例'],
+    ['en', 'README.md', 'agent-examples'],
+  ]) {
+    await page.locator(`[data-language="${locale}"]`).click();
+    const count = await page.evaluate(() => fixture.copies.length);
+    await useButton.click();
+    await page.waitForFunction(previous => fixture.copies.length === previous + 1, count);
+    const prompt = await page.evaluate(() => fixture.copies.at(-1));
+    assert.equal(prompt.split('\n')[0], `use ${source.name} in OpenKeylet MCP`);
+    assert.ok(decodeURIComponent(prompt).includes(`https://github.com/wwu-git/OpenKeylet/blob/main/${guide}#${anchor}`));
+    assert.match(prompt, locale === 'zh' ? /先阅读.*MCP/ : /read.*MCP/i);
+    assert.doesNotMatch(prompt, /ssh\.example\.test|fixture-user|fixture-ssh-private-key/);
+  }
+  await page.locator('[data-language="zh"]').click();
   const clipboardCount = await page.evaluate(() => fixture.copies.length);
   const copyButton = sourceRow.locator('[data-action="duplicate"]');
   const copiedRow = page.locator('.connection-card[data-item-id="fixture-duplicate"]');

@@ -3314,7 +3314,11 @@ document.addEventListener('click', async (event) => {
     if (action.dataset.action === 'history') await openVaultManagement('history', item.id);
     if (action.dataset.action === 'copy-name') {
       try {
-        await api.copyOwnerValue(`use ${item.name} in OpenKeylet MCP`, false);
+        const guidance = localized(
+          '执行前，先阅读 OpenKeylet MCP 服务说明、对应工具说明和下方指南中的相关示例。指南无法访问时，以 MCP 说明为准。请通过 MCP 使用已保存的凭据，不要索要隐藏字段的明文。\n\nhttps://github.com/wwu-git/OpenKeylet/blob/main/README.zh-CN.md#agent-%E4%BD%BF%E7%94%A8%E7%A4%BA%E4%BE%8B',
+          'Before acting, read the OpenKeylet MCP server instructions, the relevant tool description, and the matching example in the guide below. If the guide is unavailable, follow the MCP instructions. Use saved credentials through MCP and do not ask for hidden plaintext.\n\nhttps://github.com/wwu-git/OpenKeylet/blob/main/README.md#agent-examples',
+        );
+        await api.copyOwnerValue(`use ${item.name} in OpenKeylet MCP\n\n${guidance}`, false);
         toast(localized('OpenKeylet MCP 使用提示已复制', 'OpenKeylet MCP use prompt copied'));
       } catch (error) { toast(cleanError(error), 'error'); }
     }
