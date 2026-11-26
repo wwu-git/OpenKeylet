@@ -12,20 +12,26 @@ function createCertificatePanel({ invoke, getState, isUnlocked, localized: l, es
   panel.innerHTML = `<div class="settings-heading"><div><h2>${l('证书与签发权限', 'Certificates and signing permissions')}</h2><p>${l('使用已有 CA。签发权限独立于保险库写入权限，默认关闭。', 'Use an existing CA. Signing permissions are separate from vault writes and disabled by default.')}</p></div></div>
     <div class="desktop-option"><span>${l('允许 Agent 签发证书', 'Allow Agent certificate issuance')}</span><label class="switch"><input type="checkbox" id="certificate-enabled" aria-label="${l('允许 Agent 签发证书', 'Allow Agent certificate issuance')}"><span></span></label></div>
     <p id="certificate-status" role="status"></p><div id="certificate-grants" class="agent-client-list"></div>
-    <details><summary>${l('管理已有 CA 和授权', 'Manage existing CAs and grants')}</summary>
+    <details id="certificate-ca-management"><summary>${l('管理已有 CA 和授权', 'Manage existing CAs and grants')}</summary>
       <p>${l('以下操作立即生效。注册 CA 后，Agent 只能通过签发工具使用私钥，不能通过通用凭据工具使用。撤权不会吊销已签发证书。', 'Changes apply immediately. Registered CA secrets are restricted to issuance tools. Revoking a grant does not revoke issued certificates.')}</p>
       ${select('certificate-item', l('项目', 'Project'))}<div class="field-grid two">${select('certificate-ca-kind', l('CA 类型', 'CA kind'))}${select('certificate-private-key', l('私钥模块', 'Private key module'))}${select('certificate-ca-module', l('TLS CA 证书模块', 'TLS CA certificate module'))}</div>
       <div class="button-row">${button('certificate-register', l('注册 CA', 'Register CA'))}${button('certificate-unregister', l('解除 CA 用途限制', 'Unregister CA'))}</div>
       <div class="field-grid two">${select('certificate-grant-kind', l('允许签发的用途', 'Allowed certificate purpose'))}${field('certificate-max-ttl', l('最长有效秒数', 'Maximum lifetime in seconds'), 'type="number" min="1" max="31622400" value="3600"')}</div>${button('certificate-allow', l('替换为此用途授权', 'Replace grant with this purpose'))}
     </details>
     <details id="certificate-issue-panel"><summary>${l('签发证书', 'Issue certificate')}</summary>
-      ${select('certificate-issue-item', l('已注册的 CA 项目', 'Registered CA project'))}${select('certificate-issue-kind', l('证书用途', 'Certificate purpose'))}
-      ${area('certificate-issue-payload', l('待签 SSH 公钥', 'SSH public key to sign'))}
-      ${field('certificate-issue-names', l('身份名称，逗号分隔', 'Identities, comma separated'))}
-      <div class="field-grid two">${field('certificate-key-id', 'SSH key ID')}${field('certificate-ttl', l('有效秒数', 'Lifetime in seconds'), 'type="number" min="1" max="31622400" value="3600"')}</div>
-      ${field('certificate-request-id', l('签发请求 UUID，重试保留同一值', 'Issuance request UUID, preserve when retrying'))}
-      <div class="button-row">${button('certificate-issue', l('签发证书', 'Issue certificate'))}${button('certificate-new-request', l('新请求 ID', 'New request ID'))}</div>
-      ${area('certificate-issue-result', l('签发结果', 'Issuance result'), 'readonly')}
+      <div id="certificate-issue-empty">
+        <p>${l('还没有注册的 CA。保存签发材料后，请注册 CA。', 'No CA is registered. Register a CA after saving its signing materials.')}</p>
+        <div class="button-row">${button('certificate-open-ca-management', l('前往注册 CA', 'Go to CA registration'))}</div>
+      </div>
+      <div id="certificate-issue-fields">
+        ${select('certificate-issue-item', l('已注册的 CA 项目', 'Registered CA project'))}${select('certificate-issue-kind', l('证书用途', 'Certificate purpose'))}
+        ${area('certificate-issue-payload', l('待签 SSH 公钥', 'SSH public key to sign'))}
+        ${field('certificate-issue-names', l('身份名称，逗号分隔', 'Identities, comma separated'))}
+        <div class="field-grid two">${field('certificate-key-id', 'SSH key ID')}${field('certificate-ttl', l('有效秒数', 'Lifetime in seconds'), 'type="number" min="1" max="31622400" value="3600"')}</div>
+        ${field('certificate-request-id', l('签发请求 UUID，重试保留同一值', 'Issuance request UUID, preserve when retrying'))}
+        <div class="button-row">${button('certificate-issue', l('签发证书', 'Issue certificate'))}${button('certificate-new-request', l('新请求 ID', 'New request ID'))}</div>
+        ${area('certificate-issue-result', l('签发结果', 'Issuance result'), 'readonly')}
+      </div>
     </details>
     <details id="certificate-verify-panel"><summary>${l('验证证书', 'Verify certificate')}</summary>
       ${select('certificate-verify-kind', l('证书用途', 'Certificate purpose'))}
@@ -78,6 +84,8 @@ function createCertificatePanel({ invoke, getState, isUnlocked, localized: l, es
     const issuers = connections.filter(item => item.certificateAuthority).map(item => [item.id, item.name]);
     options(q('#certificate-item'), entries, l('选择已保存项目', 'Select a saved project'));
     options(q('#certificate-issue-item'), issuers, l('选择已注册的 CA', 'Select a registered CA'));
+    q('#certificate-issue-empty').classList.toggle('hidden', issuers.length > 0);
+    q('#certificate-issue-fields').classList.toggle('hidden', issuers.length === 0);
     options(q('#certificate-match-item'), entries, l('选择已保存项目', 'Select a saved project'));
     modules();
     renderIssueFields();
@@ -102,10 +110,15 @@ function createCertificatePanel({ invoke, getState, isUnlocked, localized: l, es
     const requestEpoch = epoch;
     busy = true;
     const controls = [...panel.querySelectorAll('button, input, select, textarea')];
+    const focused = document.activeElement;
     controls.forEach(control => { control.disabled = true; });
     try { await operation(() => requestEpoch === epoch); }
     catch (error) { if (requestEpoch === epoch) toast(cleanError(error), 'error'); }
-    finally { controls.forEach(control => { control.disabled = false; }); busy = false; }
+    finally {
+      controls.forEach(control => { control.disabled = false; });
+      busy = false;
+      if (requestEpoch === epoch && controls.includes(focused) && document.activeElement === document.body) focused.focus({ preventScroll: true });
+    }
   }
   function clear() {
     epoch++;
@@ -127,6 +140,12 @@ function createCertificatePanel({ invoke, getState, isUnlocked, localized: l, es
   panel.addEventListener('click', event => {
     const target = event.target.closest('button');
     if (!target) return;
+    if (target.id === 'certificate-open-ca-management') {
+      if (busy || !isUnlocked()) return;
+      q('#certificate-ca-management').open = true;
+      q('#certificate-item').focus();
+      return;
+    }
     void run(async current => {
       const id = target.id;
       const resultField = q(`#${id}-result`);

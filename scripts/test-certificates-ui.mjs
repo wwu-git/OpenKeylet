@@ -55,14 +55,24 @@ try {
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   await page.locator('[data-page="settings"]').click();
   assert.equal(await page.locator('#certificate-enabled').isChecked(), false);
-  const manage = page.locator('#certificate-panel details').nth(0);
-  await manage.locator('summary').click();
+  const manage = page.locator('#certificate-ca-management');
+  const issue = page.locator('#certificate-issue-panel');
+  await issue.locator('summary').click();
+  assert.equal(await issue.getByText('还没有注册的 CA。').isVisible(), true);
+  assert.equal(await page.locator('#certificate-issue-item').isVisible(), false);
+  await issue.getByRole('button', { name: '前往注册 CA' }).click();
+  await page.waitForFunction(() => document.activeElement === document.querySelector('#certificate-item'));
+  assert.equal(await manage.getAttribute('open'), '');
+  assert.equal(await page.evaluate(() => fixture.calls.some(call => call.command === 'set_certificate_authority')), false);
   await page.locator('#certificate-item').selectOption('11111111-1111-4111-8111-111111111111');
   await page.locator('#certificate-ca-kind').selectOption('tls');
   await page.locator('#certificate-private-key').selectOption('22222222-2222-4222-8222-222222222222');
   await page.locator('#certificate-ca-module').selectOption('33333333-3333-4333-8333-333333333333');
   await page.locator('#certificate-register').click();
   await page.waitForFunction(() => fixture.state.connections[0].certificateAuthority?.kind === 'tls');
+  await page.locator('#certificate-issue-item').selectOption('11111111-1111-4111-8111-111111111111');
+  assert.equal(await issue.getByText('还没有注册的 CA。').isVisible(), false);
+  await issue.locator('summary').click();
   await page.locator('#certificate-grant-kind').selectOption('tlsServer');
   await page.locator('#certificate-allow').click();
   await page.waitForFunction(() => fixture.caps.grants.length === 1);
@@ -73,7 +83,6 @@ try {
   await page.locator('label:has(#certificate-enabled)').click();
   const match = page.locator('#certificate-match-panel');
   const verify = page.locator('#certificate-verify-panel');
-  const issue = page.locator('#certificate-issue-panel');
   await match.locator('summary').click();
   await page.locator('#certificate-match-item').selectOption('11111111-1111-4111-8111-111111111111');
   await page.locator('#certificate-match-payload').fill('synthetic public material');
@@ -171,5 +180,5 @@ try {
   assert.equal(await page.locator('#ssh-jump-item option[value="44444444-4444-4444-8444-444444444444"]').count(), 1);
   await page.locator('#connection-modal').screenshot({ path: path.join(artifacts, 'certificate-modules-460.png') });
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ passed: true, artifacts, checks: ['CA binding', 'independent grant enable/revoke', 'separate certificate forms and results', 'TLS and SSH payloads', 'issue retry UUID', 'standard modules', '460px layout'] }));
+  console.log(JSON.stringify({ passed: true, artifacts, checks: ['CA empty-state navigation', 'CA binding', 'independent grant enable/revoke', 'separate certificate forms and results', 'TLS and SSH payloads', 'issue retry UUID', 'standard modules', '460px layout'] }));
 } finally { await browser.close(); server.close(); }
