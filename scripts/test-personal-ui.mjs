@@ -861,7 +861,7 @@ try {
   assert.equal(await sourceRow.locator('.item-toggle').getAttribute('aria-pressed'), 'true');
   assert.deepEqual(await page.evaluate(() => fixture.duplicateRequests), Array(2).fill({id:sourceId,expectedUpdatedAt:source.updatedAt}));
   assert.equal(await page.evaluate(() => fixture.copies.length), clipboardCount);
-  assert.deepEqual(await sourceRow.locator('.card-actions .small-button').allTextContents(), ['CHECK','USE','HISTORY','COPY','DEL']);
+  assert.deepEqual(await sourceRow.locator('.card-actions .small-button').allTextContents(), ['HISTORY','CHECK','USE','COPY','DEL']);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   await page.locator('[data-page="settings"]').click();
   await page.locator('#item-layout').selectOption('grid');
