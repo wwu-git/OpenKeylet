@@ -45,6 +45,14 @@ const staticCopy = [
   ['#page-connections .page-header h1', 'text', '秘密项目', 'VAULT ITEMS'],
   ['#title-search-input', 'aria-label', '搜索秘密项目', 'Search vault items'],
   ['#add-connection-button', 'text', '＋ 添加', '+ ADD'],
+  ['#project-sidebar', 'aria-label', '项目导航', 'Project navigation'],
+  ['#project-type-heading', 'text', '项目分类', 'Categories'],
+  ['#project-folder-heading', 'text', '文件夹', 'Folders'],
+  ['[data-folder-action="create"]', 'aria-label', '新建文件夹', 'New folder'],
+  ['#project-detail', 'aria-label', '项目详情', 'Project details'],
+  ['#project-detail-back', 'text', '‹ 返回项目列表', '‹ Back to projects'],
+  ['#project-folder-name-label', 'text', '文件夹名称', 'Folder name'],
+  ['#project-folder-cancel', 'text', '取消', 'Cancel'],
   ['#drafts-button', 'text', '草稿', 'DRAFT'],
   ['.creation-control', 'aria-label', '添加 / 草稿切换', 'Add / draft selector'],
   ['#generator-open', 'text', '生成器', 'GENERATE'],
@@ -67,10 +75,6 @@ const staticCopy = [
   ['#text-size-label', 'text', '界面字号', 'Text size'],
   ['#text-size option[value="standard"]', 'text', '标准', 'Standard'],
   ['#text-size option[value="large"]', 'text', '大号', 'Large'],
-  ['#item-layout-label', 'text', '项目显示方式', 'Item layout'],
-  ['#item-layout-help', 'text', '仅保存在当前设备', 'Saved on this device'],
-  ['#item-layout option[value="list"]', 'text', '列表', 'List'],
-  ['#item-layout option[value="grid"]', 'text', '宫格', 'Grid'],
   ['label[for="close-behavior"] strong', 'text', '关闭按钮', 'CLOSE BUTTON'],
   ['label[for="close-behavior"] small', 'text', '最小化可保留托盘菜单', 'Minimizing keeps tray controls available.'],
   ['#close-behavior option[value="tray"]', 'text', '最小化到托盘', 'MINIMIZE TO TRAY'],
@@ -278,6 +282,7 @@ const api = {
   setDesktopShortcut: (enabled) => invoke('set_desktop_shortcut', { enabled }),
   setLaunchAtLogin: (enabled) => invoke('set_launch_at_login', { enabled }),
   clear: () => invoke('clear_activities'),
+  manageFolder: (operation, folder, newName) => invoke('manage_folder', { operation, folder, newName }),
   copyConfig: (format) => invoke('copy_mcp_config', { format }),
   agents: () => invoke('agent_mcp_status'),
   registerAgents: (clientIds) => invoke('agent_mcp_register', { clientIds }),
@@ -309,6 +314,12 @@ const pageSearch = { connections: '', activity: '', settings: '' };
 const itemTypeFilterOrder = ['all', 'ssh', 'login', 'api', 'passkey', 'card', 'identity', 'secureNote', 'custom'];
 let currentItemTypeFilter = 'all';
 let currentFolderFilter = 'all';
+let selectedProjectId = null;
+let projectFieldView = null;
+const revealedProjectFields = new Map();
+const pendingProjectFields = new Set();
+let folderDialogState = null;
+let folderOperationPending = false;
 let currentItemStatusFilter = 'all';
 const settingsFilterOrder = ['all', 'SYSTEM', 'MCP', 'SSH', 'APP', 'WEB', 'CLOUD', 'SAFE'];
 let currentSettingsFilter = 'all';
@@ -445,6 +456,11 @@ function clearOwnerPlaintext() {
   githubBackup.clearSecrets();
   finishConfirmation(false, false);
   closeEditor();
+  clearProjectFieldView();
+  selectedProjectId = null;
+  $('#page-connections').removeAttribute('data-detail-open');
+  $('#project-detail-content').replaceChildren();
+  $('#project-folder-dialog').close();
   currentModules.forEach((module) => { module.secretValue = ''; });
   $$('[data-secret-value]').forEach((input) => { input.value = ''; });
   currentModules = [];
@@ -518,7 +534,7 @@ function applyOwnerLockState(next) {
   ownerTouchAt = -Infinity;
   const locked = next.pinConfigured && !next.unlocked;
   if (locked) {
-    if (state) state = { ...state, connections: [], activities: [] };
+    if (state) state = { ...state, connections: [], folders: [], activities: [] };
     certificatePanel?.clear();
     $('#toast-region').replaceChildren();
   }
@@ -570,7 +586,7 @@ async function refresh(showError = true) {
     const next = await api.state();
     if (epoch !== ownerEpoch) return;
     state = ownerLockState.pinConfigured && !ownerLockState.unlocked
-      ? { ...next, connections: [], activities: [] }
+      ? { ...next, connections: [], folders: [], activities: [] }
       : next;
     try {
       systemIntegrationState = await api.systemIntegration();
@@ -774,7 +790,7 @@ function syncFilterStrip(selector, order, selected, attribute, label, showLabels
 
 function syncItemTypeFilter() {
   $('#item-type-switch').setAttribute('aria-label', localized('项目类型筛选', 'Item type filter'));
-  syncFilterStrip('#item-type-switch', itemTypeFilterOrder, currentItemTypeFilter, 'data-item-type-filter', itemFilterLabel);
+  syncFilterStrip('#item-type-switch', itemTypeFilterOrder, currentItemTypeFilter, 'data-item-type-filter', itemFilterLabel, true);
 }
 
 function syncSettingsFilterControl() {
@@ -808,7 +824,9 @@ async function setItemTypeFilter(kind) {
 
 async function selectPage(page) {
   if (inlineEditorItemId && page !== 'connections' && !await closeEditorWithDraft()) return;
+  clearProjectFieldView();
   activePage = page;
+  renderProjectDetails();
   syncTitleSearch();
   $('.nav').dataset.active = page;
   $$('.nav-item').forEach(item => {
@@ -888,8 +906,10 @@ function moveSwitchThumb(event) {
   const drag = switchPointerDrag;
   if (!drag || event.pointerId !== drag.pointerId) return;
   const dx = event.clientX - drag.startX;
-  if (!drag.started && Math.abs(dx) < 4) return;
-  if (!drag.started && event.pointerType === 'touch' && Math.abs(event.clientY - drag.startY) > Math.abs(dx)) return;
+  const dy = event.clientY - drag.startY;
+  const movement = drag.vertical ? dy : dx;
+  if (!drag.started && Math.abs(movement) < 4) return;
+  if (!drag.started && event.pointerType === 'touch' && Math.abs(drag.vertical ? dx : dy) > Math.abs(movement)) return;
   event.preventDefault();
   if (!drag.started) {
     drag.started = true;
@@ -897,7 +917,7 @@ function moveSwitchThumb(event) {
     drag.strip.classList.add('has-drag-preview');
     drag.strip.setPointerCapture(event.pointerId);
   }
-  const position = Math.max(0, Math.min(drag.count - 1, drag.origin + dx / drag.cellWidth));
+  const position = Math.max(0, Math.min(drag.count - 1, drag.origin + movement / drag.cellSize));
   drag.index = Math.round(position);
   drag.strip.style.setProperty('--drag-type', position);
   drag.preview?.forEach((button, index) => button.classList.toggle('is-preview', index === drag.index && !drag.disabled?.(index)));
@@ -948,10 +968,12 @@ document.addEventListener('pointerdown', event => {
   const button = event.target.closest('button');
   if (button?.disabled) return;
   const style = getComputedStyle(strip);
+  const vertical = strip.id === 'item-type-switch';
   const width = strip.getBoundingClientRect().width - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
   const origin = control.buttons?.includes(button) ? control.buttons.indexOf(button) : control.read();
-  const cellWidth = parseFloat(style.getPropertyValue('--switch-travel')) || width / control.count;
-  switchPointerDrag = { ...control, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, origin, index: origin, cellWidth, started: false };
+  const cellSize = vertical ? strip.getBoundingClientRect().height / control.count
+    : parseFloat(style.getPropertyValue('--switch-travel')) || width / control.count;
+  switchPointerDrag = { ...control, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, origin, index: origin, cellSize, vertical, started: false };
 });
 document.addEventListener('pointermove', moveSwitchThumb, { passive: false });
 document.addEventListener('pointerup', event => {
@@ -1016,21 +1038,222 @@ function syncActivityFilterControl() {
   syncFilterStrip('#activity-filter-switch', activityFilterOrder, currentActivityFilter, 'data-activity-filter', kind => localized(...labels[kind]), true);
 }
 
+function projectFolderNames() {
+  return state.folders ?? [...new Set(state.connections.map(item => item.folder).filter(Boolean))];
+}
+
+function projectFolderOptions() {
+  const folders = [...projectFolderNames()].sort((a, b) => a.localeCompare(b, language));
+  return [
+    ['all', localized('全部文件夹', 'All folders')],
+    ['unfiled', localized('未分组', 'Unfiled')],
+    ...folders.map(name => [`folder:${name}`, name]),
+  ];
+}
+
+function renderProjectFolders(options) {
+  const pane = $('#project-folder-list');
+  const selected = currentFolderFilter;
+  const rename = localized('重命名', 'Rename');
+  const remove = localized('删除', 'Delete');
+  const markup = options.map(([value, label]) => {
+    const chosen = value === selected;
+    const actions = chosen && value.startsWith('folder:')
+      ? `<div class="project-folder-actions"><button type="button" data-folder-action="rename">${rename}</button><button type="button" data-folder-action="delete">${remove}</button></div>`
+      : '';
+    return `<div><button type="button" class="project-folder-select" data-project-folder="${escapeHtml(value)}" title="${escapeHtml(label)}" aria-pressed="${chosen}">${escapeHtml(label)}</button>${actions}</div>`;
+  }).join('');
+  if (pane.innerHTML !== markup) pane.innerHTML = markup;
+}
+
+function focusProjectFolder() {
+  ($('#project-folder-list [aria-pressed="true"]') || $('[data-folder-action="create"]')).focus();
+}
+
+function clearProjectFieldView() {
+  projectFieldView = null;
+  revealedProjectFields.clear();
+  pendingProjectFields.clear();
+}
+
+function projectFieldIcon(type) {
+  const paths = {
+    view: '<path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z"/><circle cx="12" cy="12" r="2.5"/>',
+    hide: '<path d="M3 3l18 18M10 6a10 10 0 0 1 12 6 13 13 0 0 1-3 3M6 8a13 13 0 0 0-4 4 12 12 0 0 0 14 5"/>',
+    visible: '<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 1 1 8 0M12 15v2"/>',
+    hidden: '<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 1 1 8 0v4M12 15v2"/>',
+  };
+  return `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[type]}</svg>`;
+}
+
+function projectFieldMarkup(item, module) {
+  const secret = Boolean(module.secret || moduleHasPlaintextReveal(module.kind));
+  const revealed = revealedProjectFields.has(module.id);
+  const present = secret ? module.configured : module.value !== undefined && module.value !== '';
+  const value = !present ? localized('未填写', 'Not set')
+    : secret ? (revealed ? revealedProjectFields.get(module.id) : '••••••••••') : module.value;
+  const protectedField = Boolean(item.certificateAuthority && secret);
+  const visible = !protectedField && (module.agentVisible ?? defaultModuleAgentVisible(module.kind));
+  const visibility = protectedField ? localized('CA 秘密受保护', 'Protected CA secret')
+    : visible ? localized('Agent 可见', 'Visible to agents') : localized('Agent 隐藏', 'Hidden from agents');
+  const name = module.name || moduleLabel(module.kind);
+  const reveal = revealed ? localized(`隐藏${name}`, `Hide ${name}`) : localized(`查看${name}`, `Reveal ${name}`);
+  const copy = localized(`复制${name}`, `Copy ${name}`);
+  const disabled = pendingProjectFields.has(module.id) ? ' disabled' : '';
+  return `<div class="project-field" data-field-id="${escapeHtml(module.id)}">
+    <div class="project-field-value"><dt>${escapeHtml(name)}</dt><dd>${escapeHtml(value)}</dd></div>
+    <div class="project-field-actions">
+      ${secret && present ? `<button type="button" class="button" data-field-action="reveal" aria-label="${escapeHtml(reveal)}" title="${escapeHtml(reveal)}"${disabled}>${projectFieldIcon(revealed ? 'hide' : 'view')}</button>` : ''}
+      ${present ? `<button type="button" class="button" data-field-action="copy" aria-label="${escapeHtml(copy)}"${disabled}>${localized('复制', 'Copy')}</button>` : ''}
+      <span class="project-field-visibility ${visible ? 'is-visible' : ''}" role="img" aria-label="${visibility}" title="${visibility}">${projectFieldIcon(visible ? 'visible' : 'hidden')}</span>
+    </div>
+  </div>`;
+}
+
+function renderProjectDetails() {
+  const pane = $('#project-detail-content');
+  const item = state?.connections.find(entry => entry.id === selectedProjectId);
+  pane.hidden = Boolean(inlineEditorItemId);
+  if (pane.hidden || !item || !ownerLockState.unlocked || activePage !== 'connections'
+      || editorOpening || !$('#connection-modal').classList.contains('hidden')) {
+    clearProjectFieldView();
+    pane.innerHTML = item ? '' : `<p>${localized('选择项目查看详情。', 'Select an item to view its details.')}</p>`;
+    return;
+  }
+  if (projectFieldView?.id !== item.id || projectFieldView.updatedAt !== item.updatedAt || projectFieldView.epoch !== ownerEpoch) {
+    clearProjectFieldView();
+    projectFieldView = { id: item.id, updatedAt: item.updatedAt, epoch: ownerEpoch };
+  }
+  const markup = `<p class="project-detail-meta">${escapeHtml(item.folder || localized('未分组', 'Unfiled'))}</p>
+    <h1>${escapeHtml(item.name)}</h1>
+    <p class="project-detail-meta">${escapeHtml(itemDisplayType(item))} · ${item.enabled ? localized('已启用', 'Enabled') : localized('已停用', 'Disabled')}</p>
+    <button type="button" class="button primary" data-action="edit" data-id="${escapeHtml(item.id)}">${localized('编辑项目', 'Edit item')}</button>
+    ${item.modules?.length ? `<h2>${localized('项目字段', 'Item fields')}</h2><dl class="project-detail-fields">${item.modules.map(module => projectFieldMarkup(item, module)).join('')}</dl>` : ''}
+    ${item.description ? `<h2>${localized('用途', 'Purpose')}</h2><p>${escapeHtml(item.description)}</p>` : ''}`;
+  if (pane.innerHTML !== markup) pane.innerHTML = markup;
+}
+
+function setSelectedProject(id, openDetail = false) {
+  if (selectedProjectId !== id) clearProjectFieldView();
+  selectedProjectId = id;
+  if (openDetail) $('#page-connections').dataset.detailOpen = 'true';
+  else if (!id) $('#page-connections').removeAttribute('data-detail-open');
+  for (const card of $$('.connection-card', $('#connections-list'))) {
+    const selected = card.dataset.itemId === id;
+    card.classList.toggle('project-selected', selected);
+    const button = $('.connection-name', card);
+    if (selected) button.setAttribute('aria-current', 'true');
+    else button.removeAttribute('aria-current');
+  }
+  renderProjectDetails();
+}
+
+async function selectProjectDetails(id) {
+  if (inlineEditorItemId && !await closeEditorWithDraft()) return;
+  if (!ownerLockState.unlocked || !state.connections.some(item => item.id === id)) return;
+  setSelectedProject(id, true);
+  if (matchMedia('(max-width: 760px)').matches) $('#project-detail-back').focus();
+}
+
+async function handleProjectFieldAction(button) {
+  const view = projectFieldView;
+  const id = button.closest('[data-field-id]').dataset.fieldId;
+  const item = state?.connections.find(entry => entry.id === view?.id);
+  const module = item?.modules.find(field => field.id === id);
+  if (!view || !module || !ownerLockState.unlocked || pendingProjectFields.has(id)) return;
+  const action = button.dataset.fieldAction;
+  const current = () => view === projectFieldView && ownerEpoch === view.epoch && ownerLockState.unlocked
+    && state.connections.find(entry => entry.id === view.id)?.updatedAt === view.updatedAt;
+  const focusAction = () => {
+    const row = $$('[data-field-id]', $('#project-detail-content')).find(element => element.dataset.fieldId === id);
+    row?.querySelector(`[data-field-action="${action}"]`)?.focus({ preventScroll: true });
+  };
+  if (action === 'reveal' && revealedProjectFields.delete(id)) {
+    renderProjectDetails();
+    focusAction();
+    return;
+  }
+  pendingProjectFields.add(id);
+  button.disabled = true;
+  try {
+    const secret = Boolean(module.secret || moduleHasPlaintextReveal(module.kind));
+    const value = secret
+      ? (await api.ownerSecrets(item.id)).fields.find(field => field.name === (moduleSecretName(module) || module.kind))?.value
+      : module.value;
+    if (!current()) return;
+    if (value === undefined || value === null || value === '') throw Error(localized('此字段没有可读取的值。', 'This field has no readable value.'));
+    if (action === 'reveal') revealedProjectFields.set(id, value);
+    else {
+      await api.copyOwnerValue(String(value), secret);
+      if (current()) toast(localized('已复制', 'Copied'));
+    }
+  } catch (error) {
+    if (current()) toast(cleanError(error), 'error');
+  } finally {
+    if (current()) {
+      pendingProjectFields.delete(id);
+      renderProjectDetails();
+      focusAction();
+    }
+  }
+}
+
+async function manageProjectFolder(operation) {
+  if (!state || !ownerLockState.unlocked || folderOperationPending) return;
+  const folder = currentFolderFilter.startsWith('folder:') ? currentFolderFilter.slice(7) : '';
+  if (operation !== 'create' && !projectFolderNames().includes(folder)) return;
+  const epoch = ownerEpoch;
+  if (operation === 'delete') {
+    const count = state.connections.filter(item => item.folder === folder).length;
+    if (!await confirmDestructiveAction({
+      title: localized(`删除文件夹“${folder}”？`, `Delete folder "${folder}"?`),
+      message: localized(`${count} 个项目将移到「未分组」。此文件夹的 Agent 写权限将撤销。`, `${count} items will move to Unfiled. The Agent write grant for this folder will be revoked.`),
+    }) || epoch !== ownerEpoch) return;
+    await saveProjectFolder(operation, folder, undefined, epoch);
+    return;
+  }
+  const dialog = $('#project-folder-dialog');
+  folderDialogState = { operation, folder, epoch };
+  $('#project-folder-title').textContent = operation === 'create' ? localized('新建文件夹', 'New folder') : localized('重命名文件夹', 'Rename folder');
+  $('#project-folder-submit').textContent = localized('保存', 'Save');
+  const input = $('#project-folder-name');
+  input.value = operation === 'rename' ? folder : '';
+  $('#project-folder-error').textContent = '';
+  dialog.showModal();
+  input.select();
+}
+
+async function saveProjectFolder(operation, folder, name, epoch) {
+  if (epoch !== ownerEpoch || folderOperationPending) return;
+  folderOperationPending = true;
+  $('#project-folder-submit').disabled = true;
+  $('#project-folder-cancel').disabled = true;
+  try {
+    if (!$('#connection-modal').classList.contains('hidden') && !await closeEditorWithDraft()) return;
+    if (epoch !== ownerEpoch) return;
+    await api.manageFolder(operation, operation === 'create' ? name : folder, operation === 'rename' ? name : undefined);
+    if (epoch !== ownerEpoch) return;
+    currentFolderFilter = operation === 'delete' ? 'unfiled' : `folder:${name}`;
+    $('#project-folder-dialog').close();
+    await refresh();
+    if (epoch === ownerEpoch) focusProjectFolder();
+  } catch (error) {
+    if (epoch !== ownerEpoch) return;
+    if ($('#project-folder-dialog').open) $('#project-folder-error').textContent = cleanError(error);
+    else toast(cleanError(error), 'error');
+  } finally {
+    folderOperationPending = false;
+    $('#project-folder-submit').disabled = false;
+    $('#project-folder-cancel').disabled = false;
+  }
+}
+
 function syncConnectionSearchControls(matchCount, editingOutsideFilters) {
   $('#connection-folder-filter-label').textContent = localized('文件夹', 'Folder');
   $('#connection-status-filter-label').textContent = localized('启用状态', 'Status');
 
-  const folders = [...new Set(state.connections.map(item => item.folder).filter(Boolean))];
-  // Keep a selected folder available when its last project is moved or removed.
-  if (currentFolderFilter.startsWith('folder:')) {
-    const selected = currentFolderFilter.slice('folder:'.length);
-    if (!folders.includes(selected)) folders.push(selected);
-  }
-  const folderOptions = [
-    ['all', localized('全部文件夹', 'All folders')],
-    ['unfiled', localized('未分组', 'Unfiled')],
-    ...folders.sort((a, b) => a.localeCompare(b, language)).map(name => [`folder:${name}`, name]),
-  ];
+  const folderOptions = projectFolderOptions();
+  renderProjectFolders(folderOptions);
   const statusOptions = [
     ['all', localized('全部状态', 'All statuses')],
     ['enabled', localized('已启用', 'Enabled')],
@@ -1081,7 +1304,10 @@ function matchesConnectionFilters(item, words) {
 function renderConnections() {
   if (itemPointerDrag || itemOrderSaving) return;
   const words = normalizeSearch(pageSearch.connections).split(/\s+/).filter(Boolean);
-  const signature = JSON.stringify([state.connections, pageSearch.connections, language, inlineEditorItemId, currentItemTypeFilter, currentFolderFilter, currentItemStatusFilter]);
+  if (currentFolderFilter.startsWith('folder:') && !projectFolderNames().includes(currentFolderFilter.slice(7))) {
+    currentFolderFilter = 'all';
+  }
+  const signature = JSON.stringify([state.connections, state.folders, pageSearch.connections, language, inlineEditorItemId, currentItemTypeFilter, currentFolderFilter, currentItemStatusFilter]);
   if (signature === renderedConnectionsSignature) return;
   renderedConnectionsSignature = signature;
   const matched = new Set(state.connections.filter(item => matchesConnectionFilters(item, words)).map(item => item.id));
@@ -1090,12 +1316,11 @@ function renderConnections() {
   const container = $('#connections-list');
   const editor = $('#connection-modal');
   const focusedEditorControl = editor.contains(document.activeElement) ? document.activeElement : null;
-  // Preserve the live form (and unsaved values) when language or list data refreshes.
-  if (container.contains(editor)) editorHome.after(editor);
   if (inlineEditorItemId && !state.connections.some(item => item.id === inlineEditorItemId)) closeEditor();
   if (!items.length) {
     const hasItems = state.connections.length > 0;
     container.innerHTML = `<div class="empty-state"><div><div class="empty-code">LOCAL VAULT</div><h3>${hasItems ? localized('没有匹配项目', 'NO MATCHING ITEMS') : localized('还没有秘密项目', 'NO VAULT ITEMS')}</h3><p>${hasItems ? localized('当前筛选没有结果。', 'No items match the current filters.') : localized('保存密码、Passkey、信用卡、身份资料和安全笔记，在需要时使用。', 'Keep passwords, passkeys, cards, identities and secure notes together.')}</p><button class="button primary" data-action="${hasItems ? 'clear-connection-filters' : 'add'}">${hasItems ? localized('清除筛选', 'CLEAR FILTERS') : localized('添加项目', 'ADD ITEM')}</button></div></div>`;
+    setSelectedProject(null);
     return;
   }
   container.innerHTML = items.map((item) => {
@@ -1109,14 +1334,14 @@ function renderConnections() {
     const agentActions = itemCapabilities(item).length > 0;
     const copyable = !item.certificateAuthority && item.itemType !== 'passkey' && !item.passkeys?.length;
     const copyLabel = localized('复制项目', 'Duplicate item');
-    const reorderLabel = localized(`${item.name}：单击展开或收起；拖动排序，或按上/下方向键`, `${item.name}: click to expand or collapse; drag to reorder, or use the Up/Down arrow keys`);
+    const reorderLabel = localized(`${item.name}：单击查看详情；拖动排序，或按上/下方向键`, `${item.name}: click to view details; drag to reorder, or use the Up/Down arrow keys`);
     const toggleLabel = item.enabled
       ? localized('停用此项目；Agent 将无法使用其中的秘密', 'Disable this item; agents will no longer be able to use its secrets')
       : localized('启用此项目；Agent 将可以使用其中的秘密', 'Enable this item so agents can use its secrets');
     return `<article class="connection-card ${itemCapabilities(item).includes('ssh') ? 'ssh' : itemCapabilities(item).includes('http') ? 'http' : 'fill'} ${item.enabled ? '' : 'disabled'}" data-item-id="${escapeHtml(item.id)}">
       <div class="item-disclosure-well"><button class="item-disclosure" type="button" data-action="edit" data-id="${item.id}" aria-expanded="false" aria-controls="connection-modal" aria-label="${escapeHtml(localized(`展开编辑 ${item.name}`, `Expand editor for ${item.name}`))}" title="${localized('展开编辑', 'Expand editor')}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button></div>
       <span class="connection-type" role="img" data-item-type="${itemDisplayKind(item)}" aria-label="${escapeHtml(type)}" title="${escapeHtml(type)}">${itemTypeIcon(itemDisplayKind(item))}</span>
-      <button class="connection-name" type="button" draggable="false" data-action="edit" data-id="${escapeHtml(item.id)}" data-item-reorder="${escapeHtml(item.id)}" aria-expanded="false" aria-controls="connection-modal" aria-label="${escapeHtml(reorderLabel)}" aria-keyshortcuts="Enter Space ArrowUp ArrowDown Home End" title="${escapeHtml(reorderLabel)}"><span class="lettering-ink">${escapeHtml(item.name)}</span></button>
+      <button class="connection-name" type="button" draggable="false" data-action="select-project" data-id="${escapeHtml(item.id)}" data-item-reorder="${escapeHtml(item.id)}" aria-controls="project-detail" aria-label="${escapeHtml(reorderLabel)}" aria-keyshortcuts="Enter Space ArrowUp ArrowDown Home End" title="${escapeHtml(reorderLabel)}"><span class="lettering-ink">${escapeHtml(item.name)}</span></button>
       <div class="card-actions" role="group" aria-label="${escapeHtml(item.name)}">
         <button class="module-state item-toggle" type="button" data-action="toggle-enabled" data-id="${item.id}" aria-pressed="${item.enabled}" title="${toggleLabel}" aria-label="${toggleLabel}"><i class="status-dot ${item.enabled ? '' : 'off'}" aria-hidden="true"></i></button>
         ${item.passwordHistoryCount ? `<button class="small-button" type="button" data-action="history" data-id="${item.id}">HISTORY</button>` : ''}
@@ -1130,6 +1355,7 @@ function renderConnections() {
     placeItemEditor();
     if (focusedEditorControl?.isConnected) focusedEditorControl.focus({ preventScroll: true });
   }
+  setSelectedProject(inlineEditorItemId || (items.some(item => item.id === selectedProjectId) ? selectedProjectId : items[0].id));
 }
 
 function draftSecretValues(secrets = {}) {
@@ -2151,13 +2377,13 @@ function placeItemEditor() {
   const editor = $('#connection-modal');
   const card = $$('.connection-card').find(card => card.dataset.itemId === inlineEditorItemId);
   if (card) {
-    card.appendChild(editor);
+    if (editor.parentElement !== $('#project-editor-slot')) $('#project-editor-slot').append(editor);
     card.classList.add('is-editing');
     const trigger = $('.item-disclosure', card);
     trigger.setAttribute('aria-expanded', 'true');
     trigger.setAttribute('aria-label', localized(`收起编辑 ${editorExistingItem.name}`, `Collapse editor for ${editorExistingItem.name}`));
     trigger.title = localized('收起编辑', 'Collapse editor');
-    $('.connection-name', card).setAttribute('aria-expanded', 'true');
+    setSelectedProject(inlineEditorItemId, true);
     editorReturnFocus = editorReturnFocus?.matches('.connection-name') ? $('.connection-name', card) : trigger;
   } else editorHome.after(editor);
   editor.classList.toggle('inline-editor', Boolean(card));
@@ -2192,9 +2418,10 @@ async function openEditor(item = null, draft = null) {
   if (editorOpening) return false;
   if (!ownerLockState.unlocked) return false;
   const epoch = ownerEpoch;
+  const launcher = document.activeElement;
   editorOpening = true;
+  renderProjectDetails();
   try {
-    const launcher = document.activeElement;
     const collapseCurrent = inlineEditorItemId && inlineEditorItemId === item?.id && !draft;
     if (!$('#connection-modal').classList.contains('hidden') && !await closeEditorWithDraft()) return false;
     if (collapseCurrent) return true;
@@ -2236,7 +2463,7 @@ async function openEditor(item = null, draft = null) {
     $('#connection-type').innerHTML = typeOptions('', source?.itemType || 'custom');
     value('#connection-folder', source?.folder);
     renderLoginUris(source?.loginUris || []);
-    $('#vault-folder-options').innerHTML = [...new Set(state.connections.map(i => i.folder).filter(Boolean))].map(f => `<option value="${escapeHtml(f)}"></option>`).join('');
+    $('#vault-folder-options').innerHTML = projectFolderNames().map(f => `<option value="${escapeHtml(f)}"></option>`).join('');
     $('#connection-enabled').checked = source?.enabled ?? true;
     updateEditorTitle();
     $('#template-picker').classList.toggle('hidden', Boolean(item || draft?.input?.modules?.length));
@@ -2269,7 +2496,10 @@ async function openEditor(item = null, draft = null) {
       });
     });
     return true;
-  } finally { editorOpening = false; }
+  } finally {
+    editorOpening = false;
+    renderProjectDetails();
+  }
 }
 
 function closeEditor() {
@@ -2289,6 +2519,7 @@ function closeEditor() {
   finishModulePointerDrag(false);
   $('#connection-modal').classList.add('hidden');
   setModuleMenu(false);
+  const editedItem = state?.connections.find(item => item.id === inlineEditorItemId);
   const card = $$('.connection-card').find(card => card.dataset.itemId === inlineEditorItemId);
   if (card) {
     card.classList.remove('is-editing');
@@ -2296,15 +2527,20 @@ function closeEditor() {
     trigger.setAttribute('aria-expanded', 'false');
     trigger.setAttribute('aria-label', localized(`展开编辑 ${editorExistingItem.name}`, `Expand editor for ${editorExistingItem.name}`));
     trigger.title = localized('展开编辑', 'Expand editor');
-    $('.connection-name', card).setAttribute('aria-expanded', 'false');
+
     if (!editorReturnFocus?.isConnected || !card.contains(editorReturnFocus)) editorReturnFocus = trigger;
   }
   inlineEditorItemId = null;
   placeItemEditor();
+  const words = normalizeSearch(pageSearch.connections).split(/\s+/).filter(Boolean);
+  if (editedItem && !matchesConnectionFilters(editedItem, words)) renderConnections();
+  else renderProjectDetails();
   editorSourceInput = null;
   editorOpenedFromDraft = false;
   editorInitialSnapshot = '';
-  if (editorReturnFocus?.isConnected && !editorReturnFocus.closest('.hidden')) editorReturnFocus.focus({ preventScroll: true });
+  if (editorReturnFocus?.getClientRects().length) editorReturnFocus.focus({ preventScroll: true });
+  else if ($('#project-detail-back').getClientRects().length) $('#project-detail-back').focus({ preventScroll: true });
+  else if (card && !card.isConnected) $('#connections-list').focus({ preventScroll: true });
   editorReturnFocus = null;
 }
 
@@ -2441,17 +2677,29 @@ function renderAgentWriteSettings() {
   $('#agent-write-enabled').disabled = agentWriteBusy;
   $('#agent-write-enabled').setAttribute('aria-label', $('#agent-write-label').textContent);
   $('#agent-write-status').textContent = !enabled ? localized('当前禁止写入', 'Writing is disabled') : !folders.length ? localized('尚未添加可写入的文件夹', 'No writable folders added') : localized('仅允许写入以下文件夹', 'Writing is limited to these folders');
-  $('#agent-write-folder').placeholder = localized('选择已有文件夹或输入新名称', 'Select a folder or enter a new name');
-  $('#agent-write-folder').setAttribute('aria-label', localized('可写入的文件夹', 'Writable folder'));
-  $('#agent-write-folder').disabled = agentWriteBusy;
+  const select = $('#agent-write-folder');
+  const available = projectFolderNames().filter(folder => !folders.includes(folder)).sort((a, b) => a.localeCompare(b, language));
+  const previous = select.value;
+  const placeholder = available.length ? localized('选择已有文件夹', 'Select an existing folder')
+    : localized('没有可添加的文件夹', 'No folders available');
+  const options = [['', placeholder], ...available.map(folder => [folder, folder])];
+  const existing = [...select.options];
+  if (options.length !== existing.length || options.some(([value, text], index) => existing[index].value !== value || existing[index].text !== text)) {
+    select.replaceChildren(...options.map(([value, text]) => new Option(text, value)));
+  }
+  select.value = available.includes(previous) ? previous : '';
+  select.setAttribute('aria-label', localized('可写入的文件夹', 'Writable folder'));
+  select.disabled = agentWriteBusy || !available.length;
   $('#agent-write-add').textContent = localized('＋ 添加文件夹', '+ Add folder');
-  $('#agent-write-add').disabled = agentWriteBusy;
+  $('#agent-write-add').disabled = agentWriteBusy || !select.value;
   $('#agent-write-folders').innerHTML = folders.map((folder, index) => `<div class="agent-client-row"><span class="agent-client-copy">${escapeHtml(folder)}</span><button type="button" class="button quiet" data-remove-write-folder="${index}" ${agentWriteBusy ? 'disabled' : ''}>${localized('移除', 'Remove')}</button></div>`).join('');
-  $('#agent-write-folder-options').innerHTML = [...new Set(state.connections.map(item => item.folder).filter(Boolean))].map(folder => `<option value="${escapeHtml(folder)}"></option>`).join('');
   $('#agent-write-boundary').textContent = localized('对连接本机的所有 Agent 生效，不限制客户端手动操作。移动时原、目标文件夹都必须可写。Agent 不能删除项目或修改字段可见性，写入结果不返回秘密。OCI 签名配置仍需在客户端编辑。', 'Applies to all Agents on this device, not manual edits. Moves require both folders. Agents cannot delete items or change field visibility. Write results contain no secrets. Edit OCI signing settings in the desktop client.');
 }
 async function saveAgentWriteSettings(patch) {
   if (agentWriteBusy) return;
+  if (Object.hasOwn(patch, 'agentWriteFolders')) {
+    patch = { ...patch, expectedAgentWriteFolders: [...(state.settings.agentWriteFolders || [])] };
+  }
   agentWriteBusy = true;
   renderAgentWriteSettings();
   try {
@@ -2469,10 +2717,7 @@ async function saveAgentWriteSettings(patch) {
 function addAgentWriteFolder() {
   const folder = $('#agent-write-folder').value.trim();
   const folders = state.settings.agentWriteFolders || [];
-  if (!folder || folders.includes(folder)) {
-    toast(localized('请输入非空且不重复的文件夹名称', 'Enter a nonempty, unique folder name'), 'error');
-    return;
-  }
+  if (!projectFolderNames().includes(folder) || folders.includes(folder)) return;
   return saveAgentWriteSettings({ agentWriteFolders: [...folders, folder] });
 }
 
@@ -2589,7 +2834,9 @@ async function setLanguage(next) {
 }
 
 function toastImportSummary(summary) {
-  toast(localized(`导入完成：新增 ${summary.added}，合并重复 ${summary.merged}`, `Import complete: ${summary.added} added, ${summary.merged} duplicates merged`));
+  const folders = summary.foldersAdded
+    ? localized(`，新增文件夹 ${summary.foldersAdded} 个`, `, ${summary.foldersAdded} folders added`) : '';
+  toast(localized(`导入完成：新增 ${summary.added}，合并重复 ${summary.merged}`, `Import complete: ${summary.added} added, ${summary.merged} duplicates merged`) + folders);
 }
 
 async function exportBackup(button) {
@@ -2632,22 +2879,27 @@ function backupRestoreSelection() {
 
 function updateBackupRestoreSelection() {
   const selected = backupRestoreSelection();
-  const { active, trash } = backupRestore.preview;
+  const { active, trash, folders = [] } = backupRestore.preview;
   const activeIds = new Set(selected.active);
   const missing = [...selected.active.map(index => active[index]), ...selected.trash.map(index => trash[index])]
     .find(row => row.jumpIndex != null && !activeIds.has(row.jumpIndex));
   const count = selected.active.length + selected.trash.length;
+  const folderCount = count === active.length + trash.length ? folders.length : 0;
   $('#backup-restore-status').textContent = missing
     ? localized(`「${missing.name}」需要同时选择跳板「${active[missing.jumpIndex].name}」。`, `Select jump host “${active[missing.jumpIndex].name}” for “${missing.name}”.`)
-    : localized(`已选择 ${count} 项`, `${count} selected`);
-  $('#backup-restore-confirm').disabled = Boolean(missing) || !count;
+    : folderCount ? localized(`已选择 ${count} 项和 ${folderCount} 个文件夹`, `${count} items and ${folderCount} folders selected`)
+      : localized(`已选择 ${count} 项`, `${count} selected`);
+  $('#backup-restore-confirm').disabled = Boolean(missing) || (!count && !folderCount);
 }
 
 function showBackupRestore(preview) {
   $('#backup-restore-title').textContent = localized('预览备份恢复', 'Preview backup restore');
-  $('#backup-restore-help').textContent = localized(
-    '仅恢复勾选的条目。内容不同的同名活动项目会以新名称添加。',
-    'Only checked entries will be restored. Active items with the same name and different content are added under a new name.');
+  const folderCount = preview.folders?.length || 0;
+  $('#backup-restore-help').textContent = folderCount ? localized(
+    `备份包含 ${folderCount} 个文件夹。选择全部项目和回收站条目时一并恢复文件夹。同名但内容不同的项目将改名。`,
+    `This backup contains ${folderCount} folders. Select all items and trash entries to also restore the folders. Items with the same name and different content will be renamed.`)
+    : localized('仅恢复勾选的条目。内容不同的同名活动项目会以新名称添加。',
+      'Only checked entries will be restored. Active items with the same name and different content are added under a new name.');
   for (const [key, label] of Object.entries({
     all: localized('全选', 'Select all'),
     none: localized('取消全选', 'Clear selection'),
@@ -3119,7 +3371,7 @@ $('#migration-batch-undo').onclick = async () => {
 
 document.addEventListener('click', async (event) => {
   if (event.target.closest('#title-search-toggle')) setTitleSearchOpen(!titleSearchOpen);
-  else if (titleSearchOpen && !event.target.closest('#title-search, [data-clear-item-filter], [data-action="clear-connection-filters"]')) setTitleSearchOpen(false, false);
+  else if (titleSearchOpen && !event.target.closest('#title-search, #connection-filter-panel, [data-clear-item-filter], [data-action="clear-connection-filters"]')) setTitleSearchOpen(false, false);
   const filterButton = event.target.closest('.filter-strip button');
   if (filterButton && !switchSelectionPending) await selectFilterButton(filterButton);
   const languageButton = event.target.closest('[data-language]');
@@ -3323,7 +3575,8 @@ document.addEventListener('click', async (event) => {
         await refresh();
       } catch (error) { toast(cleanError(error), 'error'); }
     }
-    if (action.dataset.action === 'edit') await openEditor(item);
+    if (action.dataset.action === 'edit' && item) await openEditor(item);
+    if (action.dataset.action === 'select-project' && item) await selectProjectDetails(item.id);
     if (action.dataset.action === 'history') await openVaultManagement('history', item.id);
     if (action.dataset.action === 'copy-name') {
       try {
@@ -3399,6 +3652,50 @@ document.addEventListener('click', async (event) => {
   }
 });
 
+$('#project-folders').addEventListener('click', event => {
+  const folder = event.target.closest('[data-project-folder]');
+  if (folder) {
+    currentFolderFilter = folder.dataset.projectFolder;
+    renderConnections();
+    focusProjectFolder();
+  }
+  const action = event.target.closest('[data-folder-action]');
+  if (action) void manageProjectFolder(action.dataset.folderAction);
+});
+$('#project-folder-cancel').addEventListener('click', () => $('#project-folder-dialog').close());
+$('#project-folder-dialog').addEventListener('cancel', event => {
+  if (folderOperationPending) event.preventDefault();
+});
+$('#project-folder-dialog').addEventListener('close', () => {
+  folderDialogState = null;
+  $('#project-folder-name').value = '';
+});
+$('#project-folder-form').addEventListener('submit', event => {
+  event.preventDefault();
+  if (!folderDialogState) return;
+  const { operation, folder, epoch } = folderDialogState;
+  const name = $('#project-folder-name').value.trim();
+  if (operation === 'rename' && name === folder) {
+    $('#project-folder-dialog').close();
+    return;
+  }
+  if (!name || projectFolderNames().includes(name)) {
+    $('#project-folder-error').textContent = localized('请输入非空且不重复的文件夹名称。', 'Enter a nonempty, unique folder name.');
+    return;
+  }
+  void saveProjectFolder(operation, folder, name, epoch);
+});
+$('#project-detail-content').addEventListener('click', event => {
+  const button = event.target.closest('[data-field-action]');
+  if (button) void handleProjectFieldAction(button);
+});
+$('#project-detail-back').addEventListener('click', async () => {
+  if (inlineEditorItemId && !await closeEditorWithDraft()) return;
+  clearProjectFieldView();
+  $('#page-connections').removeAttribute('data-detail-open');
+  renderProjectDetails();
+  ($('.connection-name[aria-current="true"]') || $('#connections-list')).focus();
+});
 $('#connection-folder-filter').addEventListener('change', event => {
   currentFolderFilter = event.target.value;
   renderConnections();
@@ -3488,7 +3785,7 @@ async function saveItemOrder(visibleOrder, expectedOrder, focusedId) {
 }
 
 function clearItemDropSeam() {
-  $$('.item-drop-before, .item-drop-after', itemList).forEach(row => row.classList.remove('item-drop-before', 'item-drop-after', 'item-drop-side'));
+  $$('.item-drop-before, .item-drop-after', itemList).forEach(row => row.classList.remove('item-drop-before', 'item-drop-after'));
 }
 
 function updateItemDropSeam() {
@@ -3502,22 +3799,6 @@ function updateItemDropSeam() {
   if (!drag.valid) return;
   const others = $$('.connection-card', itemList).filter(row => row !== drag.row);
   if (!others.length) return;
-  if (document.documentElement.dataset.itemLayout === 'grid') {
-    const singleColumn = getComputedStyle(itemList).gridTemplateColumns.trim().split(/\s+/).length === 1;
-    const targets = others.map(row => {
-      const rect = row.getBoundingClientRect();
-      const dx = Math.max(rect.left - drag.x, 0, drag.x - rect.right);
-      const dy = Math.max(rect.top - drag.y, 0, drag.y - rect.bottom);
-      const after = singleColumn || row.classList.contains('is-editing')
-        ? drag.y > rect.top + rect.height / 2
-        : drag.y < rect.top ? false : drag.y > rect.bottom ? true : drag.x > rect.left + rect.width / 2;
-      return { row, distance: dx * dx + dy * dy, after };
-    });
-    drag.target = targets.reduce((nearest, target) => target.distance < nearest.distance ? target : nearest);
-    drag.target.row.classList.add(drag.target.after ? 'item-drop-after' : 'item-drop-before');
-    drag.target.row.classList.toggle('item-drop-side', !singleColumn && !drag.target.row.classList.contains('is-editing'));
-    return;
-  }
   const seams = others.map(row => ({ row, after: false, y: row.getBoundingClientRect().top }));
   seams.push({ row: others.at(-1), after: true, y: others.at(-1).getBoundingClientRect().bottom });
   drag.target = seams.reduce((nearest, seam) => Math.abs(drag.y - seam.y) < Math.abs(drag.y - nearest.y) ? seam : nearest);
@@ -3661,7 +3942,7 @@ function positionModuleDragPreview(clientX, clientY) {
 }
 
 function autoScrollModuleEditor(clientY) {
-  const scroller = inlineEditorItemId ? $('#connections-list') : $('.form-scroll', $('#connection-modal'));
+  const scroller = inlineEditorItemId ? $('#project-detail') : $('.form-scroll', $('#connection-modal'));
   if (!scroller) return;
   const bounds = scroller.getBoundingClientRect();
   if (clientY < bounds.top + 34) scroller.scrollTop -= 12;
@@ -3766,7 +4047,7 @@ document.addEventListener('paste', (event) => {
 });
 
 document.addEventListener('keydown', (event) => {
-  if (totpQrImport) return;
+  if ($('#project-folder-dialog').open || totpQrImport) return;
   if (apiServicePicker) {
     if (event.key === 'Escape') { event.preventDefault(); closeApiServicePicker(); return; }
     if (event.key === 'Tab') {
@@ -3851,12 +4132,13 @@ document.addEventListener('keydown', (event) => {
     if (event.key === 'ArrowRight' && index < inputs.length - 1) { event.preventDefault(); inputs[index + 1].focus(); return; }
   }
   const filterButton = event.target.closest?.('.filter-strip button');
-  if (filterButton && !switchSelectionPending && ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+  const verticalFilterKey = filterButton?.closest('#item-type-switch') && ['ArrowUp', 'ArrowDown'].includes(event.key);
+  if (filterButton && !switchSelectionPending && (verticalFilterKey || ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key))) {
     event.preventDefault();
     const strip = filterButton.closest('.filter-strip');
     const buttons = $$('button', strip);
     const index = buttons.findIndex(button => button.getAttribute('aria-pressed') === 'true');
-    const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (index + (event.key === 'ArrowLeft' ? -1 : 1) + buttons.length) % buttons.length;
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (index + (['ArrowLeft', 'ArrowUp'].includes(event.key) ? -1 : 1) + buttons.length) % buttons.length;
     void selectFilterButton(buttons[next]).then(() => $('[aria-pressed="true"]', strip).focus());
     return;
   }
@@ -3870,7 +4152,7 @@ document.addEventListener('keydown', (event) => {
     return;
   }
   if (event.key === 'Escape') {
-    const search = event.target.closest?.('#title-search') ? $('#title-search-input') : null;
+    const search = event.target.closest?.('#title-search, #connection-filter-panel') ? $('#title-search-input') : null;
     if (search?.value) {
       const page = search.dataset.pageSearch;
       search.value = '';
@@ -3881,7 +4163,7 @@ document.addEventListener('keydown', (event) => {
       event.preventDefault();
       return;
     }
-    if (event.target.closest?.('#title-search')) { event.preventDefault(); setTitleSearchOpen(false); }
+    if (event.target.closest?.('#title-search, #connection-filter-panel')) { event.preventDefault(); setTitleSearchOpen(false); }
   }
 });
 
@@ -4125,7 +4407,7 @@ for (const event of ['pointerdown', 'keydown', 'wheel']) {
 }
 window.addEventListener('resize', positionModuleMenu);
 $('.form-scroll', $('#connection-modal')).addEventListener('scroll', positionModuleMenu, { passive: true });
-$('#connections-list').addEventListener('scroll', positionModuleMenu, { passive: true });
+$('#project-detail').addEventListener('scroll', positionModuleMenu, { passive: true });
 setInterval(() => { if ($('#page-activity').classList.contains('active')) refresh(false); }, 2000);
 setInterval(() => { if (!document.hidden && $('#connection-modal').classList.contains('hidden') && $('#page-connections').classList.contains('active')) refresh(false); }, 2000);
 let extensionDragStart = null, extensionDragBusy = false;
@@ -4152,7 +4434,9 @@ bootstrap();
 
 $('#agent-write-enabled').addEventListener('change', () => saveAgentWriteSettings({agentWriteEnabled: $('#agent-write-enabled').checked}));
 $('#agent-write-add').addEventListener('click', addAgentWriteFolder);
-$('#agent-write-folder').addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); addAgentWriteFolder(); } });
+$('#agent-write-folder').addEventListener('change', event => {
+  $('#agent-write-add').disabled = agentWriteBusy || !event.target.value;
+});
 $('#agent-write-folders').addEventListener('click', event => {
   const button = event.target.closest('[data-remove-write-folder]');
   if (button) saveAgentWriteSettings({agentWriteFolders: (state.settings.agentWriteFolders || []).filter((_, index) => index !== Number(button.dataset.removeWriteFolder))});

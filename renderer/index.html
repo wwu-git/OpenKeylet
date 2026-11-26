@@ -12,6 +12,7 @@
     <link rel="stylesheet" href="bricktone-light.css" />
     <link rel="stylesheet" href="bricktone-appearance.css" />
     <link rel="stylesheet" href="readability.css" />
+    <link rel="stylesheet" href="project-workspace.css" />
     <script src="appearance.js"></script>
   </head>
   <body>
@@ -87,17 +88,6 @@
           <svg class="search-close-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12m0-12L6 18"/></svg>
         </button>
         <input id="title-search-input" class="page-search-input" data-page-search="connections" type="search" placeholder="Search items…" aria-label="Search vault items" autocomplete="off" hidden />
-        <div id="connection-filter-panel" hidden>
-          <div class="connection-filter-fields">
-            <label><span id="connection-folder-filter-label">Folder</span><select id="connection-folder-filter"></select></label>
-            <label><span id="connection-status-filter-label">Status</span><select id="connection-status-filter"></select></label>
-          </div>
-          <div id="connection-filter-chips"></div>
-          <div class="connection-search-summary">
-            <span id="connection-result-count" role="status" aria-atomic="true"></span>
-            <button type="button" class="button quiet" id="connection-clear-all" data-action="clear-connection-filters" hidden>Clear all</button>
-          </div>
-        </div>
       </div>
       <div class="title-tools" data-tauri-drag-region="false">
       <button class="title-switch" id="theme-toggle" type="button" role="switch" aria-checked="false" aria-label="Light mode" title="Switch to light mode">
@@ -133,17 +123,40 @@
         <div class="metric-grid" id="metrics"></div>
 
         <section class="page active" id="page-connections">
-          <header class="page-header connections-header">
-            <div class="filter-strip item-type-switch" id="item-type-switch" role="group" aria-label="Item type filter"></div>
-            <div class="creation-control command-well" data-mode="add" role="group" aria-label="Add or continue a draft">
-              <div class="creation-options">
-                <button class="creation-option" id="add-connection-button" type="button" aria-pressed="true">＋ Add</button>
-                <button class="creation-option" id="drafts-button" type="button" aria-pressed="false" disabled>Draft</button>
-              </div>
-              <button class="draft-delete-button hidden" id="delete-draft-button" type="button" aria-label="Delete draft" title="Delete draft">×</button>
+          <div id="connection-filter-panel" hidden>
+            <div class="connection-filter-fields">
+              <label><span id="connection-folder-filter-label">Folder</span><select id="connection-folder-filter"></select></label>
+              <label><span id="connection-status-filter-label">Status</span><select id="connection-status-filter"></select></label>
             </div>
-          </header>
-          <div class="list-well"><div class="connections-grid" id="connections-list" tabindex="0" aria-label="Vault items"></div></div>
+            <div id="connection-filter-chips"></div>
+            <div class="connection-search-summary">
+              <span id="connection-result-count" role="status" aria-atomic="true"></span>
+              <button type="button" class="button quiet" id="connection-clear-all" data-action="clear-connection-filters" hidden>Clear all</button>
+            </div>
+          </div>
+          <div class="list-well project-workspace">
+            <nav id="project-sidebar" class="project-sidebar" aria-label="Project navigation">
+              <div class="creation-control command-well" data-mode="add" role="group" aria-label="Add or continue a draft">
+                <div class="creation-options">
+                  <button class="creation-option" id="add-connection-button" type="button" aria-pressed="true">＋ Add</button>
+                  <button class="creation-option" id="drafts-button" type="button" aria-pressed="false" disabled>Draft</button>
+                </div>
+                <button class="draft-delete-button hidden" id="delete-draft-button" type="button" aria-label="Delete draft" title="Delete draft">×</button>
+              </div>
+              <h2 id="project-type-heading">Categories</h2>
+              <div class="filter-strip item-type-switch" id="item-type-switch" role="group" aria-label="Item type filter"></div>
+              <section id="project-folders">
+                <div class="project-folder-heading"><h2 id="project-folder-heading">Folders</h2><button type="button" class="project-folder-add" data-folder-action="create" aria-label="New folder">＋</button></div>
+                <div id="project-folder-list"></div>
+              </section>
+            </nav>
+            <div class="connections-grid" id="connections-list" tabindex="0" aria-label="Vault items"></div>
+            <section id="project-detail" class="project-detail" aria-label="Project details">
+              <button type="button" class="button quiet project-detail-back" id="project-detail-back">‹ Back to projects</button>
+              <div id="project-detail-content"></div>
+              <div id="project-editor-slot"></div>
+            </section>
+          </div>
           <span id="item-reorder-status" class="module-reorder-status" aria-live="polite" aria-atomic="true"></span>
         </section>
 
@@ -181,7 +194,7 @@
               <div class="settings-heading"><div><h2 id="agent-write-title">Vault write permissions</h2><p id="agent-write-description"></p></div></div>
               <div class="desktop-option"><span><strong id="agent-write-label">Allow Agent to create and edit items</strong><small id="agent-write-status" aria-live="polite"></small></span><label class="switch"><input type="checkbox" id="agent-write-enabled" aria-label="Allow Agent writes" /><span></span></label></div>
               <div id="agent-write-folders" class="agent-client-list"></div>
-              <div class="agent-write-add-row"><input id="agent-write-folder" list="agent-write-folder-options" maxlength="120" aria-label="Writable folder" /><datalist id="agent-write-folder-options"></datalist><button type="button" class="button secondary" id="agent-write-add">Add folder</button></div>
+              <div class="agent-write-add-row"><select class="input" id="agent-write-folder" aria-label="Writable folder"></select><button type="button" class="button secondary" id="agent-write-add">Add folder</button></div>
               <p id="agent-write-boundary" class="agent-write-boundary"></p>
             </section>
 
@@ -199,7 +212,6 @@
               <div class="settings-heading"><div><h2>Appearance, window and lock</h2><p>Adjust text size, window behavior and the local PIN lock.</p></div></div>
               <div class="desktop-options">
                 <label class="desktop-option" for="text-size"><span><strong id="text-size-label">Text size</strong></span><select class="input" id="text-size"><option value="standard">Standard</option><option value="large">Large</option></select></label>
-                <label class="desktop-option" for="item-layout"><span><strong id="item-layout-label">Item layout</strong><small id="item-layout-help">Saved on this device</small></span><select class="input" id="item-layout"><option value="list">List</option><option value="grid">Grid</option></select></label>
                 <label class="desktop-option" for="close-behavior"><span><strong>Close button</strong><small>Minimize to keep the tray menu available</small></span><select class="input" id="close-behavior"><option value="tray">Minimize to tray</option><option value="exit">Quit OpenKeylet</option></select></label>
                 <div class="desktop-option pin-option"><span><strong>PIN lock</strong><small>Turning this off removes the current PIN; set a new PIN when you turn it on again</small></span><label class="switch"><input type="checkbox" id="pin-enabled" /><span></span></label></div>
               </div>
@@ -461,6 +473,14 @@
         </div>
       </div>
     </div>
+    <dialog id="project-folder-dialog" aria-labelledby="project-folder-title">
+      <form id="project-folder-form">
+        <h2 id="project-folder-title"></h2>
+        <label class="field"><span id="project-folder-name-label">Folder name</span><input class="input" id="project-folder-name" maxlength="120" autocomplete="off" required /></label>
+        <p id="project-folder-error" role="alert"></p>
+        <div class="button-row"><button type="button" class="button quiet" id="project-folder-cancel">Cancel</button><button type="submit" class="button primary" id="project-folder-submit">Save</button></div>
+      </form>
+    </dialog>
     <div class="toast-region" id="toast-region" aria-live="polite"></div>
     <script src="lettering.js"></script>
     <script src="github-backup.js"></script>

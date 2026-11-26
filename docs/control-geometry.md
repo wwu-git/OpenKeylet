@@ -62,29 +62,19 @@ have at least 4.5:1 contrast against their well. The interaction suite also chec
 caption updates after dragging, Space and Enter, shared ordinary-action ink,
 distinct destructive-action ink and unchanged floor material across states.
 
-## Item list and grid
+## Project workspace
 
-Settings > Appearance, window and lock > Item layout switches between List and
-Grid. List is the default. The choice belongs to this device's local appearance
-preferences, alongside theme and text size. It does not change the vault or MCP.
+The project workspace places category and folder filters beside the item list and
+selected project. Select a project by name to read its details. Use its disclosure
+button or Edit to open the existing editor. The field visibility icon reflects the
+saved Agent setting. Change that setting in the editor.
 
-Both layouts use the same item cards, actions, filters and saved order. Grid
-columns adapt to the available width. An expanded editor spans the full row.
-Click the item name or its arrow to expand or collapse the editor. Enter and
-Space also toggle the focused name. Drag the name to reorder items, or use the
-Up, Down, Home and End keys. Reordering does not toggle the editor.
-Changing the layout preserves the live form and its unsaved values. Grid cards
-show the existing name, type, enabled state and actions without extra secrets or
-address summaries.
+Drag a project name to reorder the list, or use Up, Down, Home, and End on the
+focused name. Reordering filtered items preserves the hidden items' slots.
 
-Pointer sorting in the grid uses both coordinates. Keyboard sorting retains the
-logical item order. Reordering filtered items retains the hidden items' slots.
-
-Run `OPENKEYLET_TEST_CHROME=chrome node scripts/test-inline-editor.mjs --grid`
-for the isolated grid regression. It uses simulated items, not the user's vault.
-Run the same script with `--grid-editor` to check expanded editor height,
-following-card placement and footer access with 81 simulated items.
-The `--editor-footer` check verifies full button containment and corner hit
-testing in list, grid and new-item editors, including narrow windows and large text.
+Run `OPENKEYLET_TEST_CHROME=chrome node scripts/test-inline-editor.mjs --project-detail`
+to check the project list and details with synthetic data. The `--editor-footer`
+check verifies button containment and corner hit testing for existing and new
+projects, including narrow windows and large text.
 The `--key-actions` check verifies single-line private key action labels in
 configured and pending states, plus public-key copy and replacement cancellation.

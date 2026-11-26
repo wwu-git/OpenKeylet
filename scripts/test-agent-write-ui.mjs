@@ -22,8 +22,8 @@ try {
   const page = await browser.newPage({viewport:{width:690,height:1000}});
   const errors = []; page.on("pageerror",e=>errors.push(e.message));
   await page.addInitScript(() => {
-    const state = {settings:{language:"zh",closeBehavior:"tray",browserEnabled:true,browserPort:39272},connections:[],activities:[],mcp:{status:"ready",endpoint:"fixture",stdioCommand:"fixture"},browserBridge:{status:"listening",enabled:true,connected:true,paired:true,endpoint:"fixture"},security:{encrypted:true,storage:"fixture"}};
-    window.fixture = {saved:[],drafts:[],exports:[],copies:[],imports:[],trash:[],history:[{password:"synthetic-previous-password",changedAt:"2026-01-01T00:00:00Z"}],state};
+    const state = {settings:{language:"zh",closeBehavior:"tray",browserEnabled:true,browserPort:39272},folders:[],connections:[],activities:[],mcp:{status:"ready",endpoint:"fixture",stdioCommand:"fixture"},browserBridge:{status:"listening",enabled:true,connected:true,paired:true,endpoint:"fixture"},security:{encrypted:true,storage:"fixture"}};
+    window.fixture = {saved:[],drafts:[],exports:[],copies:[],imports:[],trash:[],settingsWrites:0,history:[{password:"synthetic-previous-password",changedAt:"2026-01-01T00:00:00Z"}],state};
     window.__TAURI__ = {event:{listen:async()=>()=>{}},core:{invoke:async(command,args={}) => {
       if(command==="get_state") return structuredClone(state);
       if(command==="owner_status") return {pinConfigured:false,unlocked:true};
@@ -36,7 +36,21 @@ try {
       if(command==="delete_editor_draft") {fixture.drafts=fixture.drafts.filter(d=>d.id!==args.id);return;}
       if(command==="github_backup_status") return {connected:false};
       if(command==="system_integration_status") return {desktopShortcut:false,launchAtLogin:false};
-      if(command==="update_settings") {Object.assign(state.settings,args.patch);return state.settings;}
+      if(command==="update_settings") {
+        fixture.settingsWrites++;
+        const {expectedAgentWriteFolders,...patch}=args.patch;
+        if(patch.agentWriteFolders&&JSON.stringify(expectedAgentWriteFolders)!==JSON.stringify(state.settings.agentWriteFolders||[]))throw Error('Stale folder grant list');
+        Object.assign(state.settings,patch);return state.settings;
+      }
+      if(command==="manage_folder") {
+        const {operation,folder,newName}=args;
+        if(operation==='create')state.folders.push(folder);
+        else {
+          state.folders=state.folders.flatMap(name=>name!==folder?[name]:operation==='rename'?[newName]:[]);
+          state.settings.agentWriteFolders=(state.settings.agentWriteFolders||[]).flatMap(name=>name!==folder?[name]:operation==='rename'?[newName]:[]);
+          for(const item of state.connections)if(item.folder===folder)item.folder=operation==='rename'?newName:'';
+        }
+      }
       if(command==="save_connection") {
         fixture.saved.push(structuredClone(args.input));
         const item = {...args.input,id:String(fixture.saved.length),updatedAt:new Date().toISOString(),capabilities:[],passkeys:[],secret:{fields:[]},modules:args.input.modules.map(m=>({...m,secret:true,configured:true,value:""}))};
@@ -74,8 +88,16 @@ try {
   await page.locator('[data-page="settings"]').click();
   assert.equal(await page.locator('#agent-write-enabled').count(),1);
   assert.equal(await page.locator('#agent-write-enabled').isChecked(),false);
-  await page.locator('#agent-write-folder').fill('Agent 管理');
-  await page.locator('#agent-write-add').click();
+  const selector = page.locator('#agent-write-folder');
+  const addFolder = page.locator('#agent-write-add');
+  assert.equal(await selector.evaluate(element=>element.tagName),'SELECT');
+  assert.equal(await selector.isDisabled(),true);
+  assert.equal(await addFolder.isDisabled(),true);
+  await page.evaluate(async()=>{fixture.state.folders=['Agent 管理','开发'];await refresh();});
+  assert.equal(await selector.isEnabled(),true);
+  assert.equal(await addFolder.isDisabled(),true);
+  await selector.selectOption('Agent 管理');
+  await addFolder.click();
   await page.waitForFunction(()=>fixture.state.settings.agentWriteFolders?.includes('Agent 管理'));
   await page.locator('label:has(#agent-write-enabled)').click();
   await page.waitForFunction(()=>fixture.state.settings.agentWriteEnabled===true);
@@ -86,15 +108,56 @@ try {
   await page.locator('[data-remove-write-folder]').click();
   await page.waitForFunction(()=>fixture.state.settings.agentWriteFolders.length===0);
   assert.match(await page.locator('#agent-write-status').textContent(),/尚未添加/);
-  // Reject duplicate/empty entries before submitting settings.
-  await page.locator('#agent-write-folder').fill('   ');
-  await page.locator('#agent-write-add').click();
-  assert.deepEqual(await page.evaluate(()=>fixture.state.settings.agentWriteFolders),[]);
-  await page.locator('#agent-write-folder').fill('开发');
-  await page.locator('#agent-write-add').click();
+  assert.equal(await addFolder.isDisabled(),true);
+  await selector.selectOption('开发');
+  await addFolder.click();
   await page.waitForFunction(()=>fixture.state.settings.agentWriteFolders.length===1);
-  await page.locator('#agent-write-folder').fill(' 开发 ');
-  await page.locator('#agent-write-add').click();
+  assert.equal(await selector.locator('option[value="开发"]').count(),0);
+  const writes = await page.evaluate(()=>fixture.settingsWrites);
+  for(const name of ['不存在','开发']) {
+    await selector.evaluate((element,value)=>element.add(new Option(value,value)),name);
+    await selector.selectOption(name);
+    await addFolder.click();
+    assert.equal(await page.evaluate(()=>fixture.settingsWrites),writes);
+  }
+  assert.deepEqual(await page.evaluate(()=>fixture.state.settings.agentWriteFolders),['开发']);
+  await page.locator('[data-page="connections"]').click();
+  const sidebar = page.locator('#project-sidebar');
+  const folders = page.locator('#project-folders');
+  const dialog = page.locator('#project-folder-dialog');
+  const addNew = async name => {
+    await sidebar.locator('[data-folder-action="create"]').click();
+    await dialog.locator('#project-folder-name').fill(name);
+    await dialog.locator('[type="submit"]').click();
+    await folders.locator(`[data-project-folder="folder:${name}"]`).waitFor();
+  };
+  await addNew('空文件夹');
+  await page.locator('[data-page="settings"]').click();
+  await selector.selectOption('空文件夹');
+  await addFolder.click();
+  await page.waitForFunction(()=>fixture.state.settings.agentWriteFolders.includes('空文件夹'));
+  await page.evaluate(async()=>{
+    fixture.state.connections.push({id:'folder-member',name:'合成项目',folder:'空文件夹',itemType:'custom',enabled:true,modules:[],capabilities:[],description:'',updatedAt:'fixture'});
+    await refresh();
+  });
+  await page.locator('[data-page="connections"]').click();
+  await folders.locator('[data-project-folder="folder:空文件夹"]').click();
+  await sidebar.locator('[data-folder-action="rename"]').click();
+  await dialog.locator('#project-folder-name').fill('重命名后的空文件夹');
+  await dialog.locator('[type="submit"]').click();
+  await folders.locator('[data-project-folder="folder:重命名后的空文件夹"]').waitFor();
+  await folders.locator('[data-project-folder="folder:重命名后的空文件夹"]').click();
+  await sidebar.locator('[data-folder-action="delete"]').click();
+  await page.locator('#confirmation-cancel').click();
+  assert.equal(await folders.locator('[data-project-folder="folder:重命名后的空文件夹"]').count(),1);
+  await sidebar.locator('[data-folder-action="delete"]').click();
+  await page.locator('#confirmation-accept').click();
+  await folders.locator('[data-project-folder="folder:重命名后的空文件夹"]').waitFor({state:'detached'});
+  await folders.locator('[data-project-folder="unfiled"]').click();
+  assert.equal(await page.locator('[data-item-id="folder-member"]').count(),1);
+  await addNew('重命名后的空文件夹');
+  await page.locator('[data-page="settings"]').click();
+  assert.equal(await selector.locator('option[value="重命名后的空文件夹"]').count(),1);
   assert.deepEqual(await page.evaluate(()=>fixture.state.settings.agentWriteFolders),['开发']);
   await page.waitForFunction(()=>document.querySelectorAll('#toast-region .toast').length===0);
   await page.locator('#agent-write-panel').screenshot({path:path.join(artifacts,'write-settings.png')});

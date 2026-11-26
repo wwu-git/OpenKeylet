@@ -2,14 +2,13 @@
 (() => {
   document.documentElement.classList.toggle('platform-linux', navigator.platform.startsWith('Linux'));
   const storageKey = 'openkeylet.appearance.v1';
-  let preferences = { theme: 'dark', sound: false, textSize: 'standard', itemLayout: 'list' };
+  let preferences = { theme: 'dark', sound: false, textSize: 'standard' };
   try {
     const saved = JSON.parse(localStorage.getItem(storageKey) || 'null');
-    preferences = { theme: saved?.theme === 'light' ? 'light' : 'dark', sound: saved?.sound === true, textSize: saved?.textSize === 'large' ? 'large' : 'standard', itemLayout: saved?.itemLayout === 'grid' ? 'grid' : 'list' };
+    preferences = { theme: saved?.theme === 'light' ? 'light' : 'dark', sound: saved?.sound === true, textSize: saved?.textSize === 'large' ? 'large' : 'standard' };
   } catch { /* Unavailable storage leaves safe defaults. */ }
   document.documentElement.dataset.theme = preferences.theme;
   document.documentElement.dataset.textSize = preferences.textSize;
-  document.documentElement.dataset.itemLayout = preferences.itemLayout;
   let localize = (zh, en) => en;
   let context;
   let lastSoundAt = -Infinity;
@@ -17,11 +16,8 @@
   function render() {
     document.documentElement.dataset.theme = preferences.theme;
     document.documentElement.dataset.textSize = preferences.textSize;
-    document.documentElement.dataset.itemLayout = preferences.itemLayout;
     const size = document.getElementById('text-size');
     if (size) size.value = preferences.textSize;
-    const layout = document.getElementById('item-layout');
-    if (layout) layout.value = preferences.itemLayout;
     const theme = document.getElementById('theme-toggle');
     const sound = document.getElementById('sound-toggle');
     if (!theme || !sound) return;
@@ -83,10 +79,6 @@
     feedback() { void playClick(); },
   };
   document.addEventListener('DOMContentLoaded', () => {
-    document.getElementById('item-layout')?.addEventListener('change', event => {
-      preferences.itemLayout = event.target.value === 'grid' ? 'grid' : 'list';
-      save();
-    });
     document.getElementById('text-size')?.addEventListener('change', event => {
       preferences.textSize = event.target.value === 'large' ? 'large' : 'standard';
       save();

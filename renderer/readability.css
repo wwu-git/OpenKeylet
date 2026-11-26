@@ -104,40 +104,7 @@ html[lang] .modal-card .field > span {
 }
 .key-source-options { max-width: min(320px, 74vw); min-width: 170px; }
 .key-source-options > button { white-space: normal; }
-.desktop-option > :is(#text-size, #item-layout) { min-height: var(--reading-control); }
-
-html[data-item-layout="grid"] #connections-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
-  grid-auto-rows: max-content;
-  align-content: start;
-  align-items: start;
-}
-html[data-item-layout="grid"] #connections-list > :is(.empty-state, .is-editing) { grid-column: 1 / -1; }
-html[data-item-layout="grid"] .connection-card:not(.is-editing) {
-  grid-template-areas: "disclosure type name" "actions actions actions";
-  grid-template-columns: var(--compact-control-height) var(--compact-control-height) minmax(0, 1fr);
-  min-height: 110px;
-  row-gap: 10px;
-  padding: 10px;
-}
-html[data-item-layout="grid"] .connection-card:not(.is-editing) .connection-name {
-  height: auto;
-  min-height: calc(2 * var(--reading-text) * 1.35);
-  white-space: normal;
-  line-height: 1.35;
-  padding: 5px 8px;
-}
-html[data-item-layout="grid"] .connection-card:not(.is-editing) .connection-name > .lettering-ink {
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-html[data-item-layout="grid"] .connection-card:not(.is-editing) .card-actions { justify-self: stretch; flex-wrap: wrap; justify-content: flex-end; }
-html[data-item-layout="grid"] #connections-list.is-reordering > .connection-card.item-drop-side::before { inset: 4px auto 4px -4px; width: 2px; height: auto; }
-html[data-item-layout="grid"] #connections-list.is-reordering > .connection-card.item-drop-side.item-drop-after::before { left: auto; right: -4px; }
+.desktop-option > #text-size { min-height: var(--reading-control); }
 
 @media (max-width: 560px) {
   #connection-modal .field-grid.two { grid-template-columns: minmax(0, 1fr); }

@@ -399,10 +399,13 @@ window.OpenKeyletGithubBackup = {
       const { snapshot, createdAt, items } = preview;
       const backupTime = new Date(createdAt).toLocaleString(document.documentElement.lang);
       const count = items.active.length + items.trash.length;
+      const folders = items.folders?.length || 0;
+      const selection = folders ? localized(`共 ${count} 项和 ${folders} 个文件夹。`, `${count} items and ${folders} folders total.`)
+        : localized(`共 ${count} 项。`, `${count} total.`);
       const accepted = await confirmAction({
         title: localized('云端恢复预览', 'Cloud restore preview'),
-        message: localized(`备份于 ${backupTime} 创建，共 ${count} 项。确认后合并整份备份。相同项目会跳过，同名但内容不同的项目会另存。`,
-          `Backup from ${backupTime}. ${count} total. Confirm to merge the entire backup. Identical items are skipped. Items with the same name and different contents are saved separately.`),
+        message: localized(`备份于 ${backupTime} 创建，${selection}确认后合并整份备份。相同项目会跳过，同名但内容不同的项目会另存。`,
+          `Backup from ${backupTime}. ${selection} Confirm to merge the entire backup. Identical items are skipped. Items with the same name and different contents are saved separately.`),
         details: restorePreviewDetails(items), returnFocus, destructive: false,
         acceptLabel: localized('恢复并合并', 'RESTORE & MERGE'),
         tag: '',
@@ -410,7 +413,9 @@ window.OpenKeyletGithubBackup = {
       if (!accepted || epoch !== secretEpoch || !isUnlocked()) return;
       await operate(async () => {
         const result = await invoke('github_backup_restore', { snapshot }); status = result.status;
-        toast(localized(`恢复完成：新增 ${result.summary.added}，跳过重复 ${result.summary.merged}`, `Restored: ${result.summary.added} added, ${result.summary.merged} duplicates skipped`));
+        const folders = result.summary.foldersAdded
+          ? localized(`，新增文件夹 ${result.summary.foldersAdded} 个`, `, ${result.summary.foldersAdded} folders added`) : '';
+        toast(localized(`恢复完成：新增 ${result.summary.added}，跳过重复 ${result.summary.merged}`, `Restored: ${result.summary.added} added, ${result.summary.merged} duplicates skipped`) + folders);
         await onRestore();
       });
     });

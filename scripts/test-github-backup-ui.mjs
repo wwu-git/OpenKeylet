@@ -15,7 +15,7 @@ const server=http.createServer(async(req,res)=>{
   catch{res.writeHead(404);res.end();}
 });
 server.listen(0,"127.0.0.1");await once(server,"listening");
-const browser=await chromium.launch({headless:true,executablePath:process.env.OPENKEYLET_TEST_CHROMIUM || undefined});
+const browser=await chromium.launch({headless:true,channel:process.env.OPENKEYLET_TEST_CHROME || undefined,executablePath:process.env.OPENKEYLET_TEST_CHROMIUM || undefined});
 try{
   const page=await browser.newPage({viewport:{width:460,height:690}});
   const errors=[];page.on("pageerror",error=>errors.push(error.message));
@@ -54,14 +54,14 @@ try{
           snapshot:{repositoryId:"7",branch:"main",sha:revision.repeat(40)},
           createdAt:"2026-10-20T00:00:00Z",
           items:{active:[{name:revision==="a"?"<b>Shared login</b>":"Updated login",itemType:"login",folder:"Work",nameConflict:revision==="a"}],
-            trash:[{name:"Old login",itemType:"constructor",folder:"",nameConflict:false}]},
+            trash:[{name:"Old login",itemType:"constructor",folder:"",nameConflict:false}],folders:["Empty fixture folder"]},
         };
       }
       if(command==="github_backup_restore"){
         fixture.restoreAttempts.push(structuredClone(args.snapshot));
         if(args.snapshot?.sha!==fixture.revision.repeat(40))throw Error("GITHUB_RESTORE_PREVIEW_STALE");
         fixture.restores++;fixture.status.needsRestore=false;fixture.status.lastRestoreAt="2026-10-20T00:00:00Z";
-        return {status:structuredClone(fixture.status),summary:{added:2,merged:1}};
+        return {status:structuredClone(fixture.status),summary:{added:2,merged:1,foldersAdded:1}};
       }
       if(command==="github_backup_disconnect"){fixture.status={connected:false};return structuredClone(fixture.status);}
       return {};
@@ -125,7 +125,7 @@ try{
   await page.locator("#github-restore").click();
   const preview=page.locator("#confirmation-details");
   await preview.waitFor({state:"visible"});
-  assert.match(await page.locator("#confirmation-message").textContent(),/2026.*共 2 项/);
+  assert.match(await page.locator("#confirmation-message").textContent(),/2026.*共 2 项和 1 个文件夹/);
   assert.match(await preview.textContent(),/<b>Shared login<\/b>.*Work.*本机已有同名项目.*废纸篓.*Old login/);
   assert.equal(await preview.locator("b").count(),0);
   assert.ok(await page.locator("#confirmation-modal .confirm-icon").isHidden());
@@ -150,6 +150,7 @@ try{
   assert.match(await preview.textContent(),/Updated login/);
   await page.locator("#confirmation-accept").click();
   await page.waitForFunction(()=>fixture.restores===1);
+  await page.locator('#toast-region').getByText(/新增文件夹 1 个/).waitFor();
   await page.waitForFunction(()=>!document.querySelector("#github-upload").disabled);
   assert.deepEqual(await page.evaluate(()=>fixture.restoreAttempts),[
     {repositoryId:"7",branch:"main",sha:"a".repeat(40)},

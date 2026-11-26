@@ -56,7 +56,12 @@ try {
       return {};
     } } };
   });
-  const openB = async () => { await page.locator('.connection-card[data-item-id="b"] .item-disclosure').click(); await page.locator('#ssh-route-config').waitFor({ state: 'visible' }); };
+  const openB = async () => {
+    const back = page.locator('#project-detail-back');
+    if (await back.isVisible()) await back.click();
+    await page.locator('.connection-card[data-item-id="b"] .item-disclosure').click();
+    await page.locator('#ssh-route-config').waitFor({ state: 'visible' });
+  };
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   await openB();
   assert.equal(await page.locator('#ssh-route-mode').inputValue(), 'jump');

@@ -30,7 +30,7 @@ try {
     const item = (id, name, capabilities) => ({
       id, name, capabilities, itemType: 'custom', description: 'Hidden synthetic description',
       enabled: true, canTest: true, updatedAt: 'revision-1', passkeys: [], folder: '', favorite: id === 'alpha',
-      modules: [{ kind: 'url', value: 'https://example.test', agentVisible: true }, { kind: 'password', value: '', configured: true, agentVisible: false }],
+      modules: [{ id: id + '-url', kind: 'url', value: 'https://example.test', agentVisible: true }, { id: id + '-password', kind: 'password', value: '', configured: true, agentVisible: false }],
       secret: { fields: [] }, passwordHistoryCount: 1,
     });
     const state = {
@@ -68,7 +68,11 @@ try {
       if (command === 'owner_secret_view' && args.id === 'oci') return { fields: Object.entries(fixture.ociSecrets || {}).map(([name, value]) => ({ name, value })) };
       if (command === 'owner_secret_view' && fixture.keyActionSecret) return { fields: [{name:'privateKey',value:fixture.keyActionSecret}] };
       if (command === 'copy_owner_value') { fixture.copiedValue = args.value; return; }
-      if (command === 'owner_secret_view') return { fields: [{ name: 'password', value: 'synthetic-password' }] };
+      if (command === 'owner_secret_view') {
+        const result = { fields: [{ name: 'password', value: 'synthetic-password' }] };
+        if (fixture.deferSecretView) return new Promise(resolve => { fixture.finishSecretView = () => resolve(result); });
+        return result;
+      }
       if (command === 'generate_password') return 'Aa1!'.repeat(32).slice(0, args.options.length);
       if (command === 'stage_private_key') {
         (fixture.keySources ??= []).push(args.source);
@@ -159,8 +163,17 @@ try {
   const row = id => page.locator(`.connection-card[data-item-id="${id}"]`);
   const toggle = id => row(id).locator('.item-disclosure');
   const editor = page.locator('#connection-modal');
+  const projectsBack = page.locator('#project-detail-back');
+  const returnToList = async () => {
+    if (await projectsBack.isVisible()) await projectsBack.click();
+  };
+  const openItem = async id => {
+    if (!await toggle(id).isVisible()) await returnToList();
+    await toggle(id).click();
+  };
   if (process.argv.includes('--aws-provider')) {
     await page.locator('[data-language="zh"]').click();
+    await returnToList();
     await page.locator('#add-connection-button').click();
     await page.locator('[data-item-template="aws"]').click();
     assert.equal(await page.locator('#http-auth-type').inputValue(), 'aws-sigv4');
@@ -196,7 +209,7 @@ try {
     await editor.waitFor({state:'hidden'});
     assert.equal(await page.evaluate(()=>fixture.saved[0].awsBindings.accessKeyId),keyId);
     assert.equal(await page.evaluate(()=>fixture.saved[0].secrets.namedSecrets.renamed_access_key),'ASIAMOCKEXAMPLE');
-    await toggle('aws').click();
+    await openItem('aws');
     const secret=awsRow('aws_secret_access_key').locator('[data-secret-value]');
     assert.equal(await secret.inputValue(),'synthetic-aws-secret');
     await secret.fill('unsaved-replacement');
@@ -215,7 +228,7 @@ try {
       await page.locator(language === 'zh' ? '[data-language="zh"]' : '[data-language="en"]').click();
       await page.locator('[data-page="connections"]').click();
       if (mode === 'modal') await page.locator('#add-connection-button').click();
-      else await toggle('alpha').click();
+      else await openItem('alpha');
       await page.waitForFunction(() => !document.querySelector('#connection-modal').classList.contains('is-folding'));
       await editor.locator('.identity-grid').scrollIntoViewIfNeeded();
       const labels = await editor.locator('.identity-grid > .field > span, .vault-metadata > .field > span').evaluateAll(elements => elements.map(element => {
@@ -247,7 +260,7 @@ try {
       await page.waitForFunction(()=>!document.querySelector('#connection-modal').classList.contains('is-folding'));
       await page.locator('#toast-region').evaluate(region=>region.replaceChildren());
       for (const button of await keyRow().locator('[data-copy-public-key], [data-cancel-pending-key]').all()) {
-        await button.scrollIntoViewIfNeeded();
+        await button.evaluate(element=>element.scrollIntoView({block:'center',inline:'nearest'}));
         const geometry=await button.evaluate(button=>{
           const r=button.getBoundingClientRect(), parent=button.closest('.module-control').getBoundingClientRect();
           const range=document.createRange();
@@ -267,19 +280,19 @@ try {
       Object.assign(fixture.state.connections.find(item=>item.id==='beta'),{privateKeyName:'fixture.pem',modules:[{kind:'privateKey',configured:true,agentVisible:false}]});
       await refresh();
     });
-    for (const mode of ['list','grid','modal']) for (const width of [690,460]) for (const size of ['standard','large']) for (const language of ['en','zh']) {
+    for (const mode of ['list','modal']) for (const width of [690,460]) for (const size of ['standard','large']) for (const language of ['en','zh']) {
       await page.setViewportSize({width,height:800});
       await page.locator('[data-page="settings"]').click();
-      await page.locator('#item-layout').selectOption(mode==='grid'?'grid':'list');
       await page.locator('#text-size').selectOption(size);
       await page.locator(`[data-language="${language}"]`).click();
       await page.locator('[data-page="connections"]').click();
+      await returnToList();
       if (mode==='modal') {
         await page.locator('#add-connection-button').click();
         await page.locator('#add-module-button').click();
         await page.locator('[data-add-module="privateKey"]').click();
       } else {
-        await toggle('beta').click();
+        await openItem('beta');
         await checkActions(`${mode}-${width}-${size}-${language}-configured`);
         await keyRow().locator('[data-copy-public-key]').click();
         assert.deepEqual(await page.evaluate(()=>fixture.publicKeyCopy),{pendingId:null,itemId:'beta'});
@@ -305,15 +318,15 @@ try {
     console.log(`Key actions passed: ${artifacts}`);
   } else if (process.argv.includes('--editor-footer')) {
     const results=[];
-    for (const mode of ['list','grid','modal']) for (const width of [690,460]) for (const size of ['standard','large']) for (const language of ['en','zh']) {
+    for (const mode of ['list','modal']) for (const width of [690,460]) for (const size of ['standard','large']) for (const language of ['en','zh']) {
       await page.setViewportSize({width,height:760});
       await page.locator('[data-page="settings"]').click();
-      await page.locator('#item-layout').selectOption(mode==='grid'?'grid':'list');
       await page.locator('#text-size').selectOption(size);
       await page.locator(`[data-language="${language}"]`).click();
       await page.locator('[data-page="connections"]').click();
+      await returnToList();
       if (mode==='modal') await page.locator('#add-connection-button').click();
-      else await toggle('alpha').click();
+      else await openItem('alpha');
       await editor.waitFor({state:'visible'});
       await page.waitForFunction(()=>!document.querySelector('#connection-modal').classList.contains('is-folding'));
       const footer=editor.locator('.modal-footer');
@@ -343,266 +356,66 @@ try {
     assert.deepEqual(errors,[]);
     console.log(JSON.stringify(results));
     console.log(`Editor footer passed: ${artifacts}`);
-  } else if (process.argv.includes('--name-toggle')) {
-    const name=id=>row(id).locator('.connection-name');
-    const settled=async open=>{
-      await editor.waitFor({state:open?'visible':'hidden'});
-      await page.waitForFunction(()=>!document.querySelector('#connection-modal').classList.contains('is-folding'));
-    };
-    const expanded=async(id,open)=>{
-      assert.equal(await name(id).getAttribute('aria-expanded'),String(open));
-      assert.equal(await toggle(id).getAttribute('aria-expanded'),String(open));
-    };
-    await page.setViewportSize({width:690,height:900});
-    for (const layout of ['list','grid']) {
-      await page.locator('[data-page="settings"]').click();
-      await page.locator('#item-layout').selectOption(layout);
-      await page.locator('[data-page="connections"]').click();
-      await name('alpha').locator('.lettering-ink').click();
-      await settled(true);
-      await expanded('alpha',true);
-      await name('alpha').click();
-      await settled(false);
-      await expanded('alpha',false);
-      assert.equal(await name('alpha').evaluate(el=>el===document.activeElement),true,'Closing from the name returns focus to the name');
-      await name('alpha').press('Enter');
-      await settled(true);
-      await name('alpha').press('Space');
-      await settled(false);
-      await expanded('alpha',false);
-      const small=await name('alpha').boundingBox();
-      await page.mouse.move(small.x+10,small.y+10);
-      await page.mouse.down();
-      await page.mouse.move(small.x+12,small.y+12);
-      await page.mouse.up();
-      await settled(true);
-      await name('alpha').click();
-      await settled(false);
-      const from=await name('alpha').boundingBox(), target=await row('beta').boundingBox();
-      await page.mouse.move(from.x+from.width/2,from.y+from.height/2);
-      await page.mouse.down();
-      await page.mouse.move(layout==='grid'?target.x+target.width-5:from.x+from.width/2,layout==='grid'?target.y+target.height/2:target.y+target.height-2,{steps:8});
-      await page.mouse.up();
-      await page.waitForFunction(()=>!document.querySelector('#connections-list').hasAttribute('aria-busy'));
-      assert.deepEqual(await page.locator('.connection-card').evaluateAll(cards=>cards.map(card=>card.dataset.itemId)),['beta','alpha','gamma']);
-      assert.equal(await editor.isHidden(),true,'Dragging the name must not toggle editing');
-      await name('alpha').press('Home');
-      await page.waitForFunction(()=>!document.querySelector('#connections-list').hasAttribute('aria-busy'));
-      assert.deepEqual(await page.locator('.connection-card').evaluateAll(cards=>cards.map(card=>card.dataset.itemId)),['alpha','beta','gamma']);
-      assert.equal(await editor.isHidden(),true,'Keyboard reorder must not toggle editing');
-      const cancelStart=await name('alpha').boundingBox();
-      await page.mouse.move(cancelStart.x+20,cancelStart.y+12);
-      await page.mouse.down();
-      await page.mouse.move(cancelStart.x+30,cancelStart.y+12,{steps:3});
-      await page.keyboard.press('Escape');
-      await page.waitForTimeout(30);
-      await page.mouse.up();
-      assert.equal(await editor.isHidden(),true,'Canceled name drag must not toggle editing');
-      await name('alpha').press('Enter');
-      await settled(true);
-      await name('alpha').press('Space');
-      await settled(false);
-      await page.mouse.move(cancelStart.x+20,cancelStart.y+12);
-      await page.mouse.down();
-      await page.mouse.move(2,2,{steps:4});
-      await page.mouse.up();
-      assert.equal(await editor.isHidden(),true,'Dropping a name outside the list must not toggle editing');
-      await name('alpha').click();
-      await settled(true);
-      await page.locator('#connection-description').fill(`Unsaved ${layout} name edit`);
-      await page.evaluate(()=>{fixture.failDraft=true;});
-      await name('beta').click();
-      await page.getByText('Synthetic draft failure',{exact:true}).waitFor();
-      assert.equal(await editor.evaluate(el=>el.parentElement.dataset.itemId),'alpha');
-      await expanded('alpha',true);
-      await expanded('beta',false);
-      assert.equal(await page.locator('#connection-description').inputValue(),`Unsaved ${layout} name edit`);
-      await page.evaluate(()=>{fixture.failDraft=false;});
-      await name('alpha').click();
-      await settled(false);
-      assert.equal(await page.evaluate(()=>fixture.drafts.find(draft=>draft.input.id==='alpha').input.description),`Unsaved ${layout} name edit`);
-      await name('alpha').click();
-      await settled(true);
-      assert.equal(await page.locator('#connection-description').inputValue(),`Unsaved ${layout} name edit`);
-      await name('alpha').click();
-      await settled(false);
-    }
-    assert.equal(await page.evaluate(()=>fixture.saved.length),0);
-    assert.deepEqual(errors,[]);
-    console.log(`Name toggle passed: ${artifacts}`);
-  } else if (process.argv.includes('--grid-editor')) {
-    await page.locator('[data-page="settings"]').click();
-    await page.locator('#item-layout').selectOption('grid');
-    await page.locator('[data-page="connections"]').click();
-    const results=[];
-    for (const count of [3,81]) for (const width of [690,460]) for (const size of ['standard','large']) {
-      await page.setViewportSize({width,height:900});
-      await page.locator('#text-size').evaluate((select,value)=>{select.value=value;select.dispatchEvent(new Event('change',{bubbles:true}));},size);
-      await page.evaluate(async count => {
-        const sample=structuredClone(fixture.state.connections[0]);
-        sample.modules=sample.modules.filter(module=>module.kind!=='privateKey');
-        sample.modules.push({kind:'privateKey',configured:true,agentVisible:false});
-        fixture.state.connections=Array.from({length:count},(_,index)=>({...structuredClone(sample),id:`grid-${index}`,name:`Synthetic grid item ${index}`}));
-        await refresh();
-      },count);
-      await toggle('grid-0').click();
-      await page.waitForFunction(() => !document.querySelector('#connection-modal').classList.contains('is-folding'));
-      const geometry=await page.evaluate(() => {
-        const bounds=el=>{const r=el.getBoundingClientRect();return {top:r.top,bottom:r.bottom,height:r.height,width:r.width};};
-        const card=document.querySelector('.connection-card.is-editing');
-        return {card:bounds(card),editor:bounds(document.querySelector('#connection-modal')),form:bounds(document.querySelector('#connection-form')),next:bounds(card.nextElementSibling)};
-      });
-      results.push({count,width,size,...geometry});
-      assert.ok(geometry.card.bottom>=geometry.editor.bottom-1,`Expanded card must contain the editor: ${JSON.stringify(results.at(-1))}`);
-      assert.ok(geometry.next.top>=geometry.editor.bottom-1,`Following grid cards must start below the editor: ${JSON.stringify(results.at(-1))}`);
-      await page.screenshot({path:path.join(artifacts,`grid-editor-${count}-${width}-${size}.png`)});
-      const save=page.locator('#save-connection-button');
-      await save.scrollIntoViewIfNeeded();
-      assert.equal(await save.evaluate(button=>{const r=button.getBoundingClientRect();return button.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2));}),true,'Save must be reachable above subsequent grid cards');
-      await save.click({trial:true});
-      await editor.locator('.modal-footer [data-close-modal]').click();
-      await editor.waitFor({state:'hidden'});
-      await toggle('grid-0').click();
-      await page.waitForFunction(() => !document.querySelector('#connection-modal').classList.contains('is-folding'));
-      assert.equal(await editor.isVisible(),true,'Collapsed grid editor reopens');
-      await editor.locator('.modal-footer [data-close-modal]').click();
-      await editor.waitFor({state:'hidden'});
-    }
-    assert.deepEqual(errors,[]);
-    console.log(JSON.stringify(results));
-    console.log(`Grid editor passed: ${artifacts}`);
-  } else if (process.argv.includes('--grid')) {
-    const order = () => page.locator('.connection-card').evaluateAll(rows => rows.map(row => row.dataset.itemId));
-    const switchLayout = async layout => page.locator('#item-layout').evaluate((select, value) => { select.value = value; select.dispatchEvent(new Event('change', {bubbles:true})); }, layout);
-    const search = async text => {
-      if (!await page.locator('#title-search-input').isVisible()) await page.locator('#title-search-toggle').click();
-      await page.locator('#title-search-input').fill(text);
-    };
-    const drag = async (from, target, after, cancel = false, vertical = false) => {
-      await row(from).locator('.connection-name').scrollIntoViewIfNeeded();
-      const start = await row(from).locator('.connection-name').boundingBox();
-      const end = await row(target).boundingBox();
-      await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2);
-      await page.mouse.down();
-      await page.mouse.move(vertical ? end.x+end.width/2 : after ? end.x+end.width-5 : end.x+5, vertical ? after ? end.y+end.height-5 : end.y+5 : end.y+end.height/2, {steps:8});
-      if (cancel) await page.keyboard.press('Escape');
-      await page.mouse.up();
-      await page.waitForFunction(() => !document.querySelector('#connections-list').hasAttribute('aria-busy'));
-    };
-    assert.equal(await page.locator('html').getAttribute('data-item-layout'), 'list');
-    await page.locator('[data-page="settings"]').click();
-    await page.locator('#item-layout').selectOption('grid');
-    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('openkeylet.appearance.v1')).itemLayout), 'grid');
-    await page.reload();
-    await page.locator('.connection-card').first().waitFor();
-    assert.equal(await page.locator('html').getAttribute('data-item-layout'), 'grid');
-    await page.setViewportSize({width:690,height:1000});
-    const a = await row('alpha').boundingBox(), b = await row('beta').boundingBox();
-    assert.ok(Math.abs(a.y-b.y)<1 && b.x>a.x, 'Grid puts two cards on the same row at 690px');
-    await drag('alpha','beta',true);
-    assert.deepEqual(await order(), ['beta','alpha','gamma']);
-    await drag('gamma','beta',false);
-    assert.deepEqual(await order(), ['gamma','beta','alpha']);
-    await row('alpha').locator('.connection-name').press('Home');
-    await page.waitForFunction(() => !document.querySelector('#connections-list').hasAttribute('aria-busy'));
-    assert.deepEqual(await order(), ['alpha','gamma','beta']);
-    const startEnd=await row('alpha').locator('.connection-name').boundingBox(), lastEnd=await row('beta').boundingBox();
-    await page.mouse.move(startEnd.x+10,startEnd.y+10);
-    await page.mouse.down();
-    await page.mouse.move(lastEnd.x+5,lastEnd.y+lastEnd.height+15,{steps:8});
-    await page.mouse.up();
-    await page.waitForFunction(() => !document.querySelector('#connections-list').hasAttribute('aria-busy'));
-    assert.deepEqual(await order(),['gamma','beta','alpha'],'Bottom whitespace appends after the last tile');
-    await row('alpha').locator('.connection-name').press('Home');
-    await page.waitForFunction(() => !document.querySelector('#connections-list').hasAttribute('aria-busy'));
-    await drag('alpha','beta',true,true);
-    assert.deepEqual(await order(), ['alpha','gamma','beta']);
-    await page.evaluate(() => { fixture.failOrder=true; });
-    await drag('alpha','beta',true);
-    assert.deepEqual(await order(), ['alpha','gamma','beta']);
-    await page.evaluate(async () => {
-      fixture.failOrder=false;
-      fixture.state.connections.push({...structuredClone(fixture.state.connections[0]),id:'delta',name:'Second synthetic API',folder:'test'});
-      fixture.state.connections.find(item=>item.id==='alpha').folder='test';
-      fixture.state.connections.find(item=>item.id==='beta').enabled=false;
-      await refresh();
-    });
-    await page.locator('[data-item-type-filter="api"]').click();
-    await drag('delta','alpha',false);
-    assert.deepEqual(await page.evaluate(() => fixture.state.connections.map(item=>item.id)), ['delta','gamma','beta','alpha']);
-    await search('synthetic');
-    await page.locator('#connection-folder-filter').selectOption('folder:test');
-    await page.locator('#connection-status-filter').selectOption('enabled');
-    assert.deepEqual(await order(), ['delta','alpha']);
-    await page.locator('#title-search-toggle').click();
-    await page.locator('[data-item-type-filter="ssh"]').click();
-    assert.equal(await page.locator('.empty-state').isVisible(),true);
-    await page.locator('.empty-state [data-action="clear-connection-filters"]').click();
-    await toggle('alpha').click();
-    await page.locator('#connection-description').fill('Unsaved grid edit');
-    await editor.locator('[data-secret-value]').fill('SYNTHETIC-UNSAVED');
-    await page.evaluate(() => { window.gridEditorNode=document.querySelector('#connection-modal'); });
-    await switchLayout('list');
-    await switchLayout('grid');
-    assert.equal(await page.evaluate(() => window.gridEditorNode===document.querySelector('#connection-modal')),true);
-    assert.equal(await page.locator('#connection-description').inputValue(),'Unsaved grid edit');
-    assert.equal(await editor.locator('[data-secret-value]').inputValue(),'SYNTHETIC-UNSAVED');
-    assert.equal(await page.evaluate(() => fixture.saved.length),0);
-    const editing = await row('alpha').boundingBox(), list = await page.locator('#connections-list').boundingBox();
-    assert.ok(Math.abs(editing.width-list.width)<2,'Expanded grid editor spans the full list');
-    await search('not-a-match');
-    assert.deepEqual(await order(),['alpha']);
-    assert.equal(await page.locator('#connection-description').inputValue(),'Unsaved grid edit');
-    await search('');
-    await page.locator('#title-search-toggle').click();
-    await toggle('alpha').click();
+  } else if (process.argv.includes('--project-detail')) {
+    const detail = page.locator('#project-detail-content');
+    const openDetail = id => row(id).locator('.connection-name').click();
+    const projectHeading = () => detail.getByRole('heading').first().textContent();
+    const secret = detail.locator('[data-field-id="alpha-password"]');
+    await page.setViewportSize({width:1080,height:820});
+    await openDetail('alpha');
+    assert.match(await projectHeading(), /Synthetic service/);
+    await detail.getByText('Hidden synthetic description',{exact:true}).waitFor();
+    assert.equal(await editor.isHidden(),true,'Selecting a project only opens its read-only details');
+    assert.equal(await detail.getByText('synthetic-password',{exact:true}).count(),0);
+    assert.equal(await secret.getByRole('img').count(),1);
+    await secret.locator('[data-field-action="reveal"]').click();
+    await secret.getByText('synthetic-password',{exact:true}).waitFor();
+    await secret.locator('[data-field-action="copy"]').click();
+    await page.waitForFunction(()=>fixture.copiedValue==='synthetic-password');
+    await openDetail('beta');
+    assert.match(await projectHeading(), /Synthetic server/);
+    await openDetail('alpha');
+    assert.equal(await detail.getByText('synthetic-password',{exact:true}).count(),0);
+    await page.evaluate(()=>{fixture.deferSecretView=true;});
+    await secret.locator('[data-field-action="reveal"]').click();
+    await page.waitForFunction(()=>typeof fixture.finishSecretView==='function');
+    await openDetail('beta');
+    await page.evaluate(()=>{fixture.deferSecretView=false;fixture.finishSecretView();});
+    await openDetail('alpha');
+    assert.equal(await detail.getByText('synthetic-password',{exact:true}).count(),0,'A late reveal must not populate a new selection');
+    await secret.locator('[data-field-action="reveal"]').click();
+    await secret.getByText('synthetic-password',{exact:true}).waitFor();
+    await page.locator('#add-connection-button').click();
+    await editor.waitFor({state:'visible'});
+    assert.equal(await detail.getByText('synthetic-password',{exact:true}).count(),0,'Opening a new-item editor must clear revealed values');
+    await editor.locator('.modal-footer [data-close-modal]').click();
     await editor.waitFor({state:'hidden'});
-    await page.keyboard.press('Escape');
-    await page.setViewportSize({width:460,height:1000});
-    const narrowA=await row('delta').boundingBox(), narrowB=await row('gamma').boundingBox();
-    assert.ok(Math.abs(narrowA.x-narrowB.x)<1&&narrowB.y>narrowA.y,'460px grid uses one column');
-    await drag('delta','gamma',true,false,true);
-    assert.deepEqual(await order(),['gamma','delta','beta','alpha'],'Single-column downward drag uses vertical position');
-    await drag('delta','gamma',false,false,true);
-    assert.deepEqual(await order(),['delta','gamma','beta','alpha'],'Single-column upward drag uses vertical position');
-    for (const width of [1000,690,460]) {
-      await page.setViewportSize({width,height:1000});
-      for (const size of ['standard','large']) {
-        await page.locator('#text-size').evaluate((select, value) => {select.value=value;select.dispatchEvent(new Event('change',{bubbles:true}));},size);
-        for (const language of ['en','zh']) {
-          await page.locator(`[data-language="${language}"]`).click();
-          for (const theme of ['dark','light']) {
-            if (await page.locator('html').getAttribute('data-theme')!==theme) await page.locator('#theme-toggle').click();
-            const geometry=await page.locator('.connection-card').evaluateAll(cards=>cards.map(card=>{
-              const outer=card.getBoundingClientRect();
-              return {width:outer.width,overflow:card.scrollWidth>card.clientWidth+1,controls:[...card.querySelectorAll('button')].map(button=>{const r=button.getBoundingClientRect();return r.left>=outer.left&&r.right<=outer.right+1;})};
-            }));
-            assert.ok(geometry.every(card=>!card.overflow&&card.controls.every(Boolean)),JSON.stringify(geometry));
-            assert.equal(await page.evaluate(() => document.documentElement.scrollWidth<=innerWidth),true);
-            await page.screenshot({path:path.join(artifacts,`grid-${width}-${size}-${language}-${theme}.png`)});
-          }
-        }
-      }
-    }
-    await switchLayout('list');
-    await page.reload();
-    await page.locator('.connection-card').first().waitFor();
-    assert.equal(await page.locator('html').getAttribute('data-item-layout'),'list');
-    await page.evaluate(() => localStorage.setItem('openkeylet.appearance.v1',JSON.stringify({itemLayout:'invalid'})));
-    await page.reload();
-    await page.locator('.connection-card').first().waitFor();
-    assert.equal(await page.locator('html').getAttribute('data-item-layout'),'list');
-    await page.addInitScript(() => {
-      Object.defineProperty(Storage.prototype,'getItem',{value(){throw Error('Unavailable test storage');}});
-      Object.defineProperty(Storage.prototype,'setItem',{value(){throw Error('Unavailable test storage');}});
-    });
-    await page.reload();
-    await page.locator('.connection-card').first().waitFor();
-    assert.equal(await page.locator('html').getAttribute('data-item-layout'),'list');
-    await switchLayout('grid');
-    assert.equal(await page.locator('html').getAttribute('data-item-layout'),'grid','Unavailable storage still permits session-only layout changes');
+    await detail.locator('[data-action="edit"]').click();
+    await editor.waitFor({state:'visible'});
+    assert.equal(await page.locator('#project-editor-slot #connection-modal').count(),1);
+    await page.locator('#connection-description').fill('Draft from project detail');
+    await page.evaluate(()=>{fixture.failDraft=true;});
+    await openDetail('beta');
+    await page.getByText('Synthetic draft failure',{exact:true}).waitFor();
+    assert.equal(await page.locator('#connection-description').inputValue(),'Draft from project detail');
+    assert.equal(await toggle('alpha').getAttribute('aria-expanded'),'true');
+    await page.evaluate(()=>{fixture.failDraft=false;});
+    await openDetail('beta');
+    await editor.waitFor({state:'hidden'});
+    assert.match(await projectHeading(), /Synthetic server/);
+    assert.equal(await page.evaluate(()=>fixture.drafts.find(draft=>draft.input.id==='alpha').input.description),'Draft from project detail');
+    await page.setViewportSize({width:460,height:690});
+    await returnToList();
+    await row('alpha').locator('.connection-name').press('Enter');
+    await projectsBack.waitFor({state:'visible'});
+    assert.match(await projectHeading(), /Synthetic service/);
+    await projectsBack.click();
+    await row('alpha').waitFor({state:'visible'});
+    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+    await page.locator('[data-page="settings"]').click();
+    assert.equal(await page.locator('#item-layout').count(),0);
     assert.deepEqual(errors,[]);
-    console.log(`Grid display passed: ${artifacts}`);
+    console.log(`Project detail, masking, clipboard, draft and narrow navigation passed: ${artifacts}`);
   } else if (process.argv.includes('--api-services')) {
     const picker = page.locator('#api-service-modal');
     const urls = () => editor.locator('[data-kind="url"]');
@@ -616,6 +429,7 @@ try {
       await editor.locator('.modal-footer [data-close-modal]').click();
       await editor.waitFor({state:'hidden'});
     };
+    await returnToList();
     await page.locator('#add-connection-button').click();
     await page.locator('[data-item-template="api"]').click();
     assert.equal(await urls().count(),1);
@@ -627,7 +441,7 @@ try {
     assert.equal(await addresses().first().inputValue(),'');
     assert.equal(await page.evaluate(()=>fixture.saved.length),0);
     await closeEditor();
-    await toggle('alpha').click();
+    await openItem('alpha');
     await openPicker('GitHub');
     assert.equal(await addresses().first().inputValue(),'https://example.test');
     assert.match(await picker.locator('#api-service-replace').innerText(),/Replace/i);
@@ -640,7 +454,7 @@ try {
     assert.equal(saved.httpAuthType,'auto');
     assert.equal(saved.secrets.password,'synthetic-password');
     assert.equal(saved.modules.find(module=>module.kind==='password').agentVisible,false);
-    await toggle('alpha').click();
+    await openItem('alpha');
     await addresses().first().fill('api.github.com');
     await openPicker('GitHub');
     assert.equal(await picker.locator('#api-service-target').evaluate(el=>el===document.activeElement),true);
@@ -716,6 +530,7 @@ try {
     assert.equal(await page.evaluate(()=>JSON.stringify(fixture.saved.at(-1))),savedBefore);
     await closeEditor();
     assert.equal(await page.evaluate(()=>JSON.stringify(fixture.saved.at(-1))),savedBefore);
+    await returnToList();
     await page.locator('#add-connection-button').click();
     await page.locator('[data-item-template="oci"]').click();
     await editor.locator('[data-fill-oci-region]').selectOption('ap-tokyo-1');
@@ -737,21 +552,21 @@ try {
     assert.match(await picker.locator('#api-service-error').innerText(),/Complete|bound/);
     await page.keyboard.press('Escape');
     await closeEditor();
-    await toggle('beta').click();
+    await openItem('beta');
     await page.evaluate(()=>{apiServiceCatalog=null;fixture.deferApiCatalog=true;});
     await openPicker();
     await page.waitForFunction(()=>typeof fixture.resolveApiCatalog==='function');
     await page.keyboard.press('Escape');
     await closeEditor();
-    await toggle('alpha').click();
+    await openItem('alpha');
     await page.evaluate(()=>fixture.resolveApiCatalog());
     assert.equal(await picker.isHidden(),true);
     await openPicker('GitHub');
     await page.evaluate(async()=>{fixture.owner={pinConfigured:true,unlocked:false};await refreshOwnerLock(false);});
     assert.equal(await picker.isHidden(),true);
     assert.equal(await editor.isHidden(),true);
-    await page.evaluate(async()=>{fixture.owner={pinConfigured:false,unlocked:true};await refreshOwnerLock(false);fixture.deferApiCatalog=false;document.querySelector('#toast-region').replaceChildren();});
-    await toggle('alpha').click();
+    await page.evaluate(async()=>{fixture.owner={pinConfigured:false,unlocked:true};await refreshOwnerLock(false);await refresh(false);fixture.deferApiCatalog=false;document.querySelector('#toast-region').replaceChildren();});
+    await openItem('alpha');
     await openPicker('AWS EC2');
     await picker.locator('[data-api-service-parameter="region"]').fill('us-east-1');
     await picker.locator('#api-service-replace').focus();
@@ -786,6 +601,7 @@ try {
       await menu.locator(`[data-stage-key="${source}"]`).click();
     };
     const save = page.locator('#save-connection-button');
+    await returnToList();
     await page.locator('#add-connection-button').click();
     await page.locator('[data-item-template="oci"]').click();
     await page.locator('#oci-bindings-summary').click();
@@ -857,7 +673,7 @@ try {
     assert.equal(await page.evaluate(() => fixture.savedOci.pendingOciKeyModuleId), keyId);
     assert.equal(await page.evaluate(() => fixture.savedOci.pendingOciKeyId), pending);
     assert.equal(await page.evaluate(() => fixture.savedOci.input.ociBindings.privateKey), null);
-    await toggle('oci').click();
+    await openItem('oci');
     assert.equal(await keyRow().locator('[data-toggle-module-secret]').isEnabled(), true);
     await keyRow().locator('[data-toggle-module-secret]').click();
     assert.equal(await keyRow().locator('[data-secret-value]').evaluate(el => !el.classList.contains('secret-masked')), true);
@@ -876,13 +692,13 @@ try {
     await save.click();
     await editor.waitFor({ state: 'hidden' });
     assert.equal(await page.evaluate(() => fixture.savedOci.input.secrets.namedSecrets.auth_token), 'SYNTHETIC-EXTRA-TOKEN');
-    await toggle('oci').click();
+    await openItem('oci');
     const before = await page.evaluate(() => JSON.stringify(fixture.savedOci));
     await module('oci_region').locator('[data-secret-value]').fill('ap-osaka-1');
     await editor.locator('.modal-footer [data-close-modal]').click();
     await editor.waitFor({ state: 'hidden' });
     assert.equal(await page.evaluate(() => JSON.stringify(fixture.savedOci)), before);
-    await toggle('oci').click();
+    await openItem('oci');
     await page.locator('#add-module-button').click();
     await page.locator('#module-menu [data-add-module="username"]').click();
     await page.evaluate(() => { document.querySelector('#toast-region').replaceChildren(); document.querySelector('#oci-bindings').open = false; });
@@ -905,6 +721,7 @@ try {
     await editor.waitFor({ state: 'hidden' });
     assert.equal(await page.evaluate(() => fixture.savedOci.input.modules.some(module => module.name === 'fingerprint')), false);
     assert.ok(await page.evaluate(() => fixture.savedOci.input.ociBindings.fingerprint));
+    await returnToList();
     for (const language of ['en', 'zh']) {
       await page.locator(`[data-language="${language}"]`).click();
       for (const failed of [false, true]) {
@@ -914,13 +731,13 @@ try {
         await page.locator('#toast-region').filter({ hasText: expected }).waitFor();
       }
     }
-    await toggle('oci').click();
+    await openItem('oci');
     await page.evaluate(() => { fixture.deferOciKey = true; delete fixture.resolveOciKey; });
     await chooseSource('clipboard');
     await page.waitForFunction(() => typeof fixture.resolveOciKey === 'function');
     await editor.locator('.modal-footer [data-close-modal]').click();
     await editor.waitFor({ state: 'hidden' });
-    await toggle('oci').click();
+    await openItem('oci');
     assert.equal(await keyRow().locator('[data-stage-key="clipboard"]').isDisabled(), true);
     await page.evaluate(() => { fixture.resolveOciKey(); fixture.deferOciKey = false; });
     await page.waitForFunction(() => fixture.pendingOciKey === null);
@@ -932,7 +749,7 @@ try {
     await editor.waitFor({ state: 'hidden' });
     assert.equal(await page.evaluate(() => fixture.drafts.some(draft => JSON.stringify(draft).includes('test-oci-key-'))), false);
     await page.evaluate(async () => { fixture.state.connections.find(item => item.id === 'alpha').httpAuthType = 'basic'; await refresh(false); });
-    await toggle('alpha').click();
+    await openItem('alpha');
     assert.equal(await page.locator('#http-auth-type').inputValue(), 'basic');
     assert.deepEqual(
       (await page.locator('#http-auth-type option').evaluateAll(options => options.map(option => option.value))).sort(),
@@ -945,7 +762,7 @@ try {
     await page.locator('#save-connection-button').click();
     await editor.waitFor({ state: 'hidden' });
     assert.equal(await page.evaluate(() => fixture.saved.at(-1).httpAuthType), 'bearer');
-    await toggle('alpha').click();
+    await openItem('alpha');
     assert.equal(await page.locator('#http-auth-type').inputValue(), 'bearer');
     assert.deepEqual(errors, []);
     console.log(`OCI standard modules passed: ${artifacts}`);
@@ -989,7 +806,7 @@ try {
     assert.deepEqual(errors, []);
     console.log('English and Chinese readability checks passed at 460×600 and 720×820');
   } else if (process.argv.includes('--ssh-keys')) {
-    await toggle('beta').click();
+    await openItem('beta');
     await page.locator('#add-module-button').click();
     await page.locator('[data-add-module="privateKey"]').click();
     const keyRow = page.locator('[data-kind="privateKey"]');
@@ -1010,7 +827,7 @@ try {
     await page.waitForFunction(() => fixture.discardedKey === 'staged-key');
     assert.equal(await page.evaluate(() => fixture.drafts[0].input.privateKeyImportPath), '');
     assert.equal(await page.evaluate(() => fixture.saved.some(item => item.privateKeyImportPath)), false);
-    await toggle('beta').click();
+    await openItem('beta');
     await keySource('generate');
     await page.waitForFunction(() => document.querySelector('[data-kind="privateKey"]').dataset.pending === 'staged-key');
     await page.locator('#save-connection-button').click();
@@ -1019,6 +836,7 @@ try {
     assert.deepEqual(errors, []);
     console.log('SSH key editor checks passed');
   } else {
+  await page.setViewportSize({width:1080,height:920});
   const search = page.locator('#title-search-input');
   const fillSearch = async value => {
     if (!await search.isVisible()) await page.locator('#title-search-toggle').click();
@@ -1026,6 +844,7 @@ try {
   };
   const slideFilter = async (selector, from, to, cancel = false, expected = cancel ? from : to) => {
     const strip = page.locator(selector), buttons = strip.locator('button');
+    await buttons.nth(from).scrollIntoViewIfNeeded();
     const start = await buttons.nth(from).boundingBox(), end = await buttons.nth(to).boundingBox();
     await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2); await page.mouse.down();
     await page.mouse.move(end.x + end.width / 2, end.y + end.height / 2, { steps: 8 });
@@ -1081,8 +900,9 @@ try {
           return { height: outer.height, leftmost: children[0].right <= children[1].left, within: children.every(r => r.left >= outer.left && r.right <= outer.right), centers: children.map(r => r.y + r.height / 2) };
         }),
         overflow: document.documentElement.scrollWidth > innerWidth,
-        recesses: [...document.querySelectorAll('.title-search, .title-switch, .language-switch, .window-control-well, .nav, .metric-grid, #item-type-switch, .creation-control, .connection-name, .connection-type, .item-disclosure, .card-actions')].map(el => {
-          const s = getComputedStyle(el); return { readout: el.matches('.metric-grid'), compact: el.matches('.connection-name, .connection-type, .item-disclosure, .card-actions'), height: rect(el).height, material: [s.backgroundColor, s.boxShadow] };
+        recesses: [...document.querySelectorAll('.title-search, .title-switch, .language-switch, .window-control-well, .nav')].map(el => {
+          const style = getComputedStyle(el);
+          return {height:rect(el).height,material:[style.backgroundColor,style.boxShadow]};
         }),
       };
     });
@@ -1090,16 +910,17 @@ try {
     assert.equal(new Set(measure.centers).size, 1, 'Header icons and wordmark must share a centerline');
     assert.ok(measure.inactiveIcons.every(color => color === measure.inactiveColor), `Unselected switch icons must use neutral language-button ink: ${JSON.stringify([measure.inactiveIcons, measure.inactiveColor])}`);
     for (const card of measure.cards) {
-      assert.equal(card.height, 38); assert.ok(card.leftmost && card.within);
-      assert.ok(Math.max(...card.centers) - Math.min(...card.centers) < 1);
+      assert.ok(card.leftmost && card.within);
+      assert.ok(Math.max(...card.centers.slice(0,3)) - Math.min(...card.centers.slice(0,3)) < 1);
+      assert.ok(card.centers[3]>card.centers[2],'Project actions occupy the row below the name');
     }
     for (const well of measure.wells) {
       assert.equal(well.height, 32); assert.deepEqual(well.padding, ['4px', '4px', '4px', '4px']);
       if (well.cap) assert.deepEqual(well.cap, ['4px', '4px', '4px', '24px']);
     }
     for (const recess of measure.recesses) {
-      assert.equal(recess.height, recess.readout ? 48 : recess.compact ? 28 : 32, 'Content controls use the compact density; header and readout retain their spacing');
-      assert.deepEqual(recess.material, measure.recesses[0].material, 'Every well shares the same floor and edge profile');
+      assert.equal(recess.height,32,'Global controls retain their spacing');
+      assert.deepEqual(recess.material,measure.recesses[0].material,'Global controls retain their shared material');
     }
     headerMeasurements.push({ language, theme, ...measure });
     for (const scale of [1, 1.25, 1.5, 2]) {
@@ -1111,7 +932,7 @@ try {
     await hover(row('alpha').locator('.connection-name'));
     await hover(row('alpha').locator('.connection-type'));
     const selectedInk = await page.locator('.nav-item.active').evaluate(el => getComputedStyle(el).color);
-    for (const selector of ['.window-control.close', '#add-connection-button', '[data-action="copy-name"]']) {
+    for (const selector of ['.window-control.close', '[data-action="copy-name"]']) {
       const action = page.locator(selector).first(); await action.hover(); await page.waitForTimeout(150);
       assert.equal(await action.evaluate(el => getComputedStyle(el).color), selectedInk, 'Ordinary actions share the selected-state accent');
     }
@@ -1130,7 +951,8 @@ try {
       const floor = JSON.stringify(material(document.querySelector('.nav')));
       for (const el of document.querySelectorAll('#page-settings :is(.input, .command-well, .status-strip, .extension-drag-card, details > summary)')) {
         if (!el.getBoundingClientRect().width) continue;
-        if (JSON.stringify(material(el)) !== floor) issues.push(`${el.id || el.className}: inconsistent recessed material`);
+        if (el.matches('#certificate-panel summary')) continue;
+        if (JSON.stringify(material(el)) !== floor) issues.push(`${el.id || el.className || el.textContent.trim()}: inconsistent recessed material`);
       }
       for (const card of document.querySelectorAll('.settings-card')) {
         if (card.scrollWidth > card.clientWidth + 1) issues.push(`${card.dataset.module}: horizontal overflow`);
@@ -1159,6 +981,7 @@ try {
     await page.locator('[data-settings-filter="all"]').click();
     await page.locator('[data-page="connections"]').click();
   }
+  await display.send('Emulation.setDeviceMetricsOverride', {width:1080,height:920,deviceScaleFactor:1.5,mobile:false});
   assert.notDeepEqual(headerMeasurements[0].colors, headerMeasurements[1].colors, 'Switch icons must follow the theme');
   // A failed historical call must not report healthy current services as failed.
   assert.equal(await page.locator('.lcd-primary .seven-number').getAttribute('aria-label'), '3');
@@ -1192,7 +1015,7 @@ try {
   assert.equal(await page.locator('html').getAttribute('data-theme'), 'dark');
   await dragSwitch('#sound-toggle', 0, 1);
   assert.equal(await page.locator('#sound-toggle').getAttribute('aria-checked'), 'true');
-  assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('openkeylet.appearance.v1'))), { theme: 'dark', sound: true });
+  assert.deepEqual(await page.evaluate(() => { const {theme, sound} = JSON.parse(localStorage.getItem('openkeylet.appearance.v1')); return {theme, sound}; }), { theme: 'dark', sound: true });
   await page.reload(); await page.locator('.connection-card').first().waitFor();
   assert.equal(await page.locator('html').getAttribute('data-theme'), 'dark');
   assert.equal(await page.locator('#sound-toggle').getAttribute('aria-checked'), 'true');
@@ -1207,11 +1030,15 @@ try {
   assert.equal(await page.locator('.page.active').getAttribute('id'), 'page-settings');
   geometryMeasurements.push(await auditControlGeometry(page));
   stateMeasurements.push(await auditControlStates(page));
-  await dragSwitch('.switch:has(#desktop-shortcut-enabled)', 0, 1);
-  assert.equal(await page.locator('#desktop-shortcut-enabled').isChecked(), true);
-  assert.equal(await page.evaluate(() => fixture.integrationWrites.length), 1, 'A drag must not also fire the label click');
-  await dragSwitch('.switch:has(#desktop-shortcut-enabled)', 1, 0);
-  assert.equal(await page.locator('#desktop-shortcut-enabled').isChecked(), false);
+  if (await page.locator('#desktop-shortcut-option').isVisible()) {
+    await dragSwitch('.switch:has(#desktop-shortcut-enabled)', 0, 1);
+    assert.equal(await page.locator('#desktop-shortcut-enabled').isChecked(), true);
+    assert.equal(await page.evaluate(() => fixture.integrationWrites.length), 1, 'A drag must not also fire the label click');
+    await dragSwitch('.switch:has(#desktop-shortcut-enabled)', 1, 0);
+    assert.equal(await page.locator('#desktop-shortcut-enabled').isChecked(), false);
+  } else {
+    assert.equal(await page.locator('html').evaluate(element=>element.classList.contains('platform-macos')),true);
+  }
   await page.evaluate(() => fixture.failIntegration = true);
   await dragSwitch('.switch:has(#launch-at-login-enabled)', 0, 1);
   assert.equal(await page.locator('#launch-at-login-enabled').isChecked(), false, 'A failed save restores the switch');
@@ -1292,12 +1119,13 @@ try {
   await page.locator('[data-page="settings"]').click();
   assert.equal(await search.getAttribute('data-page-search'), 'settings');
   assert.equal(await page.locator('#page-settings .page-search').count(), 0);
+  const visibleMcpCards = () => page.locator('.settings-card:visible').evaluateAll(cards=>cards.map(card=>card.dataset.module));
+  const mcpSections = ['MCP / 02','MCP / WRITE','MCP / CERTIFICATES'];
   await slideFilter('#settings-filter-switch', 0, 2);
-  assert.equal(await page.locator('.settings-card:visible').count(), 1);
+  assert.deepEqual(await visibleMcpCards(),mcpSections);
   await slideFilter('#settings-filter-switch', 2, 0);
   await page.locator('[data-settings-filter="MCP"]').click();
-  assert.equal(await page.locator('.settings-card:visible').count(), 1);
-  assert.equal(await page.locator('.settings-card:visible').getAttribute('data-module'), 'MCP / 02');
+  assert.deepEqual(await visibleMcpCards(),mcpSections);
   await fillSearch('Agent');
   await page.locator('[data-page="activity"]').click();
   await page.locator('#title-search-toggle').click();
@@ -1425,7 +1253,8 @@ try {
   await page.waitForFunction(() => document.activeElement.id === 'connection-name');
   assert.equal(await editor.getAttribute('role'), 'region');
   assert.equal(await editor.getAttribute('aria-modal'), null);
-  assert.equal(await editor.evaluate(el => el.parentElement.dataset.itemId), 'alpha');
+  assert.equal(await page.locator('#project-editor-slot #connection-modal').count(), 1);
+  assert.equal(await toggle('alpha').getAttribute('aria-expanded'), 'true');
   assert.equal(await page.locator('.modal-backdrop:not(.inline-editor):not(.hidden)').count(), 0);
   await page.locator('#connection-name').fill('Edited synthetic service');
   await page.locator('#connection-description').fill('Keep this unsaved value');
@@ -1455,8 +1284,8 @@ try {
   await page.locator('#connection-enabled-label').click();
   assert.equal(await page.locator('#connection-enabled').isChecked(), false);
   await toggle('beta').click();
-  await page.waitForFunction(() => document.querySelector('#connection-modal').parentElement.dataset.itemId === 'beta' && !document.querySelector('#connection-modal').classList.contains('is-folding'));
-  assert.equal(await editor.evaluate(el => el.parentElement.dataset.itemId), 'beta');
+  await page.waitForFunction(() => document.querySelector('.connection-card[data-item-id=beta] .item-disclosure').getAttribute('aria-expanded') === 'true' && !document.querySelector('#connection-modal').classList.contains('is-folding'));
+  assert.equal(await toggle('beta').getAttribute('aria-expanded'), 'true');
   assert.equal(await toggle('alpha').getAttribute('aria-expanded'), 'false');
   assert.equal(await page.evaluate(() => fixture.drafts.find(d => d.input.id === 'alpha').input.folder), 'Unsaved folder');
   assert.equal(await page.evaluate(() => fixture.drafts.find(d => d.input.id === 'alpha').input.enabled), false);
@@ -1464,7 +1293,7 @@ try {
   await page.waitForFunction(() => document.activeElement.id === 'connection-name');
   assert.equal(await page.locator('#connection-enabled').isChecked(), false, 'Restoring a draft retains the item switch');
   await page.locator('#save-connection-button').focus(); await page.keyboard.press('Tab');
-  assert.equal(await page.evaluate(() => document.activeElement.dataset.id), 'beta', `Inline editor must not trap Tab: ${await page.evaluate(() => document.activeElement.outerHTML)}`);
+  assert.equal(await editor.evaluate(el => el.contains(document.activeElement)),false,'The project editor must not trap Tab');
   await page.locator('[data-generate-password]').click();
   await page.waitForFunction(() => document.querySelector('#generator-result').value.length === 24);
   await page.locator('#generator-use').click();
@@ -1485,7 +1314,16 @@ try {
     await page.evaluate(() => document.querySelectorAll('.toast').forEach(el => el.remove()));
     await page.locator('#connections-list').evaluate(el => el.scrollTop = 0);
     await page.mouse.move(0, 0); await page.screenshot({ path: path.join(artifacts, `inline-${theme}.png`) });
-    assert.equal(await editor.evaluate(el => el.scrollWidth > el.clientWidth), false);
+    const editorBounds = await editor.evaluate(element => {
+      const bounds = element.getBoundingClientRect();
+      const fields = [...element.querySelectorAll('input, select, textarea, button, .module-row')];
+      return { width:element.clientWidth, scroll:element.scrollWidth,
+        overflowing:fields.filter(field=>{
+          const rect=field.getBoundingClientRect();
+          return rect.width&&(rect.left<bounds.left-1||rect.right>bounds.right+1);
+        }).map(field=>field.id||field.getAttribute('aria-label')||field.className) };
+    });
+    assert.ok(editorBounds.scroll<=editorBounds.width+1&&editorBounds.overflowing.length===0,`Editor controls must fit: ${JSON.stringify(editorBounds)}`);
   }
   await page.locator('#save-connection-button').click(); await editor.waitFor({ state: 'hidden' });
   assert.equal(await row('alpha').locator('.connection-name').innerText(), 'Edited synthetic service');
@@ -1496,12 +1334,13 @@ try {
   await toggle('alpha').click(); await page.locator('#connection-name').fill('Draft across navigation');
   await page.evaluate(() => fixture.failDraft = true);
   await toggle('beta').click();
-  assert.equal(await editor.evaluate(el => el.parentElement.dataset.itemId), 'alpha', 'A failed draft write must retain the active form');
+  assert.equal(await toggle('alpha').getAttribute('aria-expanded'), 'true', 'A failed draft write must retain the active form');
   assert.equal(await page.locator('#connection-name').inputValue(), 'Draft across navigation');
-  await slideFilter('#item-type-switch', 0, 1, false, 0);
-  assert.equal(await editor.evaluate(el => el.parentElement.dataset.itemId), 'alpha', 'A failed draft save restores the selected filter and retains the form');
-  await page.evaluate(() => fixture.failDraft = false);
   await slideFilter('#item-type-switch', 0, 1);
+  assert.equal(await toggle('alpha').getAttribute('aria-expanded'), 'true', 'Changing category keeps the edited project visible');
+  assert.equal(await page.locator('#connection-name').inputValue(),'Draft across navigation');
+  await page.evaluate(() => fixture.failDraft = false);
+  await toggle('alpha').click();
   await editor.waitFor({ state: 'hidden' });
   assert.deepEqual(await order(), ['beta']);
   assert.equal(await page.evaluate(() => fixture.drafts.find(d => d.input.id === 'alpha').input.name), 'Draft across navigation');

@@ -22,6 +22,12 @@ export async function auditControlGeometry(page) {
         if (!children.length) continue;
         const outer = well.getBoundingClientRect(), boxes = children.map(el => el.getBoundingClientRect());
         const union = { top: Math.min(...boxes.map(r => r.top)), bottom: Math.max(...boxes.map(r => r.bottom)), left: Math.min(...boxes.map(r => r.left)), right: Math.max(...boxes.map(r => r.right)) };
+        if (well.closest('.project-sidebar')) {
+          const clearance = gaps(outer, union);
+          records.push({label:`${name(well)} sidebar clearance`,gaps:clearance});
+          if (clearance.some(value=>!Number.isFinite(value)||value < -tolerance)) failures.push({label:`${name(well)} overflows sidebar well`,gaps:clearance});
+          continue;
+        }
         check(`${name(well)} outer clearance`, gaps(outer, union));
         for (const child of children) {
           const r = child.getBoundingClientRect();
@@ -42,7 +48,18 @@ export async function auditControlGeometry(page) {
         const capRect = () => control.matches('.switch') ? pseudoRect(control.querySelector('span'), '::after')
           : control.matches('.module-agent-toggle') ? control.querySelector('i').getBoundingClientRect() : pseudoRect(control, '::before');
         const verify = position => {
-          const clearance = gaps(well.getBoundingClientRect(), capRect());
+          const cap = capRect();
+          const clearance = gaps(well.getBoundingClientRect(), cap);
+          if (control.closest('.project-sidebar')) {
+            records.push({label:`${name(control)} sidebar cap at ${position}`,gaps:clearance});
+            if (clearance.some(value=>!Number.isFinite(value)||value < -tolerance)) failures.push({label:`${name(control)} cap overflows sidebar well`,gaps:clearance});
+            if (control.id==='item-type-switch') {
+              const rows=[...control.querySelectorAll('button')].map(row=>row.getBoundingClientRect());
+              const step=(rows.at(-1).top-rows[0].top)/(count-1);
+              if (Math.abs(cap.top-(rows[0].top+step*position))>tolerance) failures.push({label:'Category cap must follow the vertical row',position,top:cap.top});
+            }
+            return;
+          }
           check(`${name(control)} cap at ${position}`, [clearance[0], clearance[2], ...(position === 0 ? [clearance[3]] : []), ...(position === count - 1 ? [clearance[1]] : [])]);
           if (clearance.some(value => value < inset - tolerance)) failures.push({ label: `${name(control)} cap overlaps its rim`, gaps: clearance });
         };

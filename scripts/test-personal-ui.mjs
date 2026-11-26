@@ -207,7 +207,7 @@ try {
     }
   }
   await page.evaluate(()=>{document.documentElement.dataset.textSize='standard';});
-  await page.setViewportSize({width:690,height:1000});
+  await page.setViewportSize({width:1080,height:1000});
   await manualConfig.locator('summary').click();
   await page.locator('[data-page="connections"]').click();
   const projectSearch = page.locator('#title-search-input');
@@ -325,7 +325,7 @@ try {
   }
   await page.locator('#connection-clear-all').click();
   await projectSearch.press('Escape');
-  await page.setViewportSize({width:690,height:1000});
+  await page.setViewportSize({width:1080,height:1000});
   await page.evaluate(async () => {
     fixture.state.connections = [{id:'addresses',name:'Multiple addresses',itemType:'custom',enabled:true,folder:'',host:'a.example',port:22,baseUrl:'https://a.example/',updatedAt:'original',modules:[
       {kind:'host',value:'a.example',alternateValues:['b.example'],agentVisible:true},
@@ -386,7 +386,7 @@ try {
   }
   await page.evaluate(()=>{document.documentElement.dataset.textSize='standard';});
   await page.locator('[data-language="zh"]').click();
-  await page.setViewportSize({width:690,height:1000});
+  await page.setViewportSize({width:1080,height:1000});
   for (const invalid of ['', 'https://c.example/', 'file:///tmp/test']) {
     await urlModule.locator('[data-module-alternate-value]').fill(invalid);
     await page.locator('#save-connection-button').click();
@@ -887,7 +887,7 @@ try {
   assert.deepEqual(await sourceRow.locator('.card-actions .small-button').allTextContents(), ['HISTORY','CHECK','USE','COPY','DEL']);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   await page.locator('[data-page="settings"]').click();
-  await page.locator('#item-layout').selectOption('grid');
+  assert.equal(await page.locator('#item-layout').count(),0,'The project list no longer has a display-mode selector');
   await page.locator('[data-page="connections"]').click();
   const controlsFit = row => row.locator('.card-actions').evaluate(actions => {
     const card = actions.closest('.connection-card').getBoundingClientRect();
@@ -896,9 +896,9 @@ try {
       return bounds.left >= card.left && bounds.right <= card.right + 1 && bounds.bottom <= card.bottom + 1;
     });
   });
-  assert.ok(await controlsFit(sourceRow), 'Copy and other actions fit in the 460px grid layout');
+  assert.ok(await controlsFit(sourceRow), 'Copy and other actions fit in the 460px list layout');
   await page.setViewportSize({width:690,height:1000});
-  assert.ok(await controlsFit(sourceRow), 'Copy and other actions fit in the two-column grid layout');
+  assert.ok(await controlsFit(sourceRow), 'Copy and other actions fit in the 690px list layout');
   assert.deepEqual(errors,[]);
   console.log(JSON.stringify({ok:true,checks:["combined add/draft selector","draft preservation and recovery","card editor","encrypted field payload","one header search and filter panel with Ctrl/Cmd+F and independent page queries","multiple host and URL addresses, default switching, removal, drafts, failed save and address search","combined keyword, type, exact folder and enabled status filters","unsaved edits survive filtering and are saved as drafts","460px filter controls","multiline secure note","generator inserts password","browser address copy, pairing, launch failures and recovery","backup password flow","multiple website rules","migration preview/cancel/commit","committed .env template copy and undo","KeePass XML preview, cancel and confirmation","1Password 1PUX preview, cancel and confirmation","1Password CSV preview, cancel and confirmation","offline cURL preview, cancel, rejection and confirmation","AWS profile preview, cancel, selective import and undo","password history","trash restore and purge from settings","narrow layout"],artifacts},null,2));
 } finally {await browser.close();server.close();}
