@@ -45,11 +45,92 @@ OpenKeylet 免费开源，支持 Windows、macOS 和 Linux，无需注册 OpenKe
 
 支持配置 Antigravity、Claude Code、Codex、Cursor、DeepSeek Harness、OpenClaw 和 OpenCode。其他支持本地 `stdio` MCP 的客户端可以手动配置。MCP 进程按需启动。
 
-| 要做的事 | 可以这样告诉 Agent |
+## Agent 使用示例
+
+把引号或书名号里的示例名称替换成你保存的项目名。下面的提示词使用虚构的项目、路径和资源。涉及桌面或浏览器扩展确认的操作，Agent 可以给出步骤，由你在界面上核对并确认。
+
+### 查找项目和规划操作
+
+| **要做的事** | **可以这样告诉 Agent** |
 | --- | --- |
-| 检查服务器 | `使用 OpenKeylet MCP 中的「Staging Gateway」，查看磁盘使用情况。` |
-| 调用已认证的 API | `使用 OpenKeylet MCP 中的「Release API」，列出 owner/repo 的最近提交。` |
-| 填写登录 | `打开演示控制台，需要登录时使用 OpenKeylet MCP 中的「Atlas Console」。` |
+| 查找凭据 | `在 OpenKeylet MCP 中查找能访问演示控制台的登录项目，列出候选名称和可用操作。` |
+| 指定项目 | `本会话使用 OpenKeylet 中的「Staging Gateway」执行后续 SSH 查询。` |
+| 预览下一步 | `检查「OCI Read Only」是否能查询 app 区间的实例，给出下一条请求、必填参数来源和分页方式，先不要发请求。` |
+
+### SSH、跳板和文件传输
+
+| **要做的事** | **可以这样告诉 Agent** |
+| --- | --- |
+| 检查远程主机 | `使用「Staging Gateway」查看磁盘占用和 nginx 运行状态，报告退出码及错误输出。` |
+| 通过跳板执行 | `使用「Private Worker」的已保存跳板路径，查看目标主机的负载。` |
+| 指定临时连接目标 | `使用「Lab SSH Key」，以 deploy 连接 lab.example.test 的 2222 端口，查看系统版本。` |
+| 将数据通过标准输入传入 | `使用「Staging Gateway」执行远端校验脚本，把这段测试 JSON 通过标准输入传给脚本，返回校验结果。` |
+| 使用 sudo | `使用「Staging Gateway」通过 sudo -S 查询 nginx 状态。把项目的 sudo 密码模块通过标准输入传给 sudo，不显示密码。` |
+| 向远程进程注入凭据 | `使用「Staging Gateway」执行部署预检，把已保存的服务令牌作为环境变量传给脚本，不打印令牌。` |
+| 上传文件或目录 | `通过「Staging Gateway」用 SFTP 上传 ./dist 到 /srv/staging/build-42，保留已有目的地。` |
+| 下载文件或目录 | `通过「Staging Gateway」用 SFTP 把 /srv/staging/reports 下载到 ./reports，保留已有本地文件。` |
+| 确认断线后的任务结果 | `通过「Staging Gateway」只读查询部署 ID build-42 的状态和当前版本；结果未知时先不要重新提交部署。` |
+
+SSH 使用项目的现有信任设置。需要建立或更换主机信任时，请先独立核对指纹，再在本机确认。
+
+### API 调用和分页
+
+| **要做的事** | **可以这样告诉 Agent** |
+| --- | --- |
+| 查询 GitHub 提交 | `使用「Release API」读取 example-org/demo 的最近 20 条提交，给出 SHA 和提交标题。` |
+| 查询 OCI 运行实例 | `使用「OCI Read Only」，先从区间名 app 找到区间 ID，再翻页列出该区间中运行的实例。` |
+| 查询 AWS EC2 | `使用「AWS Sandbox」列出已配置区域中正在运行的 EC2 实例，有下一页就继续。` |
+| 查询 Cloudflare DNS | `使用「DNS Read Only」找到 example.test 的站点 ID，再列出 A 和 CNAME 记录。` |
+| 查询 DigitalOcean | `使用「DigitalOcean Lab」分页列出 Droplets，汇总名称、区域和状态。` |
+| 查询 Hetzner Cloud | `使用「Hetzner Lab」分页列出云服务器，汇总名称和运行状态。` |
+| 调用通用 API | `使用「Build API」请求已保存服务下的 /v1/builds，按 status=failed 过滤，返回 HTTP 状态和结构化数据。` |
+| 发送 JSON | `使用「Build API」向测试服务的 /v1/checks 提交这份 JSON，返回 HTTP 状态。` |
+| 上传表单或附件 | `使用「Build API」将 ./build-report.json 作为 multipart 附件上传到测试报告接口。` |
+| 将响应保存到文件 | `使用「Build API」下载构建清单到 ./artifacts/manifest.json，保留已有文件。` |
+
+### 本地命令、终端和填写凭据
+
+| **要做的事** | **可以这样告诉 Agent** |
+| --- | --- |
+| 运行一次本地命令 | `在本机项目目录执行 npm test，报告退出码、标准输出和错误输出。` |
+| 为本地命令注入凭据 | `使用「Build API」运行本地测试脚本，从已保存模块注入 BUILD_API_TOKEN，只返回测试结果。` |
+| 使用脱敏 .env 模板运行 | `用 OpenKeylet 导入后生成的 .env 模板为 npm run smoke 注入环境变量，只返回测试结果。` |
+| 与本地交互程序对话 | `在 OpenKeylet 的托管终端启动测试登录程序，等账号提示后填写，然后读取结果并关闭会话。` |
+| 填写浏览器字段 | `使用「Atlas Console」的用户名填写当前聚焦的浏览器输入框，不提交表单。` |
+| 填写并提交表单 | `确认当前是 console.example.test 的测试登录页，再用「Atlas Console」的密码填写已聚焦的密码框并提交。` |
+| 填写桌面字段 | `使用「Atlas Console」的密码填写当前聚焦的桌面输入框，不提交。` |
+| 填写一次性验证码 | `在当前 OpenKeylet 托管终端的验证码提示中，填写「Atlas Console」的当前 2FA 验证码，不输出设置种子。` |
+
+浏览器和桌面填写使用当前目标。Agent 的逐字段填写与扩展弹窗按网站规则填写整组登录字段是两个入口。
+
+### 证书和密码库写入
+
+| **要做的事** | **可以这样告诉 Agent** |
+| --- | --- |
+| 查看证书和签发权限 | `检查 OpenKeylet 已授权的 CA 类型和有效期上限，解析 ./certs/lab-server.pem 的域名和到期时间。` |
+| 验证证书或匹配私钥 | `用测试 CA 公共证书验证 ./certs/lab-server.pem 的签名和主机名，并检查它是否匹配「Lab TLS」中保存的私钥。只返回核对结果。` |
+| 签发 SSH 用户证书 | `如果「Lab SSH CA」已获授权，用我提供的公钥为 deploy 签发一小时的 SSH 用户证书。` |
+| 签发 SSH 主机证书 | `如果「Lab SSH CA」已获授权，用我提供的主机公钥为 lab.example.test 签发一天的 SSH 主机证书。` |
+| 签发 TLS 服务端证书 | `如果「Lab TLS CA」已获授权，从我提供的 CSR 为 api.example.test 签发一天的服务端证书。` |
+| 签发 TLS 客户端证书 | `如果「Lab TLS CA」已获授权，从这份 CSR 为 client.example.test 签发一天的 TLS 客户端认证证书。` |
+| 查询密码库写入权限 | `检查 OpenKeylet MCP 是否可以写入「Demo workspace」，只列出允许的操作。` |
+| 创建或修改项目 | `如果已授权，在「Demo workspace」创建「Demo API」，填写我提供的公开服务地址；再把「Release API」的公开用途改为只读发布查询。` |
+| 移动项目 | `如果源文件夹和目标文件夹都已授权，将「Demo API」移到「Demo Archive」，保留现有字段。` |
+
+证书签发使用公钥或 CSR，要求单独的 CA 授权。MCP 写入默认关闭，须按文件夹授权。新增凭据不必贴到对话，可在桌面编辑器中录入。
+
+### 由你在桌面或扩展确认的流程
+
+| **要做的事** | **可以这样告诉 Agent** |
+| --- | --- |
+| 导入密码库 | `告诉我如何在 OpenKeylet 中预览并导入 1Password 1PUX、KeePass XML、Bitwarden JSON 或浏览器 CSV，由我确认。` |
+| 导入开发配置 | `告诉我在哪里导入 .env、OpenSSH 配置、cURL 命令或 AWS CLI 凭据。导入 .env 后，我还要复制绑定到本批项目的脱敏模板。` |
+| 从图片导入 2FA | `指导我在「Atlas Console」的编辑器中选取或粘贴二维码图片，核对预览后保存。` |
+| 扫描网页内的 2FA | `告诉我如何在扩展里扫描当前网页上的设置二维码，核对账户后保存到匹配的登录项目。` |
+| 保存登录或使用 Passkey | `告诉我如何在浏览器扩展里审核并保存当前登录，或者用本地 Passkey 完成网站确认。` |
+| 核对 SSH 指纹 | `指导我在新建 SSH 私钥项目的编辑器中读取候选指纹。我会用独立来源核对，再确认并保存本机信任。` |
+| 导出或导入加密备份 | `告诉我如何导出加密 .mvault，并在另一台设备导入和预览备份内容。` |
+| 预览 GitHub 备份恢复 | `告诉我如何预览私有 GitHub 仓库里的加密快照并确认合并恢复。` |
 
 ## 能做什么
 
