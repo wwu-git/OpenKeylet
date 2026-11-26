@@ -30,14 +30,16 @@ pub(crate) fn permissions(vault: &Vault, args: &[String]) -> Result<()> {
         ["folder", "remove", name] => Some(RemoveFolder(name)),
         _ => bail!("Usage: openkeylet permissions <status|enable|disable|folder add/remove NAME>"),
     };
-    let settings = match change {
-        Some(change) => vault.change_write_permissions(change)?,
-        None => vault.settings()?,
-    };
+    if let Some(change) = change {
+        vault.change_write_permissions(change)?;
+    }
+    let (settings, granted_folders) = vault.agent_write_permissions_state()?;
+    let effective_folders = if settings.agent_write_enabled { granted_folders } else { Vec::new() };
     print_json(serde_json::json!({
         "enabled": settings.agent_write_enabled,
-        "effective": settings.mcp_writes_enabled(),
+        "effective": !effective_folders.is_empty(),
         "folders": settings.agent_write_folders,
+        "effectiveFolders": effective_folders,
     }))
 }
 

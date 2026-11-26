@@ -1,6 +1,6 @@
 //! MCP-only write adapter. Desktop saves retain their existing authorization boundary.
 use crate::{
-    model::{ConnectionInput, ItemModule, PublicConnection, Settings, StoredConnection},
+    model::{ConnectionInput, ItemModule, PublicConnection, StoredConnection, VaultDocument},
     vault::Vault,
 };
 use anyhow::{Result, bail, ensure};
@@ -237,10 +237,12 @@ pub(crate) fn normalize_folders(folders: Vec<String>) -> Result<Vec<String>> {
     }
     Ok(output)
 }
-fn authorize(settings: &Settings, folder: &str) -> Result<()> {
+fn authorize(document: &VaultDocument, folder: &str) -> Result<()> {
+    let settings = &document.settings;
     ensure!(
         settings.mcp_writes_enabled()
             && !folder.is_empty()
+            && document.folders.iter().any(|name| name == folder)
             && settings.agent_write_folders.iter().any(|f| f == folder),
         "MCP write denied: enable writing and authorize the folder in desktop settings or permissions CLI"
     );
@@ -248,7 +250,7 @@ fn authorize(settings: &Settings, folder: &str) -> Result<()> {
 }
 impl Vault {
     pub fn write_capabilities(&self) -> Result<WriteCapabilities> {
-        let settings = self.settings()?;
+        let settings = self.active_agent_write_settings()?;
         Ok(WriteCapabilities {
             enabled:settings.mcp_writes_enabled(), folders:settings.agent_write_folders,
             operations:vec!["create".into(),"update".into(),"move via update".into()],
@@ -271,7 +273,7 @@ impl Vault {
     }
     pub fn agent_create(&self, request: CreateInput) -> Result<WriteOutput> {
         self.update_document_with_result(|document| {
-            authorize(&document.settings, request.folder.trim())?;
+            authorize(document, request.folder.trim())?;
             let mut input: ConnectionInput=serde_json::from_value(serde_json::json!({"name":request.name,"itemType":request.item_type,"folder":request.folder.trim(),"description":request.description.unwrap_or_default(),"enabled":request.enabled.unwrap_or(true)}))?;
             input.oci_bindings = request.oci_bindings;
             input.aws_bindings = request.aws_bindings;
@@ -296,9 +298,9 @@ impl Vault {
                 .find(|item| item.id == id)
                 .ok_or_else(|| anyhow::anyhow!("Project unavailable"))?
                 .clone();
-            authorize(&document.settings, &existing.folder)?;
+            authorize(document, &existing.folder)?;
             if let Some(folder) = &request.folder {
-                authorize(&document.settings, folder.trim())?;
+                authorize(document, folder.trim())?;
             }
             ensure!(
                 request.expected_revision == existing.revision,

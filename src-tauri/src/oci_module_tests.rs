@@ -268,6 +268,7 @@ fn migration_backup_failure_leaves_original_vault_untouched() {
 fn agent_can_create_bind_and_edit_oci_modules_without_changing_visibility() {
     let directory = tempfile::tempdir().unwrap();
     let vault = Vault::open(directory.path().into()).unwrap();
+    vault.manage_folder(crate::vault::FolderOperation::Create, "Agent", None).unwrap();
     vault
         .update_settings_patch(
             serde_json::from_value(json!({"agentWriteEnabled":true,"agentWriteFolders":["Agent"]}))

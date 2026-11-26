@@ -142,6 +142,8 @@ struct BackupPayload {
     version: u8,
     created_at: String,
     connections: Vec<BackupConnection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    folders: Vec<String>,
     #[serde(default)]
     trash: Vec<crate::model::PortableTrashItem>,
 }
@@ -191,7 +193,7 @@ pub fn export_to_file(vault: &Vault, path: impl AsRef<Path>) -> Result<()> {
 }
 
 fn backup_payload(vault: &Vault) -> Result<BackupPayload> {
-    let (connections, trash) = vault.export_backup_entries()?;
+    let (connections, trash, folders) = vault.export_backup_snapshot()?;
     let connections = connections
         .into_iter()
         .map(|(connection, secrets)| BackupConnection {
@@ -205,6 +207,7 @@ fn backup_payload(vault: &Vault) -> Result<BackupPayload> {
         created_at: Utc::now().to_rfc3339(),
         connections,
         trash,
+        folders,
     })
 }
 
@@ -320,6 +323,8 @@ fn merge_backup_payload(vault: &Vault, plain: &[u8], version: u8) -> Result<Impo
 pub struct PreparedBackup {
     active: Vec<(PortableConnection, SecretBundle)>,
     trash: Vec<crate::model::PortableTrashItem>,
+    #[serde(default)]
+    folders: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -327,6 +332,7 @@ pub struct PreparedBackup {
 pub struct RestorePreview {
     pub active: Vec<RestorePreviewRow>,
     pub trash: Vec<RestorePreviewRow>,
+    pub folders: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -383,6 +389,7 @@ impl PreparedBackup {
             }
         };
         Ok(RestorePreview {
+            folders: self.folders.clone(),
             active: self
                 .active
                 .iter()
@@ -412,8 +419,9 @@ impl PreparedBackup {
     ) -> Result<ImportSummary> {
         let active = checked_indices(&selection.active, self.active.len())?;
         let trash = checked_indices(&selection.trash, self.trash.len())?;
+        let all_selected = active.len() == self.active.len() && trash.len() == self.trash.len();
         ensure!(
-            !active.is_empty() || !trash.is_empty(),
+            !active.is_empty() || !trash.is_empty() || all_selected && !self.folders.is_empty(),
             "Select at least one backup item"
         );
         let active_indices = self.active_indices()?;
@@ -439,7 +447,7 @@ impl PreparedBackup {
                 );
             }
         }
-        vault.merge_backup_entries(
+        vault.merge_backup_snapshot(
             self.active
                 .into_iter()
                 .enumerate()
@@ -450,11 +458,12 @@ impl PreparedBackup {
                 .enumerate()
                 .filter_map(|(index, entry)| trash.contains(&index).then_some(entry))
                 .collect(),
+            if all_selected { self.folders } else { Vec::new() },
         )
     }
 
     fn restore_all(self, vault: &Vault) -> Result<ImportSummary> {
-        vault.merge_backup_entries(self.active, self.trash)
+        vault.merge_backup_snapshot(self.active, self.trash, self.folders)
     }
 
     fn active_indices(&self) -> Result<HashMap<uuid::Uuid, usize>> {
@@ -530,6 +539,7 @@ fn parse_backup_payload(plain: &[u8], expected_version: Option<u8>) -> Result<Pr
         return Ok(PreparedBackup {
             active,
             trash: Vec::new(),
+            folders: Vec::new(),
         });
     }
     let payload: BackupPayload =
@@ -550,6 +560,7 @@ fn parse_backup_payload(plain: &[u8], expected_version: Option<u8>) -> Result<Pr
             .map(|item| (item.connection, item.secrets))
             .collect(),
         trash: payload.trash,
+        folders: payload.folders,
     })
 }
 

@@ -4513,6 +4513,7 @@ mod tests {
     async fn write_tools_round_trip_and_hide_malformed_values() {
         let dir = tempfile::tempdir().unwrap();
         let vault = Vault::open(dir.path().join("vault")).unwrap();
+        vault.manage_folder(crate::vault::FolderOperation::Create, "Agent", None).unwrap();
         vault.update_settings_patch(serde_json::from_value(serde_json::json!({"agentWriteEnabled":true,"agentWriteFolders":["Agent"]})).unwrap()).unwrap();
         let mcp = VaultMcp::new(vault.clone());
         let input = serde_json::from_value(serde_json::json!({"name":"MCP synthetic","itemType":"login","folder":"Agent","modules":[{"kind":"password","value":"NEVER-ECHO"}]})).unwrap();

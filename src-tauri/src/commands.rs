@@ -247,6 +247,21 @@ async fn get_state(runtime: State<'_, AppRuntime>) -> Result<AppState, String> {
 }
 
 #[tauri::command]
+async fn manage_folder(
+    app: AppHandle,
+    runtime: State<'_, AppRuntime>,
+    operation: crate::vault::FolderOperation,
+    folder: String,
+    new_name: Option<String>,
+) -> Result<(), String> {
+    let owner = runtime.authorized_owner().await?;
+    runtime.vault.manage_folder(operation, &folder, new_name.as_deref()).map_err(command_error)?;
+    drop(owner);
+    emit_changed(&app);
+    Ok(())
+}
+
+#[tauri::command]
 async fn owner_status(runtime: State<'_, AppRuntime>) -> Result<OwnerLockState, String> {
     owner_lock_state(&runtime).await
 }
@@ -846,7 +861,10 @@ async fn update_settings(
     runtime: State<'_, AppRuntime>,
     patch: SettingsPatch,
 ) -> Result<crate::model::Settings, String> {
-    let owner = if patch.allow_untrusted_direct_ssh.is_some() {
+    let owner = if patch.allow_untrusted_direct_ssh.is_some()
+        || patch.agent_write_enabled.is_some()
+        || patch.agent_write_folders.is_some()
+    {
         Some(runtime.authorized_owner().await?)
     } else {
         None
@@ -2078,6 +2096,7 @@ pub fn run_gui() -> Result<()> {
         })
         .invoke_handler(tauri::generate_handler![
             get_state,
+            manage_folder,
             owner_status,
             owner_touch,
             owner_set_pin,

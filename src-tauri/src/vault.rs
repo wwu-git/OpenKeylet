@@ -14,6 +14,7 @@ use atomic_write_file::AtomicWriteFile;
 use chrono::Utc;
 use fs2::FileExt;
 use std::{
+    collections::BTreeSet,
     fs::{self, File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -46,6 +47,9 @@ mod oci_module_tests;
 #[path = "vault_lifecycle_tests.rs"]
 mod lifecycle_tests;
 #[cfg(test)]
+#[path = "vault_folder_tests.rs"]
+mod folder_tests;
+#[cfg(test)]
 #[path = "ssh_jump_tests.rs"]
 mod ssh_jump_tests;
 #[cfg(test)]
@@ -76,6 +80,14 @@ pub enum WritePermissionChange<'a> {
     Enable(bool),
     AddFolder(&'a str),
     RemoveFolder(&'a str),
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FolderOperation {
+    Create,
+    Rename,
+    Delete,
 }
 
 pub struct DecryptedConnection {
@@ -110,6 +122,7 @@ impl Vault {
             if !vault.inner.vault_path.exists() {
                 let document = VaultDocument {
                     version: VAULT_VERSION,
+                    folders: Vec::new(),
                     certificate_issuances: Vec::new(),
                     ssh_host_trust: Vec::new(),
                     settings: Settings::default(),
@@ -414,6 +427,76 @@ impl Vault {
         Ok(self.read_document()?.settings)
     }
 
+    pub(crate) fn active_agent_write_settings(&self) -> Result<Settings> {
+        let (mut settings, granted_folders) = self.agent_write_permissions_state()?;
+        settings.agent_write_folders = granted_folders;
+        Ok(settings)
+    }
+
+    pub fn agent_write_permissions_state(&self) -> Result<(Settings, Vec<String>)> {
+        let document = self.read_document()?;
+        let folders = vault_folders(&document);
+        let granted_folders = document
+            .settings
+            .agent_write_folders
+            .iter()
+            .filter(|name| folders.binary_search(name).is_ok())
+            .cloned()
+            .collect();
+        Ok((document.settings, granted_folders))
+    }
+
+    pub fn manage_folder(
+        &self,
+        operation: FolderOperation,
+        folder: &str,
+        new_name: Option<&str>,
+    ) -> Result<()> {
+        self.update_document(|document| {
+            let destination = match (operation, new_name) {
+                (FolderOperation::Create, None) => return insert_new_folder(document, folder),
+                (FolderOperation::Rename, Some(name)) => Some(checked_folder_name(name)?),
+                (FolderOperation::Delete, None) => None,
+                _ => bail!("Invalid folder operation"),
+            };
+            let position = document
+                .folders
+                .iter()
+                .position(|name| name == folder)
+                .context("Folder not found")?;
+            if destination.as_deref() == Some(folder) {
+                return Ok(());
+            }
+            let granted = document.settings.agent_write_folders.iter().any(|name| name == folder);
+            if let Some(name) = destination.as_deref() {
+                insert_new_folder(document, name)?;
+                if granted {
+                    document.settings.agent_write_folders.push(name.to_owned());
+                }
+            }
+            document.folders.remove(position);
+            document.settings.agent_write_folders.retain(|name| name != folder);
+            let destination = destination.as_deref().unwrap_or_default();
+            let updated_at = Utc::now().to_rfc3339();
+            for item in document.connections.iter_mut().chain(
+                document.trash.iter_mut().map(|entry| &mut entry.connection),
+            ) {
+                if item.folder == folder {
+                    item.folder = destination.to_owned();
+                    item.updated_at = updated_at.clone();
+                }
+            }
+            for draft in &mut document.editor_drafts {
+                let mut input: ConnectionInput = self.inner.key.decrypt(&draft.payload)?;
+                if input.folder.trim() == folder {
+                    input.folder = destination.to_owned();
+                    draft.payload = self.inner.key.encrypt(&input)?;
+                }
+            }
+            Ok(())
+        })
+    }
+
     pub fn update_settings(&self, mut next: Settings) -> Result<Settings> {
         if next.browser_port == 0 {
             bail!("Local port must be between 1–65535");
@@ -428,8 +511,9 @@ impl Vault {
         } else {
             "tray".to_owned()
         };
-        next.agent_write_folders = crate::vault_write::normalize_folders(next.agent_write_folders)?;
         self.update_document(|document| {
+            next.agent_write_folders =
+                checked_grant_list(document, std::mem::take(&mut next.agent_write_folders))?;
             // Pairing state is changed only by the authenticated bridge handshake.
             next.browser_paired = document.settings.browser_paired;
             document.settings = next.clone();
@@ -441,27 +525,29 @@ impl Vault {
     pub fn change_write_permissions(&self, change: WritePermissionChange<'_>) -> Result<Settings> {
         use crate::vault_write::normalize_folders;
         self.update_document_with_result(|document| {
-            let settings = &mut document.settings;
             match change {
                 WritePermissionChange::Enable(enabled) => {
-                    if enabled && settings.agent_write_folders.is_empty() {
+                    if enabled && !document.settings.agent_write_folders.iter().any(|name| document.folders.contains(name)) {
                         bail!("Add at least one writable folder before enabling MCP writes");
                     }
-                    settings.agent_write_enabled = enabled;
+                    document.settings.agent_write_enabled = enabled;
                 }
                 WritePermissionChange::AddFolder(name) => {
-                    let mut folders = settings.agent_write_folders.clone();
-                    folders.push(name.to_owned());
-                    settings.agent_write_folders = normalize_folders(folders)?;
+                    let name = checked_folder_name(name)?;
+                    if !document.folders.contains(&name) {
+                        insert_new_folder(document, &name)?;
+                    }
+                    anyhow::ensure!(!document.settings.agent_write_folders.contains(&name), "Duplicate writable folder");
+                    document.settings.agent_write_folders.push(name);
                 }
                 WritePermissionChange::RemoveFolder(name) => {
                     let name = normalize_folders(vec![name.to_owned()])?.remove(0);
-                    let index = settings.agent_write_folders.iter().position(|folder| folder == &name)
+                    let index = document.settings.agent_write_folders.iter().position(|folder| folder == &name)
                         .context("Writable folder not found")?;
-                    settings.agent_write_folders.remove(index);
+                    document.settings.agent_write_folders.remove(index);
                 }
             }
-            Ok(settings.clone())
+            Ok(document.settings.clone())
         })
     }
 
@@ -472,7 +558,13 @@ impl Vault {
                 next.allow_untrusted_direct_ssh = allow;
             }
             if let Some(enabled) = patch.agent_write_enabled { next.agent_write_enabled = enabled; }
-            if let Some(folders) = patch.agent_write_folders { next.agent_write_folders = crate::vault_write::normalize_folders(folders)?; }
+            if let Some(folders) = patch.agent_write_folders {
+                if let Some(expected) = patch.expected_agent_write_folders {
+                    anyhow::ensure!(expected == document.settings.agent_write_folders,
+                        "Agent write permissions changed; refresh and try again");
+                }
+                next.agent_write_folders = checked_grant_list(document, folders)?;
+            }
             if let Some(language) = patch.language {
                 next.language = if language.eq_ignore_ascii_case("en") {
                     "en".to_owned()
@@ -1057,6 +1149,7 @@ impl Vault {
         };
         Ok(AppState {
             connections,
+            folders: if unlocked { vault_folders(&document) } else { Vec::new() },
             activities: if unlocked { document.activities } else { Vec::new() },
             mcp: McpState {
                 status: "ready".to_owned(),
@@ -1083,7 +1176,21 @@ impl Vault {
         Vec<(PortableConnection, SecretBundle)>,
         Vec<crate::model::PortableTrashItem>,
     )> {
+        self.export_backup_snapshot().map(|(active, trash, _)| (active, trash))
+    }
+
+    pub(crate) fn export_backup_snapshot(
+        &self,
+    ) -> Result<(
+        Vec<(PortableConnection, SecretBundle)>,
+        Vec<crate::model::PortableTrashItem>,
+        Vec<String>,
+    )> {
         let document = self.read_document()?;
+        let folders = vault_folders(&document)
+            .into_iter()
+            .filter(|name| checked_folder_name(name).is_ok_and(|checked| &checked == name))
+            .collect();
         let active = document
             .connections
             .into_iter()
@@ -1110,7 +1217,7 @@ impl Vault {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        Ok((active, trash))
+        Ok((active, trash, folders))
     }
 
     pub fn merge_connections(
@@ -1125,10 +1232,27 @@ impl Vault {
         imported: Vec<(PortableConnection, SecretBundle)>,
         trash: Vec<crate::model::PortableTrashItem>,
     ) -> Result<ImportSummary> {
+        self.merge_backup_snapshot(imported, trash, Vec::new())
+    }
+
+    pub(crate) fn merge_backup_snapshot(
+        &self,
+        imported: Vec<(PortableConnection, SecretBundle)>,
+        trash: Vec<crate::model::PortableTrashItem>,
+        folders: Vec<String>,
+    ) -> Result<ImportSummary> {
         self.update_document_with_result(|document| {
+            let initial_folder_count = document.folders.len();
+            for name in folders {
+                let name = checked_folder_name(&name)?;
+                if !document.folders.contains(&name) {
+                    insert_new_folder(document, &name)?;
+                }
+            }
             let mut summary = ImportSummary {
                 added: 0,
                 merged: 0,
+                folders_added: 0,
             };
             let mut ids = std::collections::HashSet::new();
             anyhow::ensure!(imported.iter().all(|(item, _)| ids.insert(item.id)) && trash.iter().all(|entry| ids.insert(entry.connection.id)), "Duplicate project IDs in imported snapshot");
@@ -1236,6 +1360,7 @@ impl Vault {
                 });
                 summary.added += 1;
             }
+            summary.folders_added = vault_folders(document).len().saturating_sub(initial_folder_count);
             document.activities.insert(
                 0,
                 Activity {
@@ -1300,13 +1425,7 @@ impl Vault {
     where
         F: FnOnce(&mut VaultDocument) -> Result<()>,
     {
-        self.with_exclusive_lock(|_| {
-            let mut document = self.read_document_unlocked()?;
-            let before = document.clone();
-            update(&mut document)?;
-            advance_revisions(&before, &mut document);
-            self.write_document_unlocked(&document)
-        })
+        self.update_document_with_result(update)
     }
 
     pub(crate) fn update_document_with_result<T, F>(&self, update: F) -> Result<T>
@@ -1315,8 +1434,14 @@ impl Vault {
     {
         self.with_exclusive_lock(|_| {
             let mut document = self.read_document_unlocked()?;
+            document.folders = vault_folders(&document);
             let before = document.clone();
             let result = update(&mut document)?;
+            let folders = vault_folders(&document);
+            document.settings.agent_write_folders.retain(|name| {
+                document.folders.contains(name) || folders.binary_search(name).is_err()
+            });
+            document.folders = folders;
             advance_revisions(&before, &mut document);
             self.write_document_unlocked(&document)?;
             Ok(result)
@@ -1343,6 +1468,40 @@ impl Vault {
             .open(&self.inner.lock_path)
             .context("Could not open vault lock file")
     }
+}
+
+fn vault_folders(document: &VaultDocument) -> Vec<String> {
+    document
+        .folders
+        .iter()
+        .chain(document.connections.iter().map(|item| &item.folder))
+        .chain(document.trash.iter().map(|entry| &entry.connection.folder))
+        .filter(|name| !name.is_empty())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn checked_folder_name(name: &str) -> Result<String> {
+    let name = checked_text(name, "Folder", 120)?;
+    anyhow::ensure!(!name.is_empty() && !name.chars().any(char::is_control), "Invalid folder name");
+    Ok(name)
+}
+
+fn checked_grant_list(document: &VaultDocument, folders: Vec<String>) -> Result<Vec<String>> {
+    let folders = crate::vault_write::normalize_folders(folders)?;
+    anyhow::ensure!(folders.iter().all(|folder| document.folders.contains(folder) || document.settings.agent_write_folders.contains(folder)),
+        "Choose an existing folder before granting Agent write permission");
+    Ok(folders)
+}
+
+fn insert_new_folder(document: &mut VaultDocument, name: &str) -> Result<()> {
+    let name = checked_folder_name(name)?;
+    anyhow::ensure!(!document.folders.contains(&name), "A folder with this name already exists");
+    document.settings.agent_write_folders.retain(|folder| folder != &name);
+    document.folders.push(name);
+    Ok(())
 }
 
 fn migrate_legacy_oci_input(input: &mut ConnectionInput) -> Result<()> {

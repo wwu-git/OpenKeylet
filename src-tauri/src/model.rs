@@ -41,6 +41,7 @@ pub struct SettingsPatch {
     pub allow_untrusted_direct_ssh: Option<bool>,
     pub agent_write_enabled: Option<bool>,
     pub agent_write_folders: Option<Vec<String>>,
+    pub expected_agent_write_folders: Option<Vec<String>>,
     pub language: Option<String>,
     pub close_behavior: Option<String>,
     pub browser_enabled: Option<bool>,
@@ -833,6 +834,8 @@ pub struct NewActivity {
 #[serde(rename_all = "camelCase")]
 pub struct VaultDocument {
     #[serde(default)]
+    pub folders: Vec<String>,
+    #[serde(default)]
     pub certificate_issuances: Vec<CertificateIssuanceRecord>,
     #[serde(default)]
     pub ssh_host_trust: Vec<SshHostTrust>,
@@ -944,6 +947,7 @@ pub struct BrowserBridgeState {
 #[serde(rename_all = "camelCase")]
 pub struct AppState {
     pub settings: Settings,
+    pub folders: Vec<String>,
     pub connections: Vec<PublicConnection>,
     pub activities: Vec<Activity>,
     pub mcp: McpState,
@@ -956,6 +960,7 @@ pub struct AppState {
 pub struct ImportSummary {
     pub added: usize,
     pub merged: usize,
+    pub folders_added: usize,
 }
 
 #[cfg(test)]

@@ -7,6 +7,9 @@ fn fixture() -> (tempfile::TempDir, Vault) {
     (dir, vault)
 }
 fn allow(vault: &Vault, folders: &[&str]) {
+    for folder in folders {
+        let _ = vault.manage_folder(crate::vault::FolderOperation::Create, folder, None);
+    }
     vault
         .update_settings_patch(
             serde_json::from_value(json!({"agentWriteEnabled":true,"agentWriteFolders":folders}))
