@@ -49,6 +49,8 @@ const staticCopy = [
   ['#project-type-heading', 'text', '项目分类', 'Categories'],
   ['#project-folder-heading', 'text', '文件夹', 'Folders'],
   ['[data-folder-action="create"]', 'aria-label', '新建文件夹', 'New folder'],
+  ['[data-folder-action="rename"]', 'text', '重命名…', 'Rename…'],
+  ['[data-folder-action="delete"]', 'text', '删除文件夹…', 'Delete folder…'],
   ['#project-detail', 'aria-label', '项目详情', 'Project details'],
   ['#project-detail-back', 'text', '‹ 返回项目列表', '‹ Back to projects'],
   ['#project-folder-name-label', 'text', '文件夹名称', 'Folder name'],
@@ -319,6 +321,8 @@ let projectFieldView = null;
 const revealedProjectFields = new Map();
 const pendingProjectFields = new Set();
 let folderDialogState = null;
+let folderMenuTrigger = null;
+let renderedProjectFoldersMarkup = '';
 let folderOperationPending = false;
 let currentItemStatusFilter = 'all';
 const settingsFilterOrder = ['all', 'SYSTEM', 'MCP', 'SSH', 'APP', 'WEB', 'CLOUD', 'SAFE'];
@@ -460,6 +464,7 @@ function clearOwnerPlaintext() {
   selectedProjectId = null;
   $('#page-connections').removeAttribute('data-detail-open');
   $('#project-detail-content').replaceChildren();
+  closeProjectFolderMenu();
   $('#project-folder-dialog').close();
   currentModules.forEach((module) => { module.secretValue = ''; });
   $$('[data-secret-value]').forEach((input) => { input.value = ''; });
@@ -1055,16 +1060,46 @@ function projectFolderOptions() {
 function renderProjectFolders(options) {
   const pane = $('#project-folder-list');
   const selected = currentFolderFilter;
-  const rename = localized('重命名', 'Rename');
-  const remove = localized('删除', 'Delete');
   const markup = options.map(([value, label]) => {
     const chosen = value === selected;
-    const actions = chosen && value.startsWith('folder:')
-      ? `<div class="project-folder-actions"><button type="button" data-folder-action="rename">${rename}</button><button type="button" data-folder-action="delete">${remove}</button></div>`
+    const menuLabel = escapeHtml(localized(`${label} 的操作`, `Actions for ${label}`));
+    const actions = value.startsWith('folder:')
+      ? `<button type="button" class="project-folder-more" data-project-folder-menu="${escapeHtml(value)}" aria-haspopup="menu" aria-expanded="false" aria-controls="project-folder-menu" aria-label="${menuLabel}" title="${menuLabel}">⋯</button>`
       : '';
-    return `<div><button type="button" class="project-folder-select" data-project-folder="${escapeHtml(value)}" title="${escapeHtml(label)}" aria-pressed="${chosen}">${escapeHtml(label)}</button>${actions}</div>`;
+    return `<div class="project-folder-row"><button type="button" class="project-folder-select" data-project-folder="${escapeHtml(value)}" title="${escapeHtml(label)}" aria-pressed="${chosen}">${escapeHtml(label)}</button>${actions}</div>`;
   }).join('');
-  if (pane.innerHTML !== markup) pane.innerHTML = markup;
+  if (markup !== renderedProjectFoldersMarkup) {
+    closeProjectFolderMenu();
+    pane.innerHTML = markup;
+    renderedProjectFoldersMarkup = markup;
+  }
+}
+
+function closeProjectFolderMenu(restoreFocus = false) {
+  if (!folderMenuTrigger) return;
+  const trigger = folderMenuTrigger;
+  folderMenuTrigger = null;
+  $('#project-folder-menu').hidden = true;
+  trigger.setAttribute('aria-expanded', 'false');
+  if (restoreFocus && trigger.isConnected) trigger.focus({ preventScroll: true });
+}
+
+function openProjectFolderMenu(trigger, point) {
+  if (!ownerLockState.unlocked || folderOperationPending) return;
+  closeProjectFolderMenu();
+  folderMenuTrigger = trigger;
+  trigger.setAttribute('aria-expanded', 'true');
+  const menu = $('#project-folder-menu');
+  menu.setAttribute('aria-label', trigger.getAttribute('aria-label'));
+  menu.hidden = false;
+  const anchor = trigger.getBoundingClientRect();
+  const gutter = 6;
+  const x = point?.clientX ?? anchor.right - menu.offsetWidth;
+  const y = point?.clientY ?? anchor.bottom + 3;
+  const above = (point?.clientY ?? anchor.top - 3) - menu.offsetHeight;
+  menu.style.left = `${Math.max(gutter, Math.min(x, innerWidth - gutter - menu.offsetWidth))}px`;
+  menu.style.top = `${Math.max(gutter, y + menu.offsetHeight <= innerHeight - gutter ? y : above)}px`;
+  $('[role="menuitem"]', menu).focus({ preventScroll: true });
 }
 
 function focusProjectFolder() {
@@ -1199,9 +1234,8 @@ async function handleProjectFieldAction(button) {
   }
 }
 
-async function manageProjectFolder(operation) {
+async function manageProjectFolder(operation, folder = '') {
   if (!state || !ownerLockState.unlocked || folderOperationPending) return;
-  const folder = currentFolderFilter.startsWith('folder:') ? currentFolderFilter.slice(7) : '';
   if (operation !== 'create' && !projectFolderNames().includes(folder)) return;
   const epoch = ownerEpoch;
   if (operation === 'delete') {
@@ -1234,7 +1268,9 @@ async function saveProjectFolder(operation, folder, name, epoch) {
     if (epoch !== ownerEpoch) return;
     await api.manageFolder(operation, operation === 'create' ? name : folder, operation === 'rename' ? name : undefined);
     if (epoch !== ownerEpoch) return;
-    currentFolderFilter = operation === 'delete' ? 'unfiled' : `folder:${name}`;
+    if (operation === 'create' || currentFolderFilter === `folder:${folder}`) {
+      currentFolderFilter = operation === 'delete' ? 'unfiled' : `folder:${name}`;
+    }
     $('#project-folder-dialog').close();
     await refresh();
     if (epoch === ownerEpoch) focusProjectFolder();
@@ -3383,7 +3419,7 @@ $('#migration-batch-undo').onclick = async () => {
 
 document.addEventListener('click', async (event) => {
   if (event.target.closest('#title-search-toggle')) setTitleSearchOpen(!titleSearchOpen);
-  else if (titleSearchOpen && !event.target.closest('#title-search, #connection-filter-panel, #connection-active-filters, [data-clear-item-filter], [data-action="clear-connection-filters"]')) setTitleSearchOpen(false, false);
+  else if (titleSearchOpen && !event.target.closest('#title-search, #connection-filter-panel, #connection-active-filters, [data-clear-item-filter], [data-action="clear-connection-filters"], #project-folder-menu, [data-project-folder-menu]')) setTitleSearchOpen(false, false);
   const filterButton = event.target.closest('.filter-strip button');
   if (filterButton && !switchSelectionPending) await selectFilterButton(filterButton);
   const languageButton = event.target.closest('[data-language]');
@@ -3663,7 +3699,16 @@ document.addEventListener('click', async (event) => {
   }
 });
 
-$('#project-folders').addEventListener('click', event => {
+const projectFolders = $('#project-folders');
+const projectFolderMenu = $('#project-folder-menu');
+
+projectFolders.addEventListener('click', event => {
+  const trigger = event.target.closest('[data-project-folder-menu]');
+  if (trigger) {
+    if (trigger === folderMenuTrigger) closeProjectFolderMenu(true);
+    else openProjectFolderMenu(trigger);
+    return;
+  }
   const folder = event.target.closest('[data-project-folder]');
   if (folder) {
     currentFolderFilter = folder.dataset.projectFolder;
@@ -3671,8 +3716,57 @@ $('#project-folders').addEventListener('click', event => {
     focusProjectFolder();
   }
   const action = event.target.closest('[data-folder-action]');
-  if (action) void manageProjectFolder(action.dataset.folderAction);
+  if (action?.dataset.folderAction === 'create') void manageProjectFolder('create');
 });
+projectFolders.addEventListener('contextmenu', event => {
+  const row = event.target.closest('.project-folder-row');
+  const trigger = row?.querySelector('[data-project-folder-menu]');
+  if (!trigger) return;
+  event.preventDefault();
+  openProjectFolderMenu(trigger, event);
+});
+projectFolders.addEventListener('keydown', event => {
+  if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return;
+  const row = event.target.closest('.project-folder-row');
+  const trigger = row?.querySelector('[data-project-folder-menu]');
+  if (!trigger) return;
+  event.preventDefault();
+  openProjectFolderMenu(trigger);
+});
+projectFolderMenu.addEventListener('click', event => {
+  const action = event.target.closest('[data-folder-action]');
+  if (!folderMenuTrigger || !action) return;
+  const folder = folderMenuTrigger.dataset.projectFolderMenu.slice(7);
+  closeProjectFolderMenu(true);
+  void manageProjectFolder(action.dataset.folderAction, folder);
+});
+projectFolderMenu.addEventListener('keydown', event => {
+  if (event.key === 'Escape' || event.key === 'Tab') {
+    closeProjectFolderMenu(true);
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+    return;
+  }
+  const items = $$('[role="menuitem"]', projectFolderMenu);
+  const index = items.indexOf(document.activeElement);
+  const steps = { ArrowUp: -1, ArrowDown: 1 };
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
+    : event.key in steps ? (index + steps[event.key] + items.length) % items.length : null;
+  if (next === null) return;
+  event.preventDefault();
+  items[next].focus();
+});
+document.addEventListener('pointerdown', event => {
+  if (folderMenuTrigger && !event.target.closest('#project-folder-menu, [data-project-folder-menu]')) closeProjectFolderMenu();
+});
+document.addEventListener('focusin', event => {
+  if (folderMenuTrigger && !event.target.closest('#project-folder-menu, [data-project-folder-menu]')) closeProjectFolderMenu();
+});
+$('#project-sidebar').addEventListener('scroll', () => closeProjectFolderMenu(true), { passive: true });
+window.addEventListener('resize', () => closeProjectFolderMenu(true));
+window.addEventListener('blur', () => closeProjectFolderMenu(true));
 $('#project-folder-cancel').addEventListener('click', () => $('#project-folder-dialog').close());
 $('#project-folder-dialog').addEventListener('cancel', event => {
   if (folderOperationPending) event.preventDefault();

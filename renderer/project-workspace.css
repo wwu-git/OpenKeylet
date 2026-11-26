@@ -93,8 +93,16 @@ html[data-theme="light"] #page-connections {
   font: 13px var(--sans);
 }
 #project-folders button:hover { background: var(--field); }
-#project-folders [aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-ink); }
 #project-folders .project-folder-add { width: 28px; height: 28px; }
+.project-folder-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  border-radius: 7px;
+}
+.project-folder-row:hover { background: var(--field); }
+.project-folder-row:has(> [aria-pressed="true"]) { background: var(--accent-soft); color: var(--accent-ink); }
+#project-folders .project-folder-select:hover { background: transparent; }
 .project-folder-select {
   width: 100%;
   padding: 8px;
@@ -103,8 +111,40 @@ html[data-theme="light"] #page-connections {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.project-folder-actions { display: flex; flex-wrap: wrap; gap: 4px; padding: 2px 4px 5px; }
-#project-folders .project-folder-actions button { padding: 4px; font-size: 11px; }
+#project-folders .project-folder-more {
+  width: 28px;
+  height: 27px;
+  margin-inline-end: 3px;
+  padding: 0;
+  opacity: 0;
+  font-size: 17px;
+}
+#project-folders .project-folder-row:is(:hover, :focus-within, :has([aria-pressed="true"], [aria-expanded="true"])) .project-folder-more { opacity: 1; }
+@media (hover: none) {
+  #project-folders .project-folder-more { opacity: 1; }
+}
+#project-folders button:focus-visible {
+  outline: 2px solid var(--accent-ink);
+  outline-offset: -2px;
+}
+#project-folder-menu {
+  position: fixed;
+  z-index: 160;
+  display: grid;
+  min-width: min(144px, calc(100vw - 12px));
+  max-height: calc(100dvh - 12px);
+  overflow: auto;
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--ink);
+  background: var(--chassis);
+  box-shadow: var(--shadow-float);
+}
+#project-folder-menu[hidden] { display: none; }
+#project-folder-menu button { min-height: 30px; padding: 4px 9px; text-align: start; }
+#project-folder-menu [data-folder-action="delete"] { color: var(--danger); }
 #page-connections #connections-list {
   min-width: 0;
   min-height: 0;

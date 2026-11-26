@@ -151,6 +151,10 @@
               <section id="project-folders">
                 <div class="project-folder-heading"><h2 id="project-folder-heading">Folders</h2><button type="button" class="project-folder-add" data-folder-action="create" aria-label="New folder">＋</button></div>
                 <div id="project-folder-list"></div>
+                <div id="project-folder-menu" role="menu" hidden>
+                  <button type="button" role="menuitem" tabindex="-1" data-folder-action="rename">Rename…</button>
+                  <button type="button" role="menuitem" tabindex="-1" data-folder-action="delete">Delete folder…</button>
+                </div>
               </section>
             </nav>
             <div class="connections-grid" id="connections-list" tabindex="0" aria-label="Vault items"></div>
