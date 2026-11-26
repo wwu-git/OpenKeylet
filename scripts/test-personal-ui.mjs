@@ -926,16 +926,32 @@ try {
   await page.locator('[data-page="settings"]').click();
   assert.equal(await page.locator('#item-layout').count(),0,'The project list no longer has a display-mode selector');
   await page.locator('[data-page="connections"]').click();
-  const controlsFit = row => row.locator('.card-actions').evaluate(actions => {
-    const card = actions.closest('.connection-card').getBoundingClientRect();
-    return [...actions.querySelectorAll('button')].every(button => {
-      const bounds = button.getBoundingClientRect();
-      return bounds.left >= card.left && bounds.right <= card.right + 1 && bounds.bottom <= card.bottom + 1;
-    });
-  });
-  assert.ok(await controlsFit(sourceRow), 'Copy and other actions fit in the 460px list layout');
-  await page.setViewportSize({width:690,height:1000});
-  assert.ok(await controlsFit(sourceRow), 'Copy and other actions fit in the 690px list layout');
+  await page.waitForFunction(() => !document.querySelector('#toast-region .toast'));
+  for (const theme of ['dark', 'light']) {
+    if (await page.locator('html').getAttribute('data-theme') !== theme) await page.locator('#theme-toggle').click();
+    for (const width of [460, 690, 800, 1440]) {
+      await page.setViewportSize({width,height:900});
+      const layout = await sourceRow.evaluate(row => {
+        const card = row.getBoundingClientRect();
+        const name = row.querySelector('.connection-name').getBoundingClientRect();
+        const controls = [...row.querySelectorAll('.card-actions button')].map(button => button.getBoundingClientRect());
+        const midY = bounds => (bounds.top + bounds.bottom) / 2;
+        return {
+          fits: controls.every(bounds => bounds.left >= card.left && bounds.right <= card.right + 1 && bounds.bottom <= card.bottom + 1),
+          oneActionLine: controls.every(bounds => Math.abs(midY(bounds) - midY(controls[0])) <= 1),
+          sharesNameLine: Math.abs(midY(name) - midY(controls[0])) <= 1,
+          belowName: controls[0].top >= name.bottom - 1,
+        };
+      });
+      assert.ok(layout.fits && layout.oneActionLine, `${theme} ${width}: actions including History fit on one line`);
+      const wideList = width === 690 || width === 1440;
+      assert.ok(wideList ? layout.sharesNameLine : layout.belowName, JSON.stringify({theme,width,...layout}));
+      if (width === 460 || width === 1440) {
+        await sourceRow.scrollIntoViewIfNeeded();
+        await page.screenshot({path:path.join(artifacts,`compact-list-${width}-${theme}.png`)});
+      }
+    }
+  }
   assert.deepEqual(errors,[]);
   console.log(JSON.stringify({ok:true,checks:["combined add/draft selector","draft preservation and recovery","card editor","encrypted field payload","one header search and filter panel with Ctrl/Cmd+F and independent page queries","multiple host and URL addresses, default switching, removal, drafts, failed save and address search","combined keyword, type, exact folder and enabled status filters","unsaved edits survive filtering and are saved as drafts","460px filter controls","multiline secure note","generator inserts password","browser address copy, pairing, launch failures and recovery","backup password flow","multiple website rules","migration preview/cancel/commit","committed .env template copy and undo","KeePass XML preview, cancel and confirmation","1Password 1PUX preview, cancel and confirmation","1Password CSV preview, cancel and confirmation","offline cURL preview, cancel, rejection and confirmation","AWS profile preview, cancel, selective import and undo","password history","trash restore and purge from settings","narrow layout"],artifacts},null,2));
 } finally {await browser.close();server.close();}
