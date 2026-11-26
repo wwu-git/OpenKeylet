@@ -261,6 +261,7 @@ const api = {
   },
   setEnabled: (id, enabled) => invoke('set_connection_enabled', { id, enabled }),
   reorder: (ids, expectedOrder) => invoke('reorder_connections', { ids, expectedOrder }),
+  duplicate: (id, expectedUpdatedAt) => invoke('duplicate_connection', { id, expectedUpdatedAt }),
   remove: (id, expectedUpdatedAt) => invoke('delete_connection', { id, expectedUpdatedAt }),
   trash: () => invoke('owner_trash'),
   restore: (id, deletedAt) => invoke('owner_restore_item', { id, deletedAt }),
@@ -358,6 +359,7 @@ let activityLoadPending = false;
 const expandedActivityErrors = new Set();
 let ownerLockState = { pinConfigured: false, unlocked: false, expiresInSeconds: 0 };
 let ownerEpoch = 0;
+const pendingItemCopies = new Set();
 let ownerTouchAt = -Infinity;
 let ownerTouchPending = false;
 let ownerLockPending = false;
@@ -1105,6 +1107,8 @@ function renderConnections() {
         ? localized('仅检查本机 AWS 签名配置，不发送请求，不验证云端凭据或 IAM 权限。', 'Check local AWS signing configuration only. No request is sent; cloud credentials and IAM permissions are not verified.')
       : localized('检查连接', 'Check connection');
     const agentActions = itemCapabilities(item).length > 0;
+    const copyable = !item.certificateAuthority && item.itemType !== 'passkey' && !item.passkeys?.length;
+    const copyLabel = localized('复制项目', 'Duplicate item');
     const reorderLabel = localized(`${item.name}：单击展开或收起；拖动排序，或按上/下方向键`, `${item.name}: click to expand or collapse; drag to reorder, or use the Up/Down arrow keys`);
     const toggleLabel = item.enabled
       ? localized('停用此项目；Agent 将无法使用其中的秘密', 'Disable this item; agents will no longer be able to use its secrets')
@@ -1115,7 +1119,10 @@ function renderConnections() {
       <button class="connection-name" type="button" draggable="false" data-action="edit" data-id="${escapeHtml(item.id)}" data-item-reorder="${escapeHtml(item.id)}" aria-expanded="false" aria-controls="connection-modal" aria-label="${escapeHtml(reorderLabel)}" aria-keyshortcuts="Enter Space ArrowUp ArrowDown Home End" title="${escapeHtml(reorderLabel)}"><span class="lettering-ink">${escapeHtml(item.name)}</span></button>
       <div class="card-actions" role="group" aria-label="${escapeHtml(item.name)}">
         <button class="module-state item-toggle" type="button" data-action="toggle-enabled" data-id="${item.id}" aria-pressed="${item.enabled}" title="${toggleLabel}" aria-label="${toggleLabel}"><i class="status-dot ${item.enabled ? '' : 'off'}" aria-hidden="true"></i></button>
-        ${agentActions ? `<button class="small-button" type="button" data-action="test" data-id="${item.id}" title="${escapeHtml(checkTitle)}" ${canTest ? '' : 'disabled'}>CHECK</button><button class="small-button" type="button" data-action="copy-name" data-id="${item.id}" title="${localized('复制 OpenKeylet MCP 使用提示', 'Copy OpenKeylet MCP use prompt')}" aria-label="${localized('复制 OpenKeylet MCP 使用提示', 'Copy OpenKeylet MCP use prompt')}">USE</button>` : ''}${item.passwordHistoryCount ? `<button class="small-button" type="button" data-action="history" data-id="${item.id}">HISTORY</button>` : ''}<button class="small-button delete" type="button" data-action="delete" data-id="${item.id}">DEL</button>
+        ${agentActions ? `<button class="small-button" type="button" data-action="test" data-id="${item.id}" title="${escapeHtml(checkTitle)}" ${canTest ? '' : 'disabled'}>CHECK</button><button class="small-button" type="button" data-action="copy-name" data-id="${item.id}" title="${localized('复制 OpenKeylet MCP 使用提示', 'Copy OpenKeylet MCP use prompt')}" aria-label="${localized('复制 OpenKeylet MCP 使用提示', 'Copy OpenKeylet MCP use prompt')}">USE</button>` : ''}
+        ${item.passwordHistoryCount ? `<button class="small-button" type="button" data-action="history" data-id="${item.id}">HISTORY</button>` : ''}
+        ${copyable ? `<button class="small-button" type="button" data-action="duplicate" data-id="${item.id}" title="${copyLabel}" aria-label="${copyLabel}">COPY</button>` : ''}
+        <button class="small-button delete" type="button" data-action="delete" data-id="${item.id}">DEL</button>
       </div>
     </article>`;
   }).join('');
@@ -3310,6 +3317,22 @@ document.addEventListener('click', async (event) => {
         await api.copyOwnerValue(`use ${item.name} in OpenKeylet MCP`, false);
         toast(localized('OpenKeylet MCP 使用提示已复制', 'OpenKeylet MCP use prompt copied'));
       } catch (error) { toast(cleanError(error), 'error'); }
+    }
+    if (action.dataset.action === 'duplicate' && item && !pendingItemCopies.has(item.id)) {
+      const epoch = ownerEpoch;
+      pendingItemCopies.add(item.id);
+      action.disabled = true;
+      try {
+        const copy = await api.duplicate(item.id, item.updatedAt);
+        if (epoch !== ownerEpoch) return;
+        await refresh();
+        if (epoch === ownerEpoch) toast(localized(`已复制为“${copy.name}”，副本默认停用`, `Copied as "${copy.name}". The copy is disabled.`));
+      } catch (error) {
+        if (epoch === ownerEpoch) toast(cleanError(error), 'error');
+      } finally {
+        pendingItemCopies.delete(item.id);
+        action.disabled = false;
+      }
     }
     if (action.dataset.action === 'test') {
       try { toast(publicMessage(await api.test(item.id), localized('连接测试完成', 'Connection test complete'))); await refresh(false); } catch (error) { toast(cleanError(error), 'error'); }

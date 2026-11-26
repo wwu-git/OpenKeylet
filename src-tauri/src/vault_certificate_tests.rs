@@ -40,6 +40,17 @@ fn allow(v: &Vault, id: Uuid) {
     v.change_signing_permissions(SigningPermissionChange::Enable(true))
         .unwrap();
 }
+
+#[test]
+fn duplicate_connection_rejects_certificate_authority_items() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::open(dir.path().into()).unwrap();
+    let id = fixture(&vault);
+    let source = vault.get_connection(id).unwrap();
+    assert!(vault.duplicate_connection(id, &source.stored.updated_at).is_err());
+    assert_eq!(vault.list_connections().unwrap().len(), 1);
+}
+
 #[test]
 fn authority_default_deny_grants_and_live_revocation() {
     let dir = tempfile::tempdir().unwrap();

@@ -693,6 +693,23 @@ async fn set_connection_enabled(
 }
 
 #[tauri::command]
+async fn duplicate_connection(
+    app: AppHandle,
+    runtime: State<'_, AppRuntime>,
+    id: Uuid,
+    expected_updated_at: String,
+) -> Result<PublicConnection, String> {
+    let owner = runtime.authorized_owner().await?;
+    let copy = runtime
+        .vault
+        .duplicate_connection(id, &expected_updated_at)
+        .map_err(command_error)?;
+    drop(owner);
+    emit_changed(&app);
+    Ok(copy)
+}
+
+#[tauri::command]
 async fn delete_connection(
     app: AppHandle,
     runtime: State<'_, AppRuntime>,
@@ -2091,6 +2108,7 @@ pub fn run_gui() -> Result<()> {
             discard_oci_key,
             reorder_connections,
             set_connection_enabled,
+            duplicate_connection,
             delete_connection,
             owner_trash,
             owner_restore_item,

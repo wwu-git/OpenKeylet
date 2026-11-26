@@ -24,6 +24,7 @@ use uuid::Uuid;
 
 const MAX_ACTIVITIES: usize = 3_000;
 const VAULT_VERSION: u8 = 18;
+const PROJECT_NAME_MAX_CHARS: usize = 80;
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -381,7 +382,7 @@ impl Vault {
         mut input: ConnectionInput,
     ) -> Result<OwnerEditorDraft> {
         input.secrets.oci = None;
-        input.name = checked_text(&input.name, "Project name", 80)?;
+        input.name = checked_text(&input.name, "Project name", PROJECT_NAME_MAX_CHARS)?;
         input.description = checked_text(&input.description, "Project description", 240)?;
         let id = id.unwrap_or_else(Uuid::new_v4);
         let updated_at = Utc::now().to_rfc3339();
@@ -769,7 +770,7 @@ impl Vault {
                 }
             }
 
-            input.name = checked_text(&input.name, "Project name", 80)?;
+            input.name = checked_text(&input.name, "Project name", PROJECT_NAME_MAX_CHARS)?;
             if input.name.is_empty() {
                 bail!("Project name cannot be empty");
             }
@@ -858,6 +859,45 @@ impl Vault {
 
     pub fn delete_connection(&self, id: Uuid) -> Result<()> {
         self.trash_connection(id, None)
+    }
+
+    pub(crate) fn duplicate_connection(
+        &self,
+        id: Uuid,
+        expected_updated_at: &str,
+    ) -> Result<PublicConnection> {
+        self.update_document_with_result(|document| {
+            let source = document
+                .connections
+                .iter()
+                .find(|item| item.id == id)
+                .context("Connection not found")?;
+            anyhow::ensure!(
+                source.updated_at == expected_updated_at,
+                "This item changed; refresh before copying it"
+            );
+            anyhow::ensure!(
+                source.certificate_authority.is_none() && source.item_type() != "passkey",
+                "CA and passkey items cannot be copied"
+            );
+
+            let mut secrets = self.decrypt_stored(source)?;
+            anyhow::ensure!(secrets.passkeys.is_empty(), "Passkey items cannot be copied");
+            secrets.password_history.clear();
+
+            let mut copy = source.clone();
+            let now = Utc::now().to_rfc3339();
+            copy.id = Uuid::new_v4();
+            copy.name = unique_import_name(&document.connections, &source.name);
+            copy.revision = 1;
+            copy.created_at = now.clone();
+            copy.updated_at = now;
+            copy.enabled = false;
+            copy.encrypted_secrets = self.inner.key.encrypt(&secrets)?;
+            let public = copy.public(Some(&secrets));
+            document.connections.push(copy);
+            Ok(public)
+        })
     }
 
     pub fn trash_connection(&self, id: Uuid, expected_updated_at: Option<&str>) -> Result<()> {
@@ -1930,10 +1970,12 @@ where
         return requested.to_owned();
     }
     let (base, mut index) = split_numbered_import_name(requested)
-        .map(|(base, index)| (base, index + 1))
+        .map(|(base, index)| (base, index as u128 + 1))
         .unwrap_or((requested, 2));
     loop {
-        let candidate = format!("{base}({index})");
+        let suffix = format!("({index})");
+        let base = clean_text(base, PROJECT_NAME_MAX_CHARS - suffix.len());
+        let candidate = format!("{base}{suffix}");
         if !exists(&candidate) {
             return candidate;
         }

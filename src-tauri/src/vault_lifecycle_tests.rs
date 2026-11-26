@@ -8,6 +8,58 @@ fn login(name: &str, password: &str, id: Option<Uuid>) -> ConnectionInput {
 }
 
 #[test]
+fn duplicate_connection_preserves_current_credentials_without_history_or_trust() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::open(directory.path().into()).unwrap();
+    let initial = vault.save_connection(login("Demo", "old-fixture", None)).unwrap();
+    let source = vault
+        .save_connection(login("Demo", "current-fixture", Some(initial.id)))
+        .unwrap();
+    vault.set_ssh_host_trust(
+        source.id,
+        "example.test",
+        22,
+        Some("SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+    ).unwrap();
+    let source_before = vault.get_connection(source.id).unwrap();
+    assert!(vault.duplicate_connection(source.id, "stale timestamp").is_err());
+    assert_eq!(vault.list_connections().unwrap().len(), 1);
+
+    let copy = vault.duplicate_connection(source.id, &source.updated_at).unwrap();
+    assert_ne!(copy.id, source.id);
+    assert_eq!(copy.name, "Demo(2)");
+    assert_eq!(copy.revision, 1);
+    assert!(!copy.enabled);
+    assert_eq!(copy.password_history_count, 0);
+    assert_eq!(copy.base_url, source.base_url);
+    let copy_connection = vault.get_connection(copy.id).unwrap();
+    assert_eq!(copy_connection.secrets.get("password"), Some("current-fixture"));
+    assert_ne!(copy_connection.stored.encrypted_secrets.nonce, source_before.stored.encrypted_secrets.nonce);
+    let trust = vault.ssh_host_trust().unwrap();
+    assert_eq!(trust.len(), 1);
+    assert_eq!(trust[0].item_id, source.id);
+
+    vault.save_connection(login(&copy.name, "changed-copy-fixture", Some(copy.id))).unwrap();
+    let source_after = vault.get_connection(source.id).unwrap();
+    assert_eq!(source_after.secrets.get("password"), Some("current-fixture"));
+    assert_eq!(source_after.secrets.password_history[0].password, "old-fixture");
+    vault.delete_connection(source.id).unwrap();
+    assert!(vault.duplicate_connection(source.id, &source.updated_at).is_err());
+}
+
+#[test]
+fn duplicate_connection_keeps_generated_names_unique_and_bounded() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::open(directory.path().into()).unwrap();
+    let name = "项".repeat(PROJECT_NAME_MAX_CHARS);
+    let source = vault.save_connection(login(&name, "synthetic", None)).unwrap();
+    let first = vault.duplicate_connection(source.id, &source.updated_at).unwrap();
+    let second = vault.duplicate_connection(source.id, &source.updated_at).unwrap();
+    assert_eq!(first.name, format!("{}(2)", "项".repeat(PROJECT_NAME_MAX_CHARS - 3)));
+    assert_eq!(second.name, format!("{}(3)", "项".repeat(PROJECT_NAME_MAX_CHARS - 3)));
+}
+
+#[test]
 fn reorder_connections_persists_without_changing_items() {
     let directory = tempfile::tempdir().unwrap();
     let vault = Vault::open(directory.path().into()).unwrap();
@@ -312,6 +364,9 @@ async fn browser_management_is_locked_and_deleted_passkeys_cannot_sign() {
         .into_iter()
         .find(|item| !item.passkeys.is_empty())
         .unwrap();
+    let before_copy = vault.list_connections().unwrap().len();
+    assert!(vault.duplicate_connection(passkey.id, &passkey.updated_at).is_err());
+    assert_eq!(vault.list_connections().unwrap().len(), before_copy);
     vault.delete_connection(passkey.id).unwrap();
     let request = json!({"rpId":"example.com","challenge":B64.encode([7;32])});
     assert!(

@@ -57,6 +57,16 @@ try {
         if (index<0) state.connections.push(item); else state.connections[index]=item;
         return item;
       }
+      if(command==="duplicate_connection") {
+        fixture.duplicateRequests ??= [];
+        fixture.duplicateRequests.push(structuredClone(args));
+        if (fixture.failDuplicate) throw Error("Synthetic copy failure");
+        const index = state.connections.findIndex(item => item.id === args.id);
+        const source = state.connections[index];
+        const copy = {...structuredClone(source), id:"fixture-duplicate", name:source.name+"(2)", enabled:false, passwordHistoryCount:0, passkeys:[]};
+        state.connections.splice(index+1, 0, copy);
+        return copy;
+      }
       if(command==="generate_password") return "Aa1!".repeat(32).slice(0,args.options.length);
       if(command==="copy_owner_value") {if(fixture.failCopy)throw Error("Copy failed");fixture.copies.push(args.value);return;}
       if(command==="quick_pair_browser") {fixture.pairings.push(args.port);if(fixture.failPairing)throw Error("Pairing failed");state.settings.browserEnabled=true;state.settings.browserPort=args.port;return;}
@@ -827,6 +837,45 @@ try {
   assert.equal(keyProject.modules.find(module => module.kind === 'privateKey').agentVisible, false);
   assert.deepEqual(await page.evaluate(() => fixture.savedSshTrust), {host:'ssh.example.test',port:22,sshJumpItemId:null,kind:'hostKey',fingerprint:sshFingerprint});
   assert.equal(Object.hasOwn(keyProject, 'pendingSshTrust'), false);
+  await projectSearch.press('Escape');
+  const sourceRow = page.locator('.connection-card').filter({hasText:'Synthetic SSH key project'}).first();
+  const sourceId = await sourceRow.getAttribute('data-item-id');
+  await page.evaluate(async id => {
+    const item = fixture.state.connections.find(item => item.id === id);
+    Object.assign(item, {capabilities:['ssh','fill'], canTest:true, passwordHistoryCount:1});
+    await refresh();
+  }, sourceId);
+  const source = await page.evaluate(id => fixture.state.connections.find(item => item.id === id), sourceId);
+  const clipboardCount = await page.evaluate(() => fixture.copies.length);
+  const copyButton = sourceRow.locator('[data-action="duplicate"]');
+  const copiedRow = page.locator('.connection-card[data-item-id="fixture-duplicate"]');
+  await page.evaluate(() => { fixture.failDuplicate = true; });
+  await copyButton.click();
+  await page.locator('#toast-region').getByText('Synthetic copy failure').waitFor();
+  assert.equal(await copiedRow.count(), 0);
+  await page.evaluate(() => { fixture.failDuplicate = false; });
+  await copyButton.click();
+  await copiedRow.waitFor({state:'visible'});
+  assert.match(await copiedRow.locator('.connection-name').textContent(), /Synthetic SSH key project\(2\)/);
+  assert.equal(await copiedRow.locator('.item-toggle').getAttribute('aria-pressed'), 'false');
+  assert.equal(await sourceRow.locator('.item-toggle').getAttribute('aria-pressed'), 'true');
+  assert.deepEqual(await page.evaluate(() => fixture.duplicateRequests), Array(2).fill({id:sourceId,expectedUpdatedAt:source.updatedAt}));
+  assert.equal(await page.evaluate(() => fixture.copies.length), clipboardCount);
+  assert.deepEqual(await sourceRow.locator('.card-actions .small-button').allTextContents(), ['CHECK','USE','HISTORY','COPY','DEL']);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  await page.locator('[data-page="settings"]').click();
+  await page.locator('#item-layout').selectOption('grid');
+  await page.locator('[data-page="connections"]').click();
+  const controlsFit = row => row.locator('.card-actions').evaluate(actions => {
+    const card = actions.closest('.connection-card').getBoundingClientRect();
+    return [...actions.querySelectorAll('button')].every(button => {
+      const bounds = button.getBoundingClientRect();
+      return bounds.left >= card.left && bounds.right <= card.right + 1 && bounds.bottom <= card.bottom + 1;
+    });
+  });
+  assert.ok(await controlsFit(sourceRow), 'Copy and other actions fit in the 460px grid layout');
+  await page.setViewportSize({width:690,height:1000});
+  assert.ok(await controlsFit(sourceRow), 'Copy and other actions fit in the two-column grid layout');
   assert.deepEqual(errors,[]);
   console.log(JSON.stringify({ok:true,checks:["combined add/draft selector","draft preservation and recovery","card editor","encrypted field payload","one header search and filter panel with Ctrl/Cmd+F and independent page queries","multiple host and URL addresses, default switching, removal, drafts, failed save and address search","combined keyword, type, exact folder and enabled status filters","unsaved edits survive filtering and are saved as drafts","460px filter controls","multiline secure note","generator inserts password","browser address copy, pairing, launch failures and recovery","backup password flow","multiple website rules","migration preview/cancel/commit","committed .env template copy and undo","KeePass XML preview, cancel and confirmation","1Password 1PUX preview, cancel and confirmation","1Password CSV preview, cancel and confirmation","offline cURL preview, cancel, rejection and confirmation","AWS profile preview, cancel, selective import and undo","password history","trash restore and purge from settings","narrow layout"],artifacts},null,2));
 } finally {await browser.close();server.close();}
