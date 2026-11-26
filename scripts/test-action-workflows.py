@@ -85,6 +85,16 @@ def verify(binary, directory, address, requests):
         tools = session.rpc("tools/list", {})["tools"]
         action_tool = next(tool for tool in tools if tool["name"] == "action_capabilities")
         assert action_tool["inputSchema"]["type"] == "object"
+        guide_tool = next(tool for tool in tools if tool["name"] == "usage_guide")
+        assert guide_tool["annotations"]["readOnlyHint"] is True
+        assert guide_tool["annotations"]["openWorldHint"] is False
+        initial_guide = session.tool("usage_guide")
+        assert not initial_guide.get("isError")
+        guide = initial_guide["structuredContent"]["guide"]
+        assert "action_capabilities" in guide and "ssh_run" in guide
+        assert "sudo -S -p '' -- ls" in guide
+        assert r"{{openkeylet:password}}\n" in guide
+        assert r"{{openkeylet:sudoPassword}}\n" in guide
         ssh_tool = next(tool for tool in tools if tool["name"] == "ssh_run")
         for guidance in [session.info["instructions"], ssh_tool["description"]]:
             assert "sudo -S -p '' -- ls" in guidance
@@ -123,8 +133,11 @@ def verify(binary, directory, address, requests):
         assert select_project()["status"] == "chooseProject"
 
         session.data("items_search", query="Cloud Two")
+        assert session.tool("usage_guide") == initial_guide
+        assert requests == []
         active = select_project()
         assert active["project"]["id"] == second["id"] and active["project"]["selection"] == "session"
+        print("PASS: usage_guide works without projects and leaves the selected project untouched")
 
         requested_id = select_project(itemId=first["id"])["project"]["id"]
         session.data("items_update", id=first["id"], expectedRevision=first["revision"],

@@ -1346,6 +1346,25 @@ struct OkOutput {
 
 const SSH_SUDO_GUIDANCE: &str = r#"SSH sudo: use ssh_run with command "sudo -S -p '' -- <command>" and pass the saved sudo password in stdin with a trailing newline. For example, {"item":"Staging Gateway","command":"sudo -S -p '' -- ls","stdin":"{{openkeylet:password}}\n"}. With SSH password authentication, use the password module if SSH and sudo share a password, or reference the exact name of a separate sudo secret, e.g. "{{openkeylet:sudoPassword}}\n". With SSH private-key authentication, the private key authenticates SSH; the password module or the named sudo secret authenticates sudo. Leave those modules hidden. Pass the placeholder in stdin, never the password in the command or chat. sudo -n exits if a password is needed; use -S for the authorized sudo command. If authentication fails, report the error rather than retrying with guessed secrets."#;
 
+const USAGE_GUIDE: &str = "## Choose a project
+Pass the exact project name when the user supplies it. Use items_search to discover projects, inspect modules, or resolve ambiguity. Use action_capabilities to preview a supported action and obtain its next call. Only execute the operation the user requested.
+
+## Use credentials
+- SSH uses ssh_run. SFTP uses ssh_upload or ssh_download. Select the target project to use its saved jump route. If host trust is missing or mismatched, ask the user to verify and confirm the fingerprint locally.
+- APIs use action_capabilities with httpRequest or nativeApi to plan a request and http_send to execute it. Use api_service_capabilities to check supported authentication.
+- Local commands use terminal_run. For an interactive terminal, use terminal_start, terminal_read, terminal_write, and terminal_stop.
+- credential_fill sends a saved value to a terminal, browser, or desktop target. Use {{openkeylet:module name}} in supported inputs. Keep hidden values out of chat.
+
+## Manage items and certificates
+- Check vault_write_capabilities before using items_create or items_update. The owner controls writable folders.
+- Use certificate_inspect or certificate_verify for public material. Check certificate_capabilities before certificate_issue.
+- Use action_capabilities with desktop for instructions on local flows such as importing vaults or restoring backups.";
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct UsageGuideOutput {
+    guide: String,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SshRunInput {
@@ -1840,6 +1859,18 @@ struct ApiServiceCapabilitiesInput {
 
 #[tool_router(router = tool_router)]
 impl VaultMcp {
+    #[tool(
+        name = "usage_guide",
+        description = "Read the local OpenKeylet guide for project selection, SSH and sudo, HTTP, terminal, credential fill, vault actions, and certificates. Takes no arguments and makes no connections.",
+        output_schema = rmcp::handler::server::tool::schema_for_type::<UsageGuideOutput>(),
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn usage_guide(&self) -> CallToolResult {
+        tool_success(UsageGuideOutput {
+            guide: format!("{USAGE_GUIDE}\n\n{SSH_SUDO_GUIDANCE}"),
+        })
+    }
+
     #[tool(
         name = "action_capabilities",
         description = "Preview the next step without executing it or changing session selection. Use selectProject, httpRequest, nativeApi, credentialFill, terminalRun, terminalOpen, terminalSession, vaultWrite or desktop. Returns a callable next step, eligible candidates, missing inputs, or desktop instructions.",
@@ -2891,7 +2922,7 @@ impl ServerHandler for VaultMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("openkeylet", env!("CARGO_PKG_VERSION")).with_title("OpenKeylet"))
-            .with_instructions(format!("{}\n\n{SSH_SUDO_GUIDANCE}",
+            .with_instructions(format!("Call usage_guide for the local OpenKeylet usage guide.\n\n{}\n\n{SSH_SUDO_GUIDANCE}",
             "OpenKeylet lets agents use locally saved credentials without receiving hidden plaintext. For a ready request with the exact project and target, use action_capabilities with httpRequest or nativeApi. The nativeApi workflows cover GitHub commits, OCI compartments and running instances, AWS EC2 running instances, Cloudflare zones and DNS, DigitalOcean Droplets, and Hetzner servers. API provider workflow: api_service_capabilities identifies a concrete API service, protocol support, required bindings and official documentation. AWS native aws-sigv4 uses awsBindings stable module IDs for serviceUrl, region, accessKeyId, secretAccessKey and optional sessionToken. Create ordinary modules, then bind returned IDs under normal write grants. The agent chooses operations, method, action/version, parameters and pagination; OpenKeylet validates supported provider/region targets, signs final bytes and sends one request without redirects/proxies. Native AWS supports a documented standard endpoint subset; S3, SigV4a, streaming, presigning and automatic credential refresh are excluded. Other vendor signatures and OAuth acquisition are not provided merely because a URL is recognized. GitHub/Cloudflare/DigitalOcean/Hetzner guides describe their distinct API/token boundaries. Do not infer all services from a company brand or send private keys/credential JSON as Bearer tokens. Certificate workflow: certificate_capabilities reports separately owner-granted CA kinds and TTL limits; certificate_inspect and certificate_verify operate on public material, and certificate_check_key compares a saved key locally. certificate_issue accepts public subject keys/CSRs only, a UUID requestId, concrete identities, purpose and ttlSeconds. Reuse the UUID only for identical retries; current grants are checked again before replay. CA-marked projects cannot be delegated through fill, HTTP, SSH, placeholders, secretEnv or terminals even if a module was marked visible. Agent cannot register/unmark a CA or edit signing grants. Existing CA bindings remain protected after module/type edits. Store SSH leaves as a standard sshCertificate module beside its matching privateKey, choose sshAuthType certificate; jump endpoints authenticate independently. Host CA trust requires explicit user confirmation of signer CA fingerprint for each exact item/host/port using the client or ssh-trust set-ca; never auto-trust from a probe. TLS verification does not check revocation. This does not sandbox arbitrary programs already having local-user file access. An explicit item or unique items_search result becomes the current project; later compatible actions may omit item, and a terminal keeps its own binding. When the user names a project and the action is clear, call it directly. Use items_search only for discovery, selection, inspection, or genuine ambiguity. For OCI, http_send is a general signed request executor. The agent reads the OCI API documentation and chooses operations, methods, parameters, pagination and filtering; OpenKeylet validates the target, signs locally and returns the response. items_search exposes non-secret ociContext.region and tenancyOcid. Use the relevant OCI APIs to discover named compartments or resources rather than asking the user for OCIDs that can be retrieved; ask when matches are ambiguous. Use an absolute regional OCI service URL when the API is not under the default Compute base. OCI requests stay within the configured region on HTTPS port 443, never follow redirects, and never use proxies. Resource permissions remain with OCI IAM. Do not bypass IAM denials or claim an empty root-compartment page means the tenancy has no instances. Each call sends one request; handle service pagination and filter returned data as required by the user. OCI signing fields are ordinary modules bound by stable module IDs. Module visibility controls all plaintext returned to the agent, including the signing key and OCI request context. Hidden modules can still be used locally without revealing plaintext. credential_fill understands common module phrases and may infer a sole secret; omit target to use the current running OpenKeylet terminal, otherwise a connected browser or foreground control, and use submit=true to complete the login. terminal_start makes the opened PTY current, so terminal_write, terminal_read, terminal_stop, and terminal credential fills should omit sessionId unless deliberately switching among multiple terminals. Use terminal_run for one-shot local commands and PTY tools only for persistent interaction. Direct {{openkeylet:module}} placeholders work in commands, stdin, paths, terminal input, SSH, and HTTP values; OpenKeylet substitutes and redacts them locally. terminal_run.stdin and ssh_run.stdin pass scripts, JSON, or other text without shell escaping or temporary files. Host and service URL modules may save other addresses in alternateValues; value is the default. Omitted SSH host or HTTP URL uses that default, relative HTTP paths use the default service URL, and explicit host or absolute URL selects another target only within the selected native provider target policy where applicable. Addresses share project credentials and SSH port; there is no automatic failover. A password or private-key project can use SSH without saved target metadata: pass host, optional port, and username at runtime; saved values are defaults and port 22 is the fallback. For a saved SSH jump route, call ssh_run, ssh_upload, or ssh_download with target project B directly. OpenKeylet automatically routes through jump project A and authenticates each endpoint with its own credentials. items_search exposes the saved route; items_create/items_update configure sshJumpItemId under the existing write permissions and revision rules. If a plain-key fingerprint or explicitly trusted host CA is missing or mismatched, stop and ask the user to verify it against a trusted source and confirm it through the OpenKeylet client or local ssh-trust CLI, confirming A before probing B when needed. Never auto-trust keys or bypass the route with a direct or nested ssh connection. Use secretEnv only when a program needs an environment variable, and HTTP secretBindings only for aliases. Never ask the user to reveal a hidden value. terminal_read.until waits without polling and has no deadline unless waitSeconds is supplied. For vault writing, consult vault_write_capabilities, then items_create/items_update. Writing requires desktop folder authorization, uses stable project/module IDs and expectedRevision, and cannot change visibility. Never echo submitted secrets. OpenKeylet has no observation, diagnostic, restricted, or execution modes.",
         ))
     }
@@ -4504,6 +4535,7 @@ mod tests {
     fn tool_contracts_have_output_schemas_and_annotations() {
         let router = VaultMcp::tool_router();
         let expected = [
+            ("usage_guide", true, false, true, false),
             ("items_search", true, false, true, false),
             ("vault_write_capabilities", true, false, true, false),
             ("items_create", false, false, false, false),
