@@ -4,7 +4,7 @@ function createCertificatePanel({ invoke, getState, isUnlocked, localized: l, es
   let busy = false;
   let epoch = 0;
   const q = selector => panel.querySelector(selector);
-  const label = (id, text, control) => `<label class="field"><span>${text}</span>${control.replace('id="x"', `id="${id}"`)}</label>`;
+  const label = (id, text, control) => `<label class="field"><span id="${id}-label">${text}</span>${control.replace('id="x"', `id="${id}"`)}</label>`;
   const select = (id, text) => label(id, text, '<select class="input" id="x"></select>');
   const field = (id, text, attributes = '') => label(id, text, `<input class="input" id="x" ${attributes}>`);
   const area = (id, text, attributes = '') => label(id, text, `<textarea class="input textarea" id="x" rows="5" maxlength="1048576" autocomplete="off" spellcheck="false" ${attributes}></textarea>`);
@@ -18,22 +18,44 @@ function createCertificatePanel({ invoke, getState, isUnlocked, localized: l, es
       <div class="button-row">${button('certificate-register', l('注册 CA', 'Register CA'))}${button('certificate-unregister', l('解除 CA 用途限制', 'Unregister CA'))}</div>
       <div class="field-grid two">${select('certificate-grant-kind', l('允许签发的用途', 'Allowed certificate purpose'))}${field('certificate-max-ttl', l('最长有效秒数', 'Maximum lifetime in seconds'), 'type="number" min="1" max="31622400" value="3600"')}</div>${button('certificate-allow', l('替换为此用途授权', 'Replace grant with this purpose'))}
     </details>
-    <details><summary>${l('校验和签发', 'Check and issue')}</summary>
-      <p>${l('这里只提交公钥、CSR 和证书。私钥从所选项目读取，不会显示。签发结果不会自动部署。', 'Supply public keys, CSRs and certificates only. Private keys stay in the selected project. Results are not deployed automatically.')}</p>
-      ${select('certificate-operation-item', l('私钥或 CA 项目', 'Private key or CA project'))}${select('certificate-kind', l('证书用途', 'Certificate purpose'))}
-      ${area('certificate-payload', l('待签公钥 / CSR，或待验证证书', 'Public key / CSR to sign, or certificate to verify'))}
-      ${field('certificate-names', l('身份名称，逗号分隔', 'Identities, comma separated'))}
+    <details id="certificate-issue-panel"><summary>${l('签发证书', 'Issue certificate')}</summary>
+      ${select('certificate-issue-item', l('已注册的 CA 项目', 'Registered CA project'))}${select('certificate-issue-kind', l('证书用途', 'Certificate purpose'))}
+      ${area('certificate-issue-payload', l('待签 SSH 公钥', 'SSH public key to sign'))}
+      ${field('certificate-issue-names', l('身份名称，逗号分隔', 'Identities, comma separated'))}
       <div class="field-grid two">${field('certificate-key-id', 'SSH key ID')}${field('certificate-ttl', l('有效秒数', 'Lifetime in seconds'), 'type="number" min="1" max="31622400" value="3600"')}</div>
       ${field('certificate-request-id', l('签发请求 UUID，重试保留同一值', 'Issuance request UUID, preserve when retrying'))}
-      ${area('certificate-authority-input', l('验证所信任的 CA 公钥 / CA 证书', 'Trusted CA public key / CA certificate'))}
+      <div class="button-row">${button('certificate-issue', l('签发证书', 'Issue certificate'))}${button('certificate-new-request', l('新请求 ID', 'New request ID'))}</div>
+      ${area('certificate-issue-result', l('签发结果', 'Issuance result'), 'readonly')}
+    </details>
+    <details id="certificate-verify-panel"><summary>${l('验证证书', 'Verify certificate')}</summary>
+      ${select('certificate-verify-kind', l('证书用途', 'Certificate purpose'))}
+      ${area('certificate-verify-payload', l('待验证证书', 'Certificate to verify'))}
+      ${field('certificate-verify-identity', l('要验证的身份，填一个', 'Identity to verify, enter one'))}
+      ${area('certificate-authority-input', l('受信任的 CA 公钥', 'Trusted CA public key'))}
       ${area('certificate-intermediates', l('TLS 中间证书链，可选', 'TLS intermediate chain, optional'))}
-      <div class="button-row">${button('certificate-match', l('检查密钥匹配', 'Check key match'))}${button('certificate-verify', l('验证证书', 'Verify certificate'))}${button('certificate-issue', l('签发证书', 'Issue certificate'))}${button('certificate-new-request', l('新请求 ID', 'New request ID'))}</div>
-      ${area('certificate-result', l('结果', 'Result'), 'readonly')}
+      <div class="button-row">${button('certificate-verify', l('验证证书', 'Verify certificate'))}</div>
+      ${area('certificate-verify-result', l('验证结果', 'Verification result'), 'readonly')}
+    </details>
+    <details id="certificate-match-panel"><summary>${l('检查密钥匹配', 'Check key match')}</summary>
+      ${select('certificate-match-item', l('私钥所在项目', 'Project containing the private key'))}
+      ${area('certificate-match-payload', l('待匹配的公钥或证书', 'Public key or certificate to match'))}
+      <div class="button-row">${button('certificate-match', l('检查密钥匹配', 'Check key match'))}</div>
+      ${area('certificate-match-result', l('匹配结果', 'Key match result'), 'readonly')}
     </details>`;
   const kinds = [['sshUser', l('SSH 用户', 'SSH user')], ['sshHost', l('SSH 主机', 'SSH host')], ['tlsServer', l('TLS 服务端', 'TLS server')], ['tlsClient', l('TLS 客户端', 'TLS client')]];
-  for (const selector of ['#certificate-kind', '#certificate-grant-kind']) q(selector).replaceChildren(...kinds.map(([value, text]) => new Option(text, value)));
+  for (const selector of ['#certificate-issue-kind', '#certificate-verify-kind', '#certificate-grant-kind']) q(selector).replaceChildren(...kinds.map(([value, text]) => new Option(text, value)));
   q('#certificate-ca-kind').replaceChildren(new Option('SSH', 'ssh'), new Option('TLS', 'tls'));
   q('#certificate-request-id').value = crypto.randomUUID();
+  function renderIssueFields() {
+    const ssh = q('#certificate-issue-kind').value.startsWith('ssh');
+    q('#certificate-key-id').closest('label').classList.toggle('hidden', !ssh);
+    q('#certificate-issue-payload-label').textContent = ssh ? l('待签 SSH 公钥', 'SSH public key to sign') : l('待签 TLS CSR（PEM）', 'TLS CSR to sign (PEM)');
+  }
+  function renderVerifyFields() {
+    const tls = q('#certificate-verify-kind').value.startsWith('tls');
+    q('#certificate-intermediates').closest('label').classList.toggle('hidden', !tls);
+    q('#certificate-authority-input-label').textContent = tls ? l('受信任的 CA 证书（PEM）', 'Trusted CA certificate (PEM)') : l('受信任的 CA 公钥', 'Trusted CA public key');
+  }
   function options(select, entries, empty) {
     const prior = select.value;
     select.replaceChildren(new Option(empty, ''), ...entries.map(([id, name]) => new Option(name, id)));
@@ -51,10 +73,15 @@ function createCertificatePanel({ invoke, getState, isUnlocked, localized: l, es
     }
   }
   function render() {
-    const entries = getState().connections.map(item => [item.id, item.name]);
+    const connections = getState().connections;
+    const entries = connections.map(item => [item.id, item.name]);
+    const issuers = connections.filter(item => item.certificateAuthority).map(item => [item.id, item.name]);
     options(q('#certificate-item'), entries, l('选择已保存项目', 'Select a saved project'));
-    options(q('#certificate-operation-item'), entries, l('选择已保存项目', 'Select a saved project'));
+    options(q('#certificate-issue-item'), issuers, l('选择已注册的 CA', 'Select a registered CA'));
+    options(q('#certificate-match-item'), entries, l('选择已保存项目', 'Select a saved project'));
     modules();
+    renderIssueFields();
+    renderVerifyFields();
   }
   async function load() {
     if (!isUnlocked()) return;
@@ -86,7 +113,7 @@ function createCertificatePanel({ invoke, getState, isUnlocked, localized: l, es
     q('#certificate-enabled').checked = false;
     q('#certificate-status').replaceChildren();
     q('#certificate-grants').replaceChildren();
-    for (const id of ['payload', 'names', 'key-id', 'authority-input', 'intermediates', 'result']) q(`#certificate-${id}`).value = '';
+    for (const control of panel.querySelectorAll('#certificate-issue-panel textarea, #certificate-issue-names, #certificate-key-id, #certificate-verify-panel textarea, #certificate-verify-identity, #certificate-match-panel textarea')) control.value = '';
     q('#certificate-request-id').value = crypto.randomUUID();
   }
   function pemCertificates(text) {
@@ -102,8 +129,9 @@ function createCertificatePanel({ invoke, getState, isUnlocked, localized: l, es
     if (!target) return;
     void run(async current => {
       const id = target.id;
-      const showResult = result => { if (current()) q('#certificate-result').value = JSON.stringify(result, null, 2); };
-      if (['certificate-match', 'certificate-verify', 'certificate-issue'].includes(id)) q('#certificate-result').value = '';
+      const resultField = q(`#${id}-result`);
+      const showResult = result => { if (current()) resultField.value = JSON.stringify(result, null, 2); };
+      if (resultField) resultField.value = '';
       if (target.dataset.removeSigning) await invoke('certificate_permissions', { id: target.dataset.removeSigning });
       else if (id === 'certificate-register') {
         await invoke('set_certificate_authority', { id: selected('#certificate-item'), binding: { kind: q('#certificate-ca-kind').value, privateKey: selected('#certificate-private-key'), caCertificate: q('#certificate-ca-kind').value === 'tls' ? selected('#certificate-ca-module') : null } });
@@ -113,18 +141,29 @@ function createCertificatePanel({ invoke, getState, isUnlocked, localized: l, es
         await refresh();
       } else if (id === 'certificate-allow') await invoke('certificate_permissions', { id: selected('#certificate-item'), kinds: [q('#certificate-grant-kind').value], maxTtlSeconds: Number(q('#certificate-max-ttl').value) });
       else if (id === 'certificate-new-request') q('#certificate-request-id').value = crypto.randomUUID();
-      else if (id === 'certificate-match') showResult(await invoke('certificate_key_check', { id: selected('#certificate-operation-item'), publicOrCertificate: q('#certificate-payload').value }));
-      else if (id === 'certificate-verify') showResult(await invoke('certificate_verify', { request: { certificate: q('#certificate-payload').value, authorities: [q('#certificate-authority-input').value], intermediates: pemCertificates(q('#certificate-intermediates').value), identity: q('#certificate-names').value.trim(), kind: q('#certificate-kind').value } }));
-      else if (id === 'certificate-issue') {
-        const kind = q('#certificate-kind').value;
-        const names = q('#certificate-names').value.split(',').map(value => value.trim()).filter(Boolean);
-        const request = kind.startsWith('ssh') ? { kind, publicKey: q('#certificate-payload').value, principals: names, keyId: q('#certificate-key-id').value, ...(kind === 'sshUser' ? { extensions: [] } : {}) } : { kind, csr: q('#certificate-payload').value, names };
-        showResult(await invoke('certificate_issue', { id: selected('#certificate-operation-item'), requestId: q('#certificate-request-id').value, request, ttlSeconds: Number(q('#certificate-ttl').value) }));
+      else if (id === 'certificate-match') showResult(await invoke('certificate_key_check', { id: selected('#certificate-match-item'), publicOrCertificate: q('#certificate-match-payload').value }));
+      else if (id === 'certificate-verify') {
+        const kind = q('#certificate-verify-kind').value;
+        showResult(await invoke('certificate_verify', { request: {
+          kind,
+          certificate: q('#certificate-verify-payload').value,
+          authorities: [q('#certificate-authority-input').value],
+          intermediates: kind.startsWith('tls') ? pemCertificates(q('#certificate-intermediates').value) : [],
+          identity: q('#certificate-verify-identity').value.trim(),
+        } }));
+      } else if (id === 'certificate-issue') {
+        const kind = q('#certificate-issue-kind').value;
+        const names = q('#certificate-issue-names').value.split(',').map(value => value.trim()).filter(Boolean);
+        const payload = q('#certificate-issue-payload').value;
+        const request = kind.startsWith('ssh') ? { kind, publicKey: payload, principals: names, keyId: q('#certificate-key-id').value, ...(kind === 'sshUser' ? { extensions: [] } : {}) } : { kind, csr: payload, names };
+        showResult(await invoke('certificate_issue', { id: selected('#certificate-issue-item'), requestId: q('#certificate-request-id').value, request, ttlSeconds: Number(q('#certificate-ttl').value) }));
       }
       if (current()) await load();
     });
   });
   q('#certificate-item').addEventListener('change', modules);
+  q('#certificate-issue-kind').addEventListener('change', renderIssueFields);
+  q('#certificate-verify-kind').addEventListener('change', renderVerifyFields);
   q('#certificate-enabled').addEventListener('change', () => { const enabled = q('#certificate-enabled').checked; void run(async current => { try { await invoke('certificate_permissions', { enabled }); } finally { if (current()) await load(); } }); });
   panel.addEventListener('toggle', () => { if (!busy) void run(load); }, true);
   render();
