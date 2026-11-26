@@ -2002,8 +2002,21 @@ function renderHttpAuthentication() {
   const select = $('#http-auth-type');
   if (!select) return;
   const selected = editorHttpAuthType || 'auto';
-  const existingModes = [...new Set([selected, editorSourceInput?.httpAuthType])].filter(mode => mode && !['auto', 'oci-signature', 'aws-sigv4'].includes(mode));
-  select.innerHTML = `<option value="auto">${localized('自动', 'Automatic')}</option><option value="oci-signature">OCI API</option><option value="aws-sigv4">AWS SigV4</option>${existingModes.map(mode => `<option value="${escapeHtml(mode)}">${escapeHtml(mode)}</option>`).join('')}`;
+  const options = new Map([
+    ['auto', localized('自动', 'Automatic')],
+    ['basic', localized('Basic（账号密码）', 'Basic (username and password)')],
+    ['bearer', 'Bearer Token'],
+    ['apiKey', 'API Key'],
+    ['custom', localized('自定义认证头', 'Custom authentication headers')],
+    ['aws-sigv4', 'AWS SigV4'],
+    ['oci-signature', localized('OCI API 签名', 'OCI API signing')],
+  ]);
+  for (const mode of [selected, editorSourceInput?.httpAuthType]) {
+    if (mode && !options.has(mode)) options.set(mode, mode);
+  }
+  select.innerHTML = Array.from(options, ([mode, label]) =>
+    `<option value="${escapeHtml(mode)}">${escapeHtml(label)}</option>`
+  ).join('');
   select.value = selected;
   $('#oci-bindings').classList.toggle('hidden', selected !== 'oci-signature');
   $('#oci-binding-fields').innerHTML = renderAuthBindingFields(OCI_BINDING_FIELDS, editorOciBindings, 'data-oci-binding');

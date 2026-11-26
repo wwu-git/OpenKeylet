@@ -934,9 +934,19 @@ try {
     await page.evaluate(async () => { fixture.state.connections.find(item => item.id === 'alpha').httpAuthType = 'basic'; await refresh(false); });
     await toggle('alpha').click();
     assert.equal(await page.locator('#http-auth-type').inputValue(), 'basic');
+    assert.deepEqual(
+      (await page.locator('#http-auth-type option').evaluateAll(options => options.map(option => option.value))).sort(),
+      ['apiKey', 'auto', 'aws-sigv4', 'basic', 'bearer', 'custom', 'oci-signature'],
+    );
     await page.locator('#http-auth-type').selectOption('oci-signature');
     await page.locator('#http-auth-type').selectOption('basic');
     assert.equal(await page.locator('#http-auth-type').inputValue(), 'basic');
+    await page.locator('#http-auth-type').selectOption('bearer');
+    await page.locator('#save-connection-button').click();
+    await editor.waitFor({ state: 'hidden' });
+    assert.equal(await page.evaluate(() => fixture.saved.at(-1).httpAuthType), 'bearer');
+    await toggle('alpha').click();
+    assert.equal(await page.locator('#http-auth-type').inputValue(), 'bearer');
     assert.deepEqual(errors, []);
     console.log(`OCI standard modules passed: ${artifacts}`);
   } else if (process.argv.includes('--readability')) {
